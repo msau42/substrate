@@ -154,14 +154,8 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// Tear down: the actor returns to "available". Best-effort; the snapshot is
 	// already on disk for atelet to ship.
 	tTeardown := time.Now()
-	s.teardownActor(ctx, actorUID, ra, client)
+	s.terminateWorkload(ctx, actorUID)
 	dTeardown := time.Since(tTeardown)
-	delete(s.running, actorUID)
-
-	// Tear down the per-activation actor network.
-	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
-		slog.WarnContext(ctx, "Failed to clean up actor network after checkpoint", slog.Any("err", err))
-	}
 
 	s.actorLogger.EmitLifecycleLog("Actor checkpointed", actorRef, actorUID, templateNS, templateName)
 	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", actorUID), slog.Any("snapshot_files", snapshotFiles),
@@ -288,5 +282,41 @@ func (s *AteomService) teardownActor(ctx context.Context, id string, ra *running
 	// Best-effort like the rest of teardown.
 	if err := imagecache.UnmountAllUnder(ateompath.OCIBundleDir(id)); err != nil {
 		slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays", slog.String("actorUID", id), slog.Any("err", err))
+	}
+}
+
+// TerminateWorkload stops the running actor, tears down its VMM, and cleans up
+// networking and overlays.
+func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.TerminateWorkloadRequest) (*ateompb.TerminateWorkloadResponse, error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
+	actorUID := req.GetActorUid()
+
+	s.terminateWorkload(ctx, actorUID)
+
+	s.actorLogger.EmitLifecycleLog("Actor terminated", actorRef, actorUID, req.GetActorTemplateNamespace(), req.GetActorTemplateName())
+
+	return &ateompb.TerminateWorkloadResponse{}, nil
+}
+
+func (s *AteomService) terminateWorkload(ctx context.Context, actorUID string) {
+	if err := s.deactivateActorNetworking(ctx); err != nil {
+		slog.WarnContext(ctx, "Failed to deactivate actor networking during terminate", slog.Any("err", err))
+	}
+
+	ra := s.running[actorUID]
+	chSocket := kata.CLHSocketPath(actorUID)
+	if ra != nil && ra.apiSocket != "" {
+		chSocket = ra.apiSocket
+	}
+	client := ch.NewClient(chSocket)
+
+	s.teardownActor(ctx, actorUID, ra, client)
+	delete(s.running, actorUID)
+
+	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
+		slog.WarnContext(ctx, "Failed to clean up actor network during terminate", slog.Any("err", err))
 	}
 }

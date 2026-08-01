@@ -403,26 +403,7 @@ func (s *AteomService) CheckpointWorkload(ctx context.Context, req *ateompb.Chec
 	// control server for state/delete calls. Keep this as best-effort cleanup:
 	// atelet resets the actor runsc, bundle, pidfile, and checkpoint
 	// directories after uploading the snapshot.
-	if err := rcmd.cleanupContainersAfterCheckpoint(ctx, req.GetSpec().GetContainers()); err != nil {
-		slog.WarnContext(ctx, "Failed to clean up runsc containers after checkpoint",
-			"actor", actorRef,
-			"actorUID", req.GetActorUid(),
-			"err", err)
-	}
-
-	// Detach the overlay rootfs mounts before atelet wipes the bundle dirs
-	// (deleting a bundle out from under a live mount in this namespace would
-	// leave the mount orphaned until the pod restarts). Best-effort, same as
-	// the container cleanup above.
-	if err := imagecache.UnmountAllUnder(ateompath.OCIBundleDir(req.GetActorUid())); err != nil {
-		slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays after checkpoint",
-			"actorUID", req.GetActorUid(),
-			"err", err)
-	}
-
-	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
-		slog.WarnContext(ctx, "Failed to clean up actor network after checkpoint", slog.Any("err", err))
-	}
+	s.terminateWorkload(ctx, actorRef, req.GetActorUid(), req.GetRunscPath(), req.GetSpec().GetContainers())
 
 	// Report exactly the files runsc wrote so atelet ships precisely this set
 	// (checkpoint.img plus any pages images), rather than a hardcoded list.
@@ -592,6 +573,48 @@ func (s *AteomService) RestoreWorkload(ctx context.Context, req *ateompb.Restore
 	s.actorLogger.EmitLifecycleLog("Actor restored", actorRef, req.GetActorUid(), req.GetActorTemplateNamespace(), req.GetActorTemplateName())
 
 	return &ateompb.RestoreWorkloadResponse{}, nil
+}
+
+func (s *AteomService) TerminateWorkload(ctx context.Context, req *ateompb.TerminateWorkloadRequest) (*ateompb.TerminateWorkloadResponse, error) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	actorRef := resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}
+
+	// TODO: consider if this should be a hard failure for the terminate case
+	s.terminateWorkload(ctx, actorRef, req.GetActorUid(), req.GetRunscPath(), req.GetSpec().GetContainers())
+
+	s.actorLogger.EmitLifecycleLog("Actor terminated", actorRef, req.GetActorUid(), req.GetActorTemplateNamespace(), req.GetActorTemplateName())
+
+	return &ateompb.TerminateWorkloadResponse{}, nil
+}
+
+func (s *AteomService) terminateWorkload(ctx context.Context, actorRef resources.ActorRef, actorUID, runscPath string, containers []*ateompb.Container) {
+	if err := s.deactivateActorNetworking(ctx); err != nil {
+		slog.WarnContext(ctx, "Failed to deactivate actor networking during terminate", slog.Any("err", err))
+	}
+
+	rcmd := &runsc{
+		path:     runscPath,
+		actorUID: actorUID,
+	}
+
+	if err := rcmd.cleanupContainersAfterCheckpoint(ctx, containers); err != nil {
+		slog.WarnContext(ctx, "Failed to clean up runsc containers during terminate",
+			"actor", actorRef,
+			"actorUID", actorUID,
+			"err", err)
+	}
+
+	if err := imagecache.UnmountAllUnder(ateompath.OCIBundleDir(actorUID)); err != nil {
+		slog.WarnContext(ctx, "Failed to unmount bundle rootfs overlays during terminate",
+			"actorUID", actorUID,
+			"err", err)
+	}
+
+	if err := ateomnet.CleanupActorNetwork(ctx, s.interiorNetNS); err != nil {
+		slog.WarnContext(ctx, "Failed to clean up actor network during terminate", slog.Any("err", err))
+	}
 }
 
 func (s *AteomService) activateActorNetworking(atespace, actorName string, actorVersion int64, egressGatewayAddress string) error {
