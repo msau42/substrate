@@ -233,26 +233,9 @@ func (s *FinalizeSuspendedStep) Execute(ctx context.Context, input *SuspendInput
 	}
 
 	// 1. Free the worker (if it hasn't been freed yet)
-	if assignment := latestActor.GetWorkerAssignment(); assignment != nil {
-		workerPod := assignment.GetWorkerPod()
-
-		worker, err := s.store.GetWorker(ctx, assignment.GetWorkerNamespace(), assignment.GetWorkerPool(), workerPod)
-		if err != nil {
-			if !errors.Is(err, store.ErrNotFound) {
-				return fmt.Errorf("while getting worker for release: %w", err)
-			}
-			slog.WarnContext(ctx, "Worker already gone during finalize suspend, skipping release", "worker", workerPod)
-		} else {
-			// Only free it if it still belongs to us
-			if wass := worker.Assignment; wass != nil {
-				if resources.ActorRefFromObjectRef(wass.Actor) == input.ActorRef {
-					worker.Assignment = nil
-					err = s.store.UpdateWorker(ctx, worker, worker.Version)
-					if err != nil {
-						return err
-					}
-				}
-			}
+	if latestActor.GetWorkerAssignment() != nil {
+		if err := releaseWorker(ctx, s.store, latestActor); err != nil {
+			return err
 		}
 
 		// 2. Clear the actor's assignment, now that the worker is freed

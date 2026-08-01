@@ -281,10 +281,11 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 }
 
 // DeleteActor executes the workflow to delete an actor. Idempotent.
-func (w *ActorWorkflow) DeleteActor(ctx context.Context, atespace, name string) (*ateapipb.Actor, error) {
+func (w *ActorWorkflow) DeleteActor(ctx context.Context, atespace, name string, force bool) (*ateapipb.Actor, error) {
 	actorRef := resources.ActorRef{Atespace: atespace, Name: name}
 	input := &DeleteInput{
 		ActorRef: actorRef,
+		Force:    force,
 	}
 	state := &DeleteState{}
 
@@ -295,7 +296,11 @@ func (w *ActorWorkflow) DeleteActor(ctx context.Context, atespace, name string) 
 	defer lock.Close()
 
 	steps := []WorkflowStep[*DeleteInput, *DeleteState]{
-		&LoadActorForDeleteStep{store: w.store},
+		&LoadActorForDeleteStep{store: w.store, actorTemplateLister: w.actorTemplateLister},
+		&MarkTerminatingStep{store: w.store},
+		&CallAteletTerminateStep{store: w.store, dialer: w.dialer},
+		&DetachVolumesForDeleteStep{store: w.store},
+		&ReleaseWorkerStep{store: w.store},
 		&MarkDeletingStep{store: w.store},
 		&DeleteVolumesStep{store: w.store},
 		&FinalizeDeletedStep{store: w.store},

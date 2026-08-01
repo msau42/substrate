@@ -26,6 +26,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/volume"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
@@ -205,5 +207,139 @@ func TestDeleteActor_MultipleVolumeDeletionFailures(t *testing.T) {
 	errMsg := err.Error()
 	if !strings.Contains(errMsg, "storage-vol-1") || !strings.Contains(errMsg, "storage-vol-2") {
 		t.Errorf("expected error message to contain both volume failure details, got: %v", errMsg)
+	}
+}
+
+func TestDeleteActor_Force_Success(t *testing.T) {
+	ns := namespaceForTest("ns-delete-force-succ")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+	createTemplate(t, tc, ns)
+	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	runningActor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace: testAtespace,
+			Name:     "running-actor",
+		},
+		Status:                 ateapipb.Actor_STATUS_RUNNING,
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+		WorkerAssignment: &ateapipb.WorkerAssignment{
+			WorkerNamespace: ns,
+			WorkerPod:       "worker-1",
+			WorkerPool:      "pool1",
+		},
+	}
+	if _, err := tc.persistence.CreateActor(context.Background(), runningActor); err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+
+	worker, err := tc.persistence.GetWorker(context.Background(), ns, "pool1", "worker-1")
+	if err != nil {
+		t.Fatalf("GetWorker: %v", err)
+	}
+	worker.Assignment = &ateapipb.Assignment{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "running-actor"},
+	}
+	if err := tc.persistence.UpdateWorker(context.Background(), worker, worker.Version); err != nil {
+		t.Fatalf("UpdateWorker: %v", err)
+	}
+
+	deleted, err := tc.service.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "running-actor"},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("DeleteActor with force failed: %v", err)
+	}
+	if deleted.GetMetadata().GetName() != "running-actor" {
+		t.Errorf("deleted actor name = %q, want %q", deleted.GetMetadata().GetName(), "running-actor")
+	}
+
+	// Verify actor is removed from store
+	if _, err := tc.persistence.GetActor(context.Background(), resources.ActorRef{Atespace: testAtespace, Name: "running-actor"}); err == nil {
+		t.Errorf("expected actor to be deleted from store, but it still exists")
+	}
+
+	// Verify worker assignment is cleared
+	w, err := tc.persistence.GetWorker(context.Background(), ns, "pool1", "worker-1")
+	if err != nil {
+		t.Fatalf("GetWorker after delete failed: %v", err)
+	}
+	if w.Assignment != nil {
+		t.Errorf("expected worker assignment to be nil, got: %v", w.Assignment)
+	}
+
+	// Verify atelet Terminate was called
+	if !tc.fakeAtelet.TerminateCalled {
+		t.Errorf("expected atelet Terminate to be called for force delete")
+	}
+}
+
+func TestDeleteActor_Force_SuspendedAllowed(t *testing.T) {
+	ns := namespaceForTest("ns-delete-force-susp")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+	createTemplate(t, tc, ns)
+
+	suspendedActor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace: testAtespace,
+			Name:     "suspended-actor",
+		},
+		Status:                 ateapipb.Actor_STATUS_SUSPENDED,
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+	}
+	if _, err := tc.persistence.CreateActor(context.Background(), suspendedActor); err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+
+	deleted, err := tc.service.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "suspended-actor"},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("expected DeleteActor with force on suspended actor to succeed, got: %v", err)
+	}
+	if deleted.GetMetadata().GetName() != "suspended-actor" {
+		t.Errorf("deleted.Name = %q, want %q", deleted.GetMetadata().GetName(), "suspended-actor")
+	}
+}
+
+func TestDeleteActor_Force_WorkerNotFound(t *testing.T) {
+	ns := namespaceForTest("ns-delete-force-noworker")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+	createTemplate(t, tc, ns)
+
+	runningActor := &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{
+			Atespace: testAtespace,
+			Name:     "running-actor",
+		},
+		Status:                 ateapipb.Actor_STATUS_RUNNING,
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+		WorkerAssignment: &ateapipb.WorkerAssignment{
+			WorkerNamespace: ns,
+			WorkerPod:       "non-existent-worker",
+			WorkerPool:      "pool1",
+		},
+	}
+	if _, err := tc.persistence.CreateActor(context.Background(), runningActor); err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+
+	_, err := tc.service.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "running-actor"},
+		Force: true,
+	})
+	if err == nil {
+		t.Fatalf("expected DeleteActor with force on non-existent worker to fail, but it succeeded")
+	}
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("status.Code(err) = %v, want %v (err: %v)", status.Code(err), codes.NotFound, err)
 	}
 }

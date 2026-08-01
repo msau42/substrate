@@ -204,6 +204,7 @@ const (
 	Actor_STATUS_PAUSED      Actor_Status = 6
 	Actor_STATUS_CRASHED     Actor_Status = 7
 	Actor_STATUS_DELETING    Actor_Status = 8
+	Actor_STATUS_TERMINATING Actor_Status = 9
 )
 
 // Enum value maps for Actor_Status.
@@ -218,6 +219,7 @@ var (
 		6: "STATUS_PAUSED",
 		7: "STATUS_CRASHED",
 		8: "STATUS_DELETING",
+		9: "STATUS_TERMINATING",
 	}
 	Actor_Status_value = map[string]int32{
 		"STATUS_UNSPECIFIED": 0,
@@ -229,6 +231,7 @@ var (
 		"STATUS_PAUSED":      6,
 		"STATUS_CRASHED":     7,
 		"STATUS_DELETING":    8,
+		"STATUS_TERMINATING": 9,
 	}
 )
 
@@ -1873,6 +1876,7 @@ func (x *ResumeActorResponse) GetResumed() bool {
 type DeleteActorRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Actor         *ObjectRef             `protobuf:"bytes,1,opt,name=actor,proto3" json:"actor,omitempty"`
+	Force         bool                   `protobuf:"varint,2,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1912,6 +1916,13 @@ func (x *DeleteActorRequest) GetActor() *ObjectRef {
 		return x.Actor
 	}
 	return nil
+}
+
+func (x *DeleteActorRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type GetActorSnapshotRequest struct {
@@ -3035,7 +3046,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSTATUS_PENDING\x10\x01\x12\x12\n" +
 	"\x0eSTATUS_CREATED\x10\x02\x12\x13\n" +
-	"\x0fSTATUS_DELETING\x10\x03\"\xef\x06\n" +
+	"\x0fSTATUS_DELETING\x10\x03\"\x87\a\n" +
 	"\x05Actor\x124\n" +
 	"\bmetadata\x18\x01 \x01(\v2\x18.ateapi.ResourceMetadataR\bmetadata\x128\n" +
 	"\x18actor_template_namespace\x18\x02 \x01(\tR\x16actorTemplateNamespace\x12.\n" +
@@ -3048,7 +3059,7 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x13local_snapshot_info\x18\t \x01(\v2\x19.ateapi.LocalSnapshotInfoR\x11localSnapshotInfo\x12W\n" +
 	")in_progress_snapshot_source_actor_version\x18\n" +
 	" \x01(\x03R$inProgressSnapshotSourceActorVersion\x12;\n" +
-	"\ractor_volumes\x18\v \x03(\v2\x16.ateapi.ExternalVolumeR\factorVolumes\"\xc6\x01\n" +
+	"\ractor_volumes\x18\v \x03(\v2\x16.ateapi.ExternalVolumeR\factorVolumes\"\xde\x01\n" +
 	"\x06Status\x12\x16\n" +
 	"\x12STATUS_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fSTATUS_RESUMING\x10\x01\x12\x12\n" +
@@ -3058,7 +3069,8 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x0eSTATUS_PAUSING\x10\x05\x12\x11\n" +
 	"\rSTATUS_PAUSED\x10\x06\x12\x12\n" +
 	"\x0eSTATUS_CRASHED\x10\a\x12\x13\n" +
-	"\x0fSTATUS_DELETING\x10\b\"\xc7\x01\n" +
+	"\x0fSTATUS_DELETING\x10\b\x12\x16\n" +
+	"\x12STATUS_TERMINATING\x10\t\"\xc7\x01\n" +
 	"\x10WorkerAssignment\x12)\n" +
 	"\x10worker_namespace\x18\x01 \x01(\tR\x0fworkerNamespace\x12\x1f\n" +
 	"\vworker_pool\x18\x02 \x01(\tR\n" +
@@ -3125,9 +3137,10 @@ const file_ateapi_proto_rawDesc = "" +
 	"\x04boot\x18\x02 \x01(\bR\x04boot\"T\n" +
 	"\x13ResumeActorResponse\x12#\n" +
 	"\x05actor\x18\x01 \x01(\v2\r.ateapi.ActorR\x05actor\x12\x18\n" +
-	"\aresumed\x18\x02 \x01(\bR\aresumed\"=\n" +
+	"\aresumed\x18\x02 \x01(\bR\aresumed\"S\n" +
 	"\x12DeleteActorRequest\x12'\n" +
-	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\"O\n" +
+	"\x05actor\x18\x01 \x01(\v2\x11.ateapi.ObjectRefR\x05actor\x12\x14\n" +
+	"\x05force\x18\x02 \x01(\bR\x05force\"O\n" +
 	"\x17GetActorSnapshotRequest\x124\n" +
 	"\bsnapshot\x18\x01 \x01(\v2\x18.ateapi.ActorSnapshotRefR\bsnapshot\"s\n" +
 	"\x19ListActorSnapshotsRequest\x12\x1a\n" +

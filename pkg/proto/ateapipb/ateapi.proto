@@ -175,6 +175,7 @@ message Actor {
     STATUS_PAUSED = 6;
     STATUS_CRASHED = 7;
     STATUS_DELETING = 8;
+    STATUS_TERMINATING = 9;
   }
   Status status = 4;
 
@@ -362,6 +363,7 @@ message ResumeActorResponse {
 
 message DeleteActorRequest {
   ObjectRef actor = 1;
+  bool force = 2;
 }
 
 message GetActorSnapshotRequest {

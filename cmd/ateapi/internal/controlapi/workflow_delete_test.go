@@ -20,6 +20,7 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store/storetest"
 	"github.com/agent-substrate/substrate/internal/resources"
+	atev1alpha1 "github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -29,35 +30,66 @@ func TestDeleteActorWorkflow_ExecutionPaths(t *testing.T) {
 	tests := []struct {
 		name       string
 		seedStatus ateapipb.Actor_Status
+		force      bool
 		wantErr    bool
 		wantCode   codes.Code
 	}{
 		{
 			name:       "delete suspended actor succeeds",
 			seedStatus: ateapipb.Actor_STATUS_SUSPENDED,
+			force:      false,
 			wantErr:    false,
 		},
 		{
-			name:       "delete crashed actor succeeds",
+			name:       "delete crashed actor rejected when not forced",
 			seedStatus: ateapipb.Actor_STATUS_CRASHED,
-			wantErr:    false,
+			force:      false,
+			wantErr:    true,
+			wantCode:   codes.FailedPrecondition,
 		},
 		{
 			name:       "delete deleting actor succeeds",
 			seedStatus: ateapipb.Actor_STATUS_DELETING,
+			force:      false,
 			wantErr:    false,
 		},
 		{
-			name:       "delete running actor rejected",
+			name:       "delete running actor rejected when not forced",
 			seedStatus: ateapipb.Actor_STATUS_RUNNING,
+			force:      false,
 			wantErr:    true,
 			wantCode:   codes.FailedPrecondition,
 		},
 		{
-			name:       "delete paused actor rejected",
+			name:       "delete paused actor rejected when not forced",
 			seedStatus: ateapipb.Actor_STATUS_PAUSED,
+			force:      false,
 			wantErr:    true,
 			wantCode:   codes.FailedPrecondition,
+		},
+		{
+			name:       "force delete suspended actor succeeds",
+			seedStatus: ateapipb.Actor_STATUS_SUSPENDED,
+			force:      true,
+			wantErr:    false,
+		},
+		{
+			name:       "force delete running actor succeeds",
+			seedStatus: ateapipb.Actor_STATUS_RUNNING,
+			force:      true,
+			wantErr:    false,
+		},
+		{
+			name:       "force delete paused actor succeeds",
+			seedStatus: ateapipb.Actor_STATUS_PAUSED,
+			force:      true,
+			wantErr:    false,
+		},
+		{
+			name:       "force delete crashed actor succeeds",
+			seedStatus: ateapipb.Actor_STATUS_CRASHED,
+			force:      true,
+			wantErr:    false,
 		},
 	}
 
@@ -71,7 +103,7 @@ func TestDeleteActorWorkflow_ExecutionPaths(t *testing.T) {
 			actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
 			seedWorkflowActor(t, ctx, st, actorRef, "ns", "tmpl1", tc.seedStatus)
 
-			deleted, err := w.DeleteActor(ctx, "team-a", "id1")
+			deleted, err := w.DeleteActor(ctx, "team-a", "id1", tc.force)
 			if tc.wantErr {
 				if got := status.Code(err); got != tc.wantCode {
 					t.Fatalf("status.Code(err) = %v, want %v (err: %v)", got, tc.wantCode, err)
@@ -95,6 +127,7 @@ func TestDeleteSteps_CheckPrerequisite(t *testing.T) {
 	tests := []struct {
 		name    string
 		step    WorkflowStep[*DeleteInput, *DeleteState]
+		force   bool
 		allowed map[ateapipb.Actor_Status]bool
 	}{
 		{
@@ -103,12 +136,57 @@ func TestDeleteSteps_CheckPrerequisite(t *testing.T) {
 			allowed: nil,
 		},
 		{
+			name:  "MarkTerminatingStep_Standard",
+			step:  &MarkTerminatingStep{},
+			force: false,
+			allowed: map[ateapipb.Actor_Status]bool{
+				ateapipb.Actor_STATUS_SUSPENDED: true,
+				ateapipb.Actor_STATUS_DELETING:  true,
+			},
+		},
+		{
+			name:  "MarkTerminatingStep_Force",
+			step:  &MarkTerminatingStep{},
+			force: true,
+			allowed: map[ateapipb.Actor_Status]bool{
+				ateapipb.Actor_STATUS_RUNNING:     true,
+				ateapipb.Actor_STATUS_RESUMING:    true,
+				ateapipb.Actor_STATUS_SUSPENDING:  true,
+				ateapipb.Actor_STATUS_PAUSING:     true,
+				ateapipb.Actor_STATUS_PAUSED:      true,
+				ateapipb.Actor_STATUS_CRASHED:     true,
+				ateapipb.Actor_STATUS_TERMINATING: true,
+				ateapipb.Actor_STATUS_DELETING:    true,
+				ateapipb.Actor_STATUS_SUSPENDED:   true,
+			},
+		},
+		{
 			name: "MarkDeletingStep",
 			step: &MarkDeletingStep{},
 			allowed: map[ateapipb.Actor_Status]bool{
-				ateapipb.Actor_STATUS_SUSPENDED: true,
-				ateapipb.Actor_STATUS_CRASHED:   true,
-				ateapipb.Actor_STATUS_DELETING:  true,
+				ateapipb.Actor_STATUS_TERMINATING: true,
+				ateapipb.Actor_STATUS_DELETING:    true,
+			},
+		},
+		{
+			name: "CallAteletTerminateStep",
+			step: &CallAteletTerminateStep{},
+			allowed: map[ateapipb.Actor_Status]bool{
+				ateapipb.Actor_STATUS_TERMINATING: true,
+			},
+		},
+		{
+			name: "DetachVolumesForDeleteStep",
+			step: &DetachVolumesForDeleteStep{},
+			allowed: map[ateapipb.Actor_Status]bool{
+				ateapipb.Actor_STATUS_TERMINATING: true,
+			},
+		},
+		{
+			name: "ReleaseWorkerStep",
+			step: &ReleaseWorkerStep{},
+			allowed: map[ateapipb.Actor_Status]bool{
+				ateapipb.Actor_STATUS_TERMINATING: true,
 			},
 		},
 		{
@@ -132,7 +210,7 @@ func TestDeleteSteps_CheckPrerequisite(t *testing.T) {
 			ctx := context.Background()
 			actorRef := resources.ActorRef{Atespace: "team-a", Name: "id1"}
 			for _, st := range allActorStatuses {
-				err := tc.step.CheckPrerequisite(ctx, &DeleteInput{ActorRef: actorRef}, &DeleteState{Actor: &ateapipb.Actor{Status: st}})
+				err := tc.step.CheckPrerequisite(ctx, &DeleteInput{ActorRef: actorRef, Force: tc.force}, &DeleteState{Actor: &ateapipb.Actor{Status: st}, ActorTemplate: &atev1alpha1.ActorTemplate{}})
 				assertPrerequisiteResult(t, st, err, tc.allowed == nil || tc.allowed[st])
 			}
 		})

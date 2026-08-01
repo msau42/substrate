@@ -179,6 +179,10 @@ type FakeAteletServer struct {
 	RestoreRequest *ateletpb.RestoreRequest
 	FailRestore    error
 	RestoreDelay   time.Duration
+
+	TerminateCalled  bool
+	TerminateRequest *ateletpb.TerminateRequest
+	FailTerminate    error
 }
 
 func (f *FakeAteletServer) Reset() {
@@ -196,6 +200,23 @@ func (f *FakeAteletServer) Reset() {
 	f.RestoreRequest = nil
 	f.FailRestore = nil
 	f.RestoreDelay = 0
+
+	f.TerminateCalled = false
+	f.TerminateRequest = nil
+	f.FailTerminate = nil
+}
+
+func (f *FakeAteletServer) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) (*ateletpb.TerminateResponse, error) {
+	f.Lock.Lock()
+	defer f.Lock.Unlock()
+
+	f.TerminateCalled = true
+	f.TerminateRequest = proto.Clone(req).(*ateletpb.TerminateRequest)
+	if f.FailTerminate != nil {
+		return nil, f.FailTerminate
+	}
+
+	return &ateletpb.TerminateResponse{}, nil
 }
 
 func (f *FakeAteletServer) Run(ctx context.Context, req *ateletpb.RunRequest) (*ateletpb.RunResponse, error) {
@@ -2978,20 +2999,10 @@ func TestDeleteActor_Crashed(t *testing.T) {
 		t.Fatalf("UpdateActor failed: %v", err)
 	}
 
-	deleted, err := tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+	_, err = tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"},
 	})
-	if err != nil {
-		t.Fatalf("DeleteActor of crashed actor failed: %v", err)
-	}
-	if got := deleted.GetStatus(); got != ateapipb.Actor_STATUS_DELETING {
-		t.Errorf("deleted actor status = %v, want %v", got, ateapipb.Actor_STATUS_DELETING)
-	}
-
-	_, err = tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
-		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "id1"},
-	})
-	assertGrpcError(t, err, codes.NotFound, "Actor test-atespace/id1 not found")
+	assertGrpcError(t, err, codes.FailedPrecondition, "Actor test-atespace/id1 is not in a deletable status (status: STATUS_CRASHED)")
 }
 
 func TestDeleteActor_NotFound(t *testing.T) {
@@ -3003,6 +3014,88 @@ func TestDeleteActor_NotFound(t *testing.T) {
 		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "non-existent"},
 	})
 	assertGrpcError(t, err, codes.NotFound, "Actor test-atespace/non-existent not found")
+}
+
+func TestDeleteActor_Force(t *testing.T) {
+	ns := namespaceForTest("ns-delete-force")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	createTemplate(t, tc, ns)
+	createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	// 1. Create and resume actor to running status
+	_, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "force-actor"},
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+	}})
+	if err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+
+	resumeResp, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "force-actor"},
+	})
+	if err != nil {
+		t.Fatalf("ResumeActor failed: %v", err)
+	}
+	if resumeResp.GetActor().GetStatus() != ateapipb.Actor_STATUS_RUNNING {
+		t.Fatalf("expected status STATUS_RUNNING, got %v", resumeResp.GetActor().GetStatus())
+	}
+
+	// 2. Force delete running actor
+	deleted, err := tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "force-actor"},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("DeleteActor with force failed: %v", err)
+	}
+	if deleted.GetMetadata().GetName() != "force-actor" {
+		t.Errorf("deleted actor name = %q, want %q", deleted.GetMetadata().GetName(), "force-actor")
+	}
+
+	// Verify actor is removed from store
+	_, err = tc.client.GetActor(context.Background(), &ateapipb.GetActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "force-actor"},
+	})
+	assertGrpcError(t, err, codes.NotFound, "Actor test-atespace/force-actor not found")
+
+	// Verify atelet Terminate was invoked
+	if !tc.fakeAtelet.TerminateCalled {
+		t.Errorf("expected atelet Terminate to have been called")
+	}
+
+	// Verify worker is unassigned
+	w, err := tc.persistence.GetWorker(context.Background(), ns, "pool1", "worker-1")
+	if err != nil {
+		t.Fatalf("GetWorker failed: %v", err)
+	}
+	if w.Assignment != nil {
+		t.Errorf("expected worker assignment to be nil, got: %v", w.Assignment)
+	}
+
+	// 3. Verify force delete on suspended actor succeeds
+	_, err = tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: "susp-actor"},
+		ActorTemplateNamespace: ns,
+		ActorTemplateName:      "tmpl1",
+	}})
+	if err != nil {
+		t.Fatalf("CreateActor failed: %v", err)
+	}
+
+	deletedSusp, err := tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "susp-actor"},
+		Force: true,
+	})
+	if err != nil {
+		t.Fatalf("expected DeleteActor with force on suspended actor to succeed, got %v", err)
+	}
+	if deletedSusp.GetMetadata().GetName() != "susp-actor" {
+		t.Errorf("deleted actor name = %q, want %q", deletedSusp.GetMetadata().GetName(), "susp-actor")
+	}
 }
 
 func assertGrpcErrorRegex(t *testing.T, err error, wantCode codes.Code, wantMsg string) {
