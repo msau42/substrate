@@ -29,6 +29,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -69,6 +71,10 @@ func TestActorLifecycle(t *testing.T) {
 		{
 			name: "SuspendResumeActor",
 			f:    suspendActor,
+		},
+		{
+			name: "ForceDeleteActor",
+			f:    forceDeleteActor,
 		},
 	}
 
@@ -787,6 +793,99 @@ func suspendActor(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj
 	}); err == nil {
 		t.Fatalf("expected actor %q to be deleted, but it still exists", actorName)
 	}
+
+	return nil
+}
+
+func forceDeleteActor(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj *e2e.Namespace, at *v1alpha1.ActorTemplate) error {
+	actorName := "force-delete-actor-" + nsObj.Name
+
+	// 1. Creating an actor
+	t.Logf("Creating Actor %q...", actorName)
+	if _, err := clients.SubstrateAPI.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: demoAtespace, Name: actorName},
+		ActorTemplateNamespace: nsObj.Name,
+		ActorTemplateName:      at.Name,
+	}}); err != nil {
+		t.Fatalf("failed to create Actor: %v", err)
+	}
+	waitForActorStatus(ctx, t, clients, actorName, ateapipb.Actor_STATUS_SUSPENDED)
+
+	// Verify that force delete on a SUSPENDED actor succeeds
+	t.Logf("Attempting force delete on suspended Actor %q (should succeed)...", actorName)
+	if _, err := clients.SubstrateAPI.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+		Force: true,
+	}); err != nil {
+		t.Fatalf("expected force delete on suspended actor to succeed, got %v", err)
+	}
+
+	// 2. Re-creating and Resuming the actor
+	t.Logf("Re-creating Actor %q...", actorName)
+	if _, err := clients.SubstrateAPI.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: demoAtespace, Name: actorName},
+		ActorTemplateNamespace: nsObj.Name,
+		ActorTemplateName:      at.Name,
+	}}); err != nil {
+		t.Fatalf("failed to create Actor: %v", err)
+	}
+	waitForActorStatus(ctx, t, clients, actorName, ateapipb.Actor_STATUS_SUSPENDED)
+
+	t.Logf("Resuming Actor %q...", actorName)
+	if _, err := clients.SubstrateAPI.ResumeActor(ctx, &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+	}); err != nil {
+		t.Fatalf("failed to resume Actor: %v", err)
+	}
+	waitForActorStatus(ctx, t, clients, actorName, ateapipb.Actor_STATUS_RUNNING)
+
+	// 3. Call the actor to ensure workload is actively serving on worker
+	resp, err := callActor(t, resources.ActorRef{Atespace: demoAtespace, Name: actorName})
+	if err != nil {
+		t.Fatalf("failed to call actor: %v", err)
+	}
+	validateCounterResponse(t, resp, "after creation", 1, 1)
+
+	// 4. Attempt standard DeleteActor without force on running actor (should fail with FailedPrecondition)
+	t.Logf("Attempting standard delete on running Actor %q (should fail)...", actorName)
+	if _, err := clients.SubstrateAPI.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+		Force: false,
+	}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition when standard deleting running actor, got %v", err)
+	}
+
+	// 5. Force delete the running actor
+	t.Logf("Force deleting running Actor %q...", actorName)
+	if _, err := clients.SubstrateAPI.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+		Force: true,
+	}); err != nil {
+		t.Fatalf("failed to force delete Actor: %v", err)
+	}
+
+	// 6. Verify deletion in store
+	if _, err := clients.SubstrateAPI.GetActor(ctx, &ateapipb.GetActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+	}); status.Code(err) != codes.NotFound {
+		t.Fatalf("expected actor %q to be NotFound after force delete, got err: %v", actorName, err)
+	}
+
+	// 7. Verify actor name can be immediately reused
+	t.Logf("Re-creating Actor %q to verify name reuse...", actorName)
+	if _, err := clients.SubstrateAPI.CreateActor(ctx, &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+		Metadata:               &ateapipb.ResourceMetadata{Atespace: demoAtespace, Name: actorName},
+		ActorTemplateNamespace: nsObj.Name,
+		ActorTemplateName:      at.Name,
+	}}); err != nil {
+		t.Fatalf("failed to recreate Actor: %v", err)
+	}
+	defer func() {
+		clients.SubstrateAPI.DeleteActor(ctx, &ateapipb.DeleteActorRequest{
+			Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorName},
+		})
+	}()
+	waitForActorStatus(ctx, t, clients, actorName, ateapipb.Actor_STATUS_SUSPENDED)
 
 	return nil
 }

@@ -214,6 +214,10 @@ func actorStatusString(s ateapipb.Actor_Status) string {
 		return "Suspending"
 	case ateapipb.Actor_STATUS_SUSPENDED:
 		return "Suspended"
+	case ateapipb.Actor_STATUS_TERMINATING:
+		return "Terminating"
+	case ateapipb.Actor_STATUS_DELETING:
+		return "Deleting"
 	default:
 		return "?"
 	}
