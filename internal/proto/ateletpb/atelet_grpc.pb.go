@@ -36,6 +36,7 @@ const (
 	AteomHerder_Run_FullMethodName        = "/atelet.AteomHerder/Run"
 	AteomHerder_Checkpoint_FullMethodName = "/atelet.AteomHerder/Checkpoint"
 	AteomHerder_Restore_FullMethodName    = "/atelet.AteomHerder/Restore"
+	AteomHerder_Terminate_FullMethodName  = "/atelet.AteomHerder/Terminate"
 )
 
 // AteomHerderClient is the client API for AteomHerder service.
@@ -51,6 +52,9 @@ type AteomHerderClient interface {
 	Checkpoint(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
 	// Restore restores a workload from checkpoint onto an ateom.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
+	// Terminate tells atelet to terminate/kill any running workload for an actor,
+	// unmount its volumes, and clean up actor state on the node.
+	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
 }
 
 type ateomHerderClient struct {
@@ -91,6 +95,16 @@ func (c *ateomHerderClient) Restore(ctx context.Context, in *RestoreRequest, opt
 	return out, nil
 }
 
+func (c *ateomHerderClient) Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TerminateResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_Terminate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomHerderServer is the server API for AteomHerder service.
 // All implementations must embed UnimplementedAteomHerderServer
 // for forward compatibility.
@@ -104,6 +118,9 @@ type AteomHerderServer interface {
 	Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
 	// Restore restores a workload from checkpoint onto an ateom.
 	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
+	// Terminate tells atelet to terminate/kill any running workload for an actor,
+	// unmount its volumes, and clean up actor state on the node.
+	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
 	mustEmbedUnimplementedAteomHerderServer()
 }
 
@@ -122,6 +139,9 @@ func (UnimplementedAteomHerderServer) Checkpoint(context.Context, *CheckpointReq
 }
 func (UnimplementedAteomHerderServer) Restore(context.Context, *RestoreRequest) (*RestoreResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Restore not implemented")
+}
+func (UnimplementedAteomHerderServer) Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Terminate not implemented")
 }
 func (UnimplementedAteomHerderServer) mustEmbedUnimplementedAteomHerderServer() {}
 func (UnimplementedAteomHerderServer) testEmbeddedByValue()                     {}
@@ -198,6 +218,24 @@ func _AteomHerder_Restore_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AteomHerder_Terminate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TerminateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).Terminate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_Terminate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).Terminate(ctx, req.(*TerminateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AteomHerder_ServiceDesc is the grpc.ServiceDesc for AteomHerder service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -216,6 +254,10 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Restore",
 			Handler:    _AteomHerder_Restore_Handler,
+		},
+		{
+			MethodName: "Terminate",
+			Handler:    _AteomHerder_Terminate_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

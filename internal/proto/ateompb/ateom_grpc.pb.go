@@ -36,6 +36,7 @@ const (
 	Ateom_RunWorkload_FullMethodName        = "/ateom.Ateom/RunWorkload"
 	Ateom_CheckpointWorkload_FullMethodName = "/ateom.Ateom/CheckpointWorkload"
 	Ateom_RestoreWorkload_FullMethodName    = "/ateom.Ateom/RestoreWorkload"
+	Ateom_TerminateWorkload_FullMethodName  = "/ateom.Ateom/TerminateWorkload"
 )
 
 // AteomClient is the client API for Ateom service.
@@ -67,6 +68,9 @@ type AteomClient interface {
 	// written by CheckpointWorkload.  Ateom will handle downloading the correct
 	// gVisor / runsc version to match the checkpoint.
 	RestoreWorkload(ctx context.Context, in *RestoreWorkloadRequest, opts ...grpc.CallOption) (*RestoreWorkloadResponse, error)
+	// TerminateWorkload stops and deletes container workloads and cleans up
+	// network and bundle overlays on ateom.
+	TerminateWorkload(ctx context.Context, in *TerminateWorkloadRequest, opts ...grpc.CallOption) (*TerminateWorkloadResponse, error)
 }
 
 type ateomClient struct {
@@ -107,6 +111,16 @@ func (c *ateomClient) RestoreWorkload(ctx context.Context, in *RestoreWorkloadRe
 	return out, nil
 }
 
+func (c *ateomClient) TerminateWorkload(ctx context.Context, in *TerminateWorkloadRequest, opts ...grpc.CallOption) (*TerminateWorkloadResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TerminateWorkloadResponse)
+	err := c.cc.Invoke(ctx, Ateom_TerminateWorkload_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomServer is the server API for Ateom service.
 // All implementations must embed UnimplementedAteomServer
 // for forward compatibility.
@@ -136,6 +150,9 @@ type AteomServer interface {
 	// written by CheckpointWorkload.  Ateom will handle downloading the correct
 	// gVisor / runsc version to match the checkpoint.
 	RestoreWorkload(context.Context, *RestoreWorkloadRequest) (*RestoreWorkloadResponse, error)
+	// TerminateWorkload stops and deletes container workloads and cleans up
+	// network and bundle overlays on ateom.
+	TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error)
 	mustEmbedUnimplementedAteomServer()
 }
 
@@ -154,6 +171,9 @@ func (UnimplementedAteomServer) CheckpointWorkload(context.Context, *CheckpointW
 }
 func (UnimplementedAteomServer) RestoreWorkload(context.Context, *RestoreWorkloadRequest) (*RestoreWorkloadResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestoreWorkload not implemented")
+}
+func (UnimplementedAteomServer) TerminateWorkload(context.Context, *TerminateWorkloadRequest) (*TerminateWorkloadResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TerminateWorkload not implemented")
 }
 func (UnimplementedAteomServer) mustEmbedUnimplementedAteomServer() {}
 func (UnimplementedAteomServer) testEmbeddedByValue()               {}
@@ -230,6 +250,24 @@ func _Ateom_RestoreWorkload_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Ateom_TerminateWorkload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TerminateWorkloadRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomServer).TerminateWorkload(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Ateom_TerminateWorkload_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomServer).TerminateWorkload(ctx, req.(*TerminateWorkloadRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Ateom_ServiceDesc is the grpc.ServiceDesc for Ateom service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -248,6 +286,10 @@ var Ateom_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestoreWorkload",
 			Handler:    _Ateom_RestoreWorkload_Handler,
+		},
+		{
+			MethodName: "TerminateWorkload",
+			Handler:    _Ateom_TerminateWorkload_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
