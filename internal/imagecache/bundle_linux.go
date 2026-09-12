@@ -353,5 +353,9 @@ func mountPointsUnder(dir string) ([]string, error) {
 		return nil, fmt.Errorf("while opening mountinfo: %w", err)
 	}
 	defer f.Close()
-	return mountPointsIn(f, dir)
+	dirs := []string{dir}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil && resolved != filepath.Clean(dir) {
+		dirs = append(dirs, resolved)
+	}
+	return mountPointsIn(f, dirs...)
 }

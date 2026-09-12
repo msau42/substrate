@@ -26,12 +26,15 @@ import (
 	"strings"
 )
 
-// mountPointsIn returns the mount points at or below dir found in r, which
-// must be in /proc/[pid]/mountinfo format:
+// mountPointsIn returns the mount points at or below any of dirs found in r,
+// which must be in /proc/[pid]/mountinfo format:
 //
 //	ID parentID major:minor root MOUNTPOINT options...
-func mountPointsIn(r io.Reader, dir string) ([]string, error) {
-	dir = filepath.Clean(dir)
+func mountPointsIn(r io.Reader, dirs ...string) ([]string, error) {
+	cleaned := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		cleaned = append(cleaned, filepath.Clean(d))
+	}
 	var points []string
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -40,8 +43,11 @@ func mountPointsIn(r io.Reader, dir string) ([]string, error) {
 			continue
 		}
 		mp := unescapeMountPath(fields[4])
-		if mp == dir || strings.HasPrefix(mp, dir+"/") {
-			points = append(points, mp)
+		for _, dir := range cleaned {
+			if mp == dir || strings.HasPrefix(mp, dir+"/") {
+				points = append(points, mp)
+				break
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

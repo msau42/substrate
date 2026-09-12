@@ -154,6 +154,7 @@ spec:
         - --grpc-server-cred-bundle=/run/podidentity.podcert.ate.dev/credential-bundle.pem
         - --client-ca-certs=/run/podidentity.podcert.ate.dev/trust-bundle.pem
         - --ateapi-ca-file=/run/servicedns.podcert.ate.dev/trust-bundle.pem
+        - --actor-disk-pool-dir=/var/lib/ateom-gvisor/disk-pool
         # Graceful shutdown knobs. The sum must fit within
         # terminationGracePeriodSeconds above.
         - --drain-delay=0s
@@ -231,6 +232,7 @@ spec:
         volumeMounts:
         - name: run-ateom
           mountPath: /var/lib/ateom-gvisor
+          mountPropagation: HostToContainer
         - name: podidentity
           mountPath: /run/podidentity.podcert.ate.dev
         - name: servicedns-ca

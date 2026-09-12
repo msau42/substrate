@@ -15,6 +15,8 @@
 package ateompath
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,5 +94,29 @@ func TestActorPathUsesUID(t *testing.T) {
 	}
 	if want := "/actors/" + uid1; !strings.HasSuffix(path1, want) {
 		t.Errorf("ActorPath(%q) = %q, want suffix %q", uid1, path1, want)
+	}
+}
+
+func TestActorPathFollowsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	origActorsDir := ActorsDir
+	ActorsDir = filepath.Join(tmp, "actors")
+	defer func() { ActorsDir = origActorsDir }()
+
+	if err := os.MkdirAll(ActorsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	diskDir := filepath.Join(tmp, "disk-0", "actor-123")
+	if err := os.MkdirAll(diskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(ActorsDir, "actor-123")
+	if err := os.Symlink(diskDir, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ActorPath("actor-123")
+	if got != diskDir {
+		t.Errorf("ActorPath(actor-123) = %q, want %q", got, diskDir)
 	}
 }

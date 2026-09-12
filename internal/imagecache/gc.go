@@ -134,7 +134,13 @@ func (s *Store) InUse() (RootSet, error) {
 	var errs []error
 	for _, actor := range actorEntries {
 		if !actor.IsDir() {
-			continue
+			if actor.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			fi, err := os.Stat(filepath.Join(s.actorsDir, actor.Name()))
+			if err != nil || !fi.IsDir() {
+				continue
+			}
 		}
 		bundlesDir := filepath.Join(s.actorsDir, actor.Name(), "bundles")
 		bundles, err := os.ReadDir(bundlesDir)

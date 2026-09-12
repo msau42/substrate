@@ -97,6 +97,7 @@ var (
 	gcpAuthForImagePulls         = pflag.Bool("gcp-auth-for-image-pulls", true, "Use GCP application default credentials mechanism.")
 	localhostRegistryReplacement = pflag.String("localhost-registry-replacement", "", "The replacement registry endpoint for localhost and/or loopback IP addresses, useful for local development. for example kind-registry:5000")
 	imageCacheDir                = pflag.String("image-cache-dir", ateompath.ImageCacheDir, "Directory for the node-local OCI image layer cache. Must be on the volume shared with the ateom pods (the cached layers are their overlay lowerdirs), and on a disk sized for both capacity and IOPS: unpack throughput is gated by the volume's IOPS.")
+	actorDiskPoolDir             = pflag.String("actor-disk-pool-dir", "", "Directory containing dedicated pre-mounted per-actor disks (e.g. /var/lib/ateom-gvisor/disk-pool). If set, each actor directory is symlinked to a dedicated disk in this pool.")
 
 	showVersion  = pflag.Bool("version", false, "Print version and exit.")
 	logLevelFlag = pflag.String("log-level", "info", "Minimum log level: debug, info, warn, or error.")
@@ -127,6 +128,14 @@ func main() {
 		serverboot.Fatal(ctx, "Invalid --log-level", err)
 	}
 	slog.InfoContext(ctx, "atelet starting", slog.String("version", version.Version))
+
+	if *actorDiskPoolDir != "" {
+		var err error
+		globalActorDiskPool, err = NewActorDiskPool(*actorDiskPoolDir, ateompath.ActorsDir)
+		if err != nil {
+			serverboot.Fatal(ctx, "Failed to initialize actor disk pool", err)
+		}
+	}
 
 	// Kept separate from ctx so in-flight work (e.g. a Checkpoint/Restore
 	// streaming a multi-GiB snapshot) is not cancelled the moment SIGTERM
@@ -718,8 +727,14 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	}
 
 	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
-		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+	if req.GetType() == ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL {
+		if err := releaseActorDirs(actorUID); err != nil {
+			return nil, fmt.Errorf("while releasing actor dirs: %w", err)
+		}
+	} else {
+		if err := resetActorDirs(actorUID); err != nil {
+			return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+		}
 	}
 
 	return &ateletpb.CheckpointResponse{}, nil
@@ -1329,9 +1344,9 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
-	// Reclaim the actor's directories on the node
-	if err := removeActorDirs(actorUID); err != nil {
-		return nil, fmt.Errorf("failed to remove actor directories during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
+	// Reset and release actor directories on the node
+	if err := releaseActorDirs(actorUID); err != nil {
+		return nil, fmt.Errorf("failed to release actor directories during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
 	return &ateletpb.TerminateResponse{}, nil
@@ -1861,6 +1876,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // resetActorDirs empties the actor's directories and leaves them in place for
 // its next activation. Use removeActorDirs when the actor will not come back.
 func resetActorDirs(actorUID string) error {
+	if globalActorDiskPool != nil {
+		if err := globalActorDiskPool.EnsureActorDir(actorUID); err != nil {
+			return wrapFileSystemErr("while allocating actor disk: %w", err)
+		}
+	}
+
 	// Explicitly leave runsc logs dir untouched.
 
 	// RemoveAllWritable, not os.RemoveAll: the bundle's upper dir can hold
@@ -1947,16 +1968,17 @@ func resetActorDirs(actorUID string) error {
 	return nil
 }
 
-// removeActorDirs reclaims the actor's whole directory tree, root included:
-// nothing else on the node deletes it, and no later activation will look here.
-//
-// resetActorDirs runs first for the care a blanket RemoveAll lacks. It refuses
-// to proceed while a volume directory is still populated, so a failed unmount
-// cannot become a deletion of the mount's contents, and it can remove a bundle
-// upper dir carrying an image's read-only modes.
-func removeActorDirs(actorUID string) error {
+// releaseActorDirs reclaims the actor's directory tree or releases its dedicated disk.
+// resetActorDirs runs first for safety.
+func releaseActorDirs(actorUID string) error {
 	if err := resetActorDirs(actorUID); err != nil {
 		return err
+	}
+	if globalActorDiskPool != nil {
+		if err := globalActorDiskPool.ReleaseActor(actorUID); err != nil {
+			return wrapFileSystemErr("while releasing actor disk: %w", err)
+		}
+		return nil
 	}
 	if err := os.RemoveAll(ateompath.ActorPath(actorUID)); err != nil {
 		return wrapFileSystemErr("while deleting actor dir: %w", err)

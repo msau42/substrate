@@ -16,6 +16,7 @@
 package ateompath
 
 import (
+	"os"
 	"path/filepath"
 )
 
@@ -110,10 +111,14 @@ func AteomNetNSPath(podUID string) string {
 }
 
 func ActorPath(actorUID string) string {
-	return filepath.Join(
+	p := filepath.Join(
 		ActorsDir,
 		actorUID,
 	)
+	if target, err := os.Readlink(p); err == nil && filepath.IsAbs(target) {
+		return target
+	}
+	return p
 }
 
 // ActorSandboxAssetsFile is the per-actor file where atelet records the sandbox
