@@ -238,3 +238,56 @@ When finished benchmarking Architecture 3, detach and delete all `actor-disk-*` 
 ```bash
 python3 benchmarking/scripts/disk-arch/setup_disk_pool.py --cleanup
 ```
+
+---
+
+## 9. Extending the Disk Architecture Benchmark to MicroVM (`ateom-microvm`)
+
+The disk architecture benchmark harness and `ActorDiskPool` (`--actor-disk-pool-dir=/var/lib/ateom-gvisor/disk-pool`) have been extended to run seamlessly on **microVM (`ateom-microvm` + Cloud Hypervisor + `virtiofsd`)** across all 4 storage architectures.
+
+### 9.1 How `ateom-microvm` Interacts with Per-Actor Disk Pools (`Arch 3a / 3b`)
+- **Identical Symlink Data Path**: Like `ateom-gvisor`, `ateom-microvm` mounts `ateompath.BasePath` (`/var/lib/ateom-gvisor`) with `MountPropagationHostToContainer` and resolves actor state paths via `ateompath.ActorPath(actorUID)`.
+- **Transparent Dedicated Volume Routing**: When `atelet` allocates a dedicated Hyperdisk (`disk-i`) and creates the symlink `/var/lib/ateom-gvisor/actors/<actorUID>` $\to$ `/var/lib/ateom-gvisor/disk-pool/disk-i/<actorUID>`, `ateom-microvm`'s `CheckpointWorkload` automatically writes:
+  1. Cloud Hypervisor guest memory ranges (`memory-ranges`, sparse guest physical memory dump)
+  2. Device and VMM state (`state.json`, `config.json`)
+  3. Container rootfs upper layer (`rootfs-upper.tar`)
+  4. Durable directory volumes (`durable-dir.tar`)
+  directly onto the actor's dedicated Hyperdisk volume (`disk-i`).
+
+### 9.2 GKE Node Pool Requirements for MicroVM (`/dev/kvm` Nested Virtualization)
+MicroVM requires hardware nested virtualization (`/dev/kvm`) on GKE worker nodes, which requires:
+1. **`EnableNestedVirtualization = true`** on the GKE node pool (`AdvancedMachineFeatures`).
+2. **`ImageType = UBUNTU_CONTAINERD`** (Container-Optimized OS does not expose `/dev/kvm`).
+3. **`ActorMemory = 1536Mi`** on `ActorTemplate` specs for `W1` (`1 GiB` working set) to accommodate the `128 MiB` Cloud Hypervisor VMM reserve + guest kernel floor alongside the `1 GiB` application working set.
+
+`tools/setup-gcp` supports this directly via `--enable-nested-virtualization` (`ENABLE_NESTED_VIRTUALIZATION=true`):
+
+```bash
+export ENABLE_NESTED_VIRTUALIZATION=true
+export NODE_IMAGE_TYPE=UBUNTU_CONTAINERD
+export GVISOR_NODE_MACHINE_TYPE=c3-standard-44  # or c3-standard-8 / c3-standard-8-lssd
+export BOOT_DISK_THROUGHPUT_MBPS=2400
+
+go run ./tools/setup-gcp bootstrap
+```
+
+### 9.3 Running W1 & W2 on MicroVM (`run_benchmark.py --sandbox-class microvm`)
+
+Use `--sandbox-class microvm --deploy-workloads` with `run_benchmark.py`. The runner automatically:
+1. Executes `./hack/install-microvm-deps.sh --install` (builds/stages Cloud Hypervisor, `virtiofsd`, guest kernel/rootfs to GCS and applies the `microvm` `SandboxConfig`).
+2. Deploys the `benchmark-ateom` WorkerPool and ActorTemplates with `--sandbox-class microvm --actor-memory 1536Mi`.
+3. Pins all `benchmark-ateom` microVM worker pods to `$ACTIVE_NODE` and isolates the Locust load generator on `$LOADGEN_NODE`.
+
+```bash
+# Deploy microVM WorkerPool + ActorTemplates (1536Mi memory limit) and pin to 1 active node, then run Arch 3b W1 & W2:
+python3 benchmarking/scripts/disk-arch/run_benchmark.py \
+  --sandbox-class microvm \
+  --deploy-workloads \
+  arch3b_w1 arch3b_w2
+
+# Or invoke explicit *_microvm targets directly once deployed:
+python3 benchmarking/scripts/disk-arch/run_benchmark.py arch1_w1_microvm arch1_w2_microvm
+python3 benchmarking/scripts/disk-arch/run_benchmark.py arch2_w1_microvm arch2_w2_microvm
+python3 benchmarking/scripts/disk-arch/run_benchmark.py arch3a_w1_microvm arch3a_w2_microvm
+python3 benchmarking/scripts/disk-arch/run_benchmark.py arch3b_w1_microvm arch3b_w2_microvm
+```

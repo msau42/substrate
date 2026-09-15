@@ -81,6 +81,19 @@ func TestBuildCreateClusterRequest_NodeConfig(t *testing.T) {
 			wantDiskSize: 0,
 			wantDiskType: "",
 		},
+		{
+			name: "nested virtualization enabled defaults to UBUNTU_CONTAINERD",
+			cfg: &Config{
+				ProjectID:                  "test-project",
+				ClusterName:                "test-cluster",
+				ClusterLocation:            "us-west1-c",
+				MachineType:                "c3-standard-8",
+				EnableNestedVirtualization: true,
+			},
+			wantDiskSize: 0,
+			wantDiskType: "",
+			wantBootDisk: nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -98,6 +111,14 @@ func TestBuildCreateClusterRequest_NodeConfig(t *testing.T) {
 
 			if nodeConfig.MachineType != tt.cfg.MachineType {
 				t.Errorf("MachineType = %q, want %q", nodeConfig.MachineType, tt.cfg.MachineType)
+			}
+			if tt.cfg.EnableNestedVirtualization {
+				if !nodeConfig.GetAdvancedMachineFeatures().GetEnableNestedVirtualization() {
+					t.Errorf("EnableNestedVirtualization = false, want true")
+				}
+				if nodeConfig.ImageType != "UBUNTU_CONTAINERD" {
+					t.Errorf("ImageType = %q, want UBUNTU_CONTAINERD", nodeConfig.ImageType)
+				}
 			}
 			if nodeConfig.DiskSizeGb != tt.wantDiskSize {
 				t.Errorf("DiskSizeGb = %d, want %d", nodeConfig.DiskSizeGb, tt.wantDiskSize)

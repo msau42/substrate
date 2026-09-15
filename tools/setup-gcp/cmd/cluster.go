@@ -60,12 +60,28 @@ func buildCreateClusterRequest(parent string, cfg *Config) *containerpb.CreateCl
 	}
 	nodeConfig := &containerpb.NodeConfig{
 		MachineType: cfg.MachineType,
+		ImageType:   cfg.ImageType,
+	}
+	if cfg.EnableNestedVirtualization {
+		enabled := true
+		nodeConfig.AdvancedMachineFeatures = &containerpb.AdvancedMachineFeatures{
+			EnableNestedVirtualization: &enabled,
+		}
+		if nodeConfig.ImageType == "" {
+			nodeConfig.ImageType = "UBUNTU_CONTAINERD"
+		}
 	}
 	if cfg.BootDiskSizeGB > 0 {
 		nodeConfig.DiskSizeGb = cfg.BootDiskSizeGB
 	}
 	if cfg.BootDiskType != "" {
 		nodeConfig.DiskType = cfg.BootDiskType
+	}
+	if cfg.BootDiskIOPS > 0 || cfg.BootDiskThroughput > 0 {
+		nodeConfig.BootDisk = &containerpb.BootDisk{
+			ProvisionedIops:       cfg.BootDiskIOPS,
+			ProvisionedThroughput: cfg.BootDiskThroughput,
+		}
 	}
 	return &containerpb.CreateClusterRequest{
 		Parent: parent,
@@ -325,10 +341,58 @@ func containsAll(clusterAPIs []string, requiredAPIs []string) bool {
 	return true
 }
 
-// validateBootDisk ensures BootDiskSizeGB is non-negative.
+// nodePoolConfigMismatch checks whether substrate-node-pool configuration mismatches cfg.
+func nodePoolConfigMismatch(cluster *containerpb.Cluster, cfg *Config) (bool, string) {
+	var np *containerpb.NodePool
+	for _, pool := range cluster.GetNodePools() {
+		if pool.GetName() == "substrate-node-pool" {
+			np = pool
+			break
+		}
+	}
+	if np == nil {
+		return true, "substrate-node-pool not found"
+	}
+	nc := np.GetConfig()
+	if cfg.MachineType != "" && nc.GetMachineType() != cfg.MachineType {
+		return true, fmt.Sprintf("machineType mismatch: current=%q, expected=%q", nc.GetMachineType(), cfg.MachineType)
+	}
+	expectedImageType := cfg.ImageType
+	if cfg.EnableNestedVirtualization && expectedImageType == "" {
+		expectedImageType = "UBUNTU_CONTAINERD"
+	}
+	if expectedImageType != "" && !strings.EqualFold(nc.GetImageType(), expectedImageType) {
+		return true, fmt.Sprintf("imageType mismatch: current=%q, expected=%q", nc.GetImageType(), expectedImageType)
+	}
+	currentNested := nc.GetAdvancedMachineFeatures().GetEnableNestedVirtualization()
+	if currentNested != cfg.EnableNestedVirtualization {
+		return true, fmt.Sprintf("enableNestedVirtualization mismatch: current=%t, expected=%t", currentNested, cfg.EnableNestedVirtualization)
+	}
+	if cfg.BootDiskSizeGB > 0 && nc.GetDiskSizeGb() != cfg.BootDiskSizeGB {
+		return true, fmt.Sprintf("bootDiskSizeGb mismatch: current=%d, expected=%d", nc.GetDiskSizeGb(), cfg.BootDiskSizeGB)
+	}
+	if cfg.BootDiskType != "" && nc.GetDiskType() != cfg.BootDiskType {
+		return true, fmt.Sprintf("bootDiskType mismatch: current=%q, expected=%q", nc.GetDiskType(), cfg.BootDiskType)
+	}
+	if cfg.BootDiskIOPS > 0 && nc.GetBootDisk().GetProvisionedIops() != cfg.BootDiskIOPS {
+		return true, fmt.Sprintf("bootDiskIOPS mismatch: current=%d, expected=%d", nc.GetBootDisk().GetProvisionedIops(), cfg.BootDiskIOPS)
+	}
+	if cfg.BootDiskThroughput > 0 && nc.GetBootDisk().GetProvisionedThroughput() != cfg.BootDiskThroughput {
+		return true, fmt.Sprintf("bootDiskThroughput mismatch: current=%d, expected=%d", nc.GetBootDisk().GetProvisionedThroughput(), cfg.BootDiskThroughput)
+	}
+	return false, ""
+}
+
+// validateBootDisk ensures BootDiskSizeGB, BootDiskIOPS, and BootDiskThroughput are non-negative.
 func validateBootDisk(cfg *Config) error {
 	if cfg.BootDiskSizeGB < 0 {
 		return fmt.Errorf("boot disk size %d is invalid: must be greater than or equal to 0", cfg.BootDiskSizeGB)
+	}
+	if cfg.BootDiskIOPS < 0 {
+		return fmt.Errorf("boot disk IOPS %d is invalid: must be greater than or equal to 0", cfg.BootDiskIOPS)
+	}
+	if cfg.BootDiskThroughput < 0 {
+		return fmt.Errorf("boot disk throughput %d is invalid: must be greater than or equal to 0", cfg.BootDiskThroughput)
 	}
 	return nil
 }
@@ -372,7 +436,11 @@ func init() {
 	clusterCmd.Flags().StringVar(&cfg.Network, "network", getEnv("NETWORK", "default"), "VPC network name [env: NETWORK]")
 	clusterCmd.Flags().StringVar(&cfg.Subnetwork, "subnetwork", getEnv("SUBNETWORK", "default"), "VPC subnetwork name [env: SUBNETWORK]")
 	clusterCmd.Flags().StringVar(&cfg.MachineType, "machine-type", getEnv("GVISOR_NODE_MACHINE_TYPE", "c3-standard-4"), "Machine type for the gVisor node pool [env: GVISOR_NODE_MACHINE_TYPE]")
+	clusterCmd.Flags().StringVar(&cfg.ImageType, "image-type", getEnv("NODE_IMAGE_TYPE", ""), "Node OS image type (e.g., UBUNTU_CONTAINERD); defaults to UBUNTU_CONTAINERD when nested virtualization is enabled [env: NODE_IMAGE_TYPE]")
+	clusterCmd.Flags().BoolVar(&cfg.EnableNestedVirtualization, "enable-nested-virtualization", getEnv("ENABLE_NESTED_VIRTUALIZATION", false), "Enable nested virtualization (/dev/kvm) on the node pool for microVM workloads [env: ENABLE_NESTED_VIRTUALIZATION]")
 	clusterCmd.Flags().BoolVar(&cfg.EnableDataplaneV2, "enable-dataplane-v2", getEnv("ENABLE_DATAPLANE_V2", true), "Enable Dataplane V2 [env: ENABLE_DATAPLANE_V2]")
 	clusterCmd.Flags().Int32Var(&cfg.BootDiskSizeGB, "boot-disk-size", getEnv("BOOT_DISK_SIZE_GB", int32(0)), "Boot disk size in GB for the node pool; 0 = GKE default (100 GB) [env: BOOT_DISK_SIZE_GB]")
 	clusterCmd.Flags().StringVar(&cfg.BootDiskType, "boot-disk-type", getEnv("BOOT_DISK_TYPE", ""), "Boot disk type for the node pool; empty = GKE default [env: BOOT_DISK_TYPE]")
+	clusterCmd.Flags().Int64Var(&cfg.BootDiskIOPS, "boot-disk-iops", getEnv("BOOT_DISK_IOPS", int64(0)), "Boot disk provisioned IOPS for the node pool; 0 = GKE default [env: BOOT_DISK_IOPS]")
+	clusterCmd.Flags().Int64Var(&cfg.BootDiskThroughput, "boot-disk-throughput", getEnv("BOOT_DISK_THROUGHPUT", int64(0)), "Boot disk provisioned throughput in MB/s for the node pool; 0 = GKE default [env: BOOT_DISK_THROUGHPUT]")
 }

@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Executes repeatable 1-active-node W1 and W2 disk architecture benchmarks."""
+"""Executes repeatable 1-active-node W1 and W2 disk architecture benchmarks for gVisor and microVM."""
 
+import argparse
 import json
 import os
 import subprocess
@@ -72,6 +73,78 @@ def get_nodes() -> tuple[str, str]:
     loadgen_nodes = [n for n in all_nodes if n != active_node]
     loadgen_node = loadgen_nodes[0] if loadgen_nodes else active_node
     return active_node, loadgen_node
+
+
+def deploy_and_pin_workloads(
+    sandbox_class: str, worker_count: int = 6, actor_memory: str = "1536Mi"
+):
+    """Deploy benchmark workloads for gvisor or microvm and pin worker pool to active_node."""
+    if sandbox_class == "microvm":
+        print("Installing microVM dependencies (hack/install-microvm-deps.sh --install)...")
+        subprocess.run(
+            ["./hack/install-microvm-deps.sh", "--install"],
+            cwd=ROOT,
+            check=True,
+        )
+
+    print(
+        f"Deploying benchmark workloads (sandbox_class={sandbox_class}, workers={worker_count}, actor_memory={actor_memory})..."
+    )
+    subprocess.run(
+        [
+            "./benchmarking/workloads/deploy.sh",
+            "--deploy",
+            "--sandbox-class",
+            sandbox_class,
+            "--worker-count",
+            str(worker_count),
+            "--actor-memory",
+            actor_memory,
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+
+    active_node, loadgen_node = get_nodes()
+    print(f"Pinning benchmark-ateom WorkerPool to active node {active_node}...")
+    patch = {
+        "spec": {
+            "template": {
+                "spec": {
+                    "nodeSelector": {"kubernetes.io/hostname": active_node}
+                }
+            }
+        }
+    }
+    subprocess.run(
+        [
+            "kubectl",
+            "patch",
+            "workerpool",
+            "benchmark-ateom",
+            "-n",
+            "benchmark-workloads",
+            "--type=merge",
+            "-p",
+            json.dumps(patch),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            "deployment/benchmark-ateom",
+            "-n",
+            "benchmark-workloads",
+            "--timeout=180s",
+        ],
+        check=True,
+    )
+    print(
+        f"Workloads ready on active node {active_node} (loadgen node: {loadgen_node})."
+    )
 
 
 def reset_active_node_disk_pool(active_node: str):
@@ -450,7 +523,7 @@ def run_job(
     }
 
 
-WORKLOADS = {
+BASE_WORKLOADS = {
     "arch1_w1": (
         "arch1_w1_1node_suspend_1gi",
         [
@@ -589,14 +662,58 @@ WORKLOADS = {
     ),
 }
 
-if __name__ == "__main__":
-    targets = sys.argv[1:]
-    if not targets:
-        print(f"Available workloads: {', '.join(WORKLOADS.keys())}")
+WORKLOADS = {}
+for k, (run_name, flags, users) in BASE_WORKLOADS.items():
+    WORKLOADS[k] = (run_name, flags, users, "gvisor")
+    WORKLOADS[f"{k}_microvm"] = (f"{run_name}_microvm", flags, users, "microvm")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Execute repeatable 1-active-node W1 and W2 benchmarks for gVisor or microVM."
+    )
+    parser.add_argument(
+        "--sandbox-class",
+        choices=["gvisor", "microvm"],
+        default="",
+        help="Override sandbox class for specified targets (gvisor or microvm)",
+    )
+    parser.add_argument(
+        "--deploy-workloads",
+        action="store_true",
+        help="Deploy benchmark WorkerPool/ActorTemplates (with --actor-memory 1536Mi) and pin to active node before running",
+    )
+    parser.add_argument(
+        "targets",
+        nargs="*",
+        help=f"Workload targets to run ({', '.join(BASE_WORKLOADS.keys())}, or *_microvm variants)",
+    )
+    args = parser.parse_args()
+
+    if not args.targets and not args.deploy_workloads:
+        parser.print_help()
         sys.exit(1)
-    for t in targets:
-        if t in WORKLOADS:
-            name, flags, users = WORKLOADS[t]
+
+    inferred_sandbox = args.sandbox_class
+    if not inferred_sandbox and args.targets:
+        if any(t.endswith("_microvm") for t in args.targets):
+            inferred_sandbox = "microvm"
+        else:
+            inferred_sandbox = "gvisor"
+
+    if args.deploy_workloads:
+        deploy_and_pin_workloads(
+            sandbox_class=inferred_sandbox or "gvisor",
+            worker_count=6,
+            actor_memory="1536Mi",
+        )
+
+    for t in args.targets:
+        lookup = t
+        if args.sandbox_class == "microvm" and not t.endswith("_microvm"):
+            lookup = f"{t}_microvm"
+        if lookup in WORKLOADS:
+            name, flags, users, _ = WORKLOADS[lookup]
             run_job(
                 name,
                 flags,
@@ -606,3 +723,7 @@ if __name__ == "__main__":
             )
         else:
             print(f"Unknown target: {t}")
+
+
+if __name__ == "__main__":
+    main()
