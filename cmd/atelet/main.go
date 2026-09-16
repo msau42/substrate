@@ -381,6 +381,9 @@ func main() {
 		controlClient: ateapipb.NewControlClient(ateapiConn),
 		workers:       ateapipb.NewWorkerServiceClient(ateapiConn),
 	})
+	if globalActorDiskPool != nil {
+		globalActorDiskPool.SetWorkerServiceClient(ateapipb.NewWorkerServiceClient(ateapiConn))
+	}
 	go func() {
 		if err := ateomFacingSrv.Serve(ateomFacingLis); err != nil {
 			serverboot.Fatal(ctx, "Failed to serve credential broker", err)
@@ -735,6 +738,10 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		if err := resetActorDirs(actorUID); err != nil {
 			return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 		}
+		if globalActorDiskPool != nil {
+			globalActorDiskPool.RecordActorRef(actorUID, req.GetAtespace(), req.GetActorName())
+			globalActorDiskPool.NotifyActorPaused(actorUID)
+		}
 	}
 
 	return &ateletpb.CheckpointResponse{}, nil
@@ -1025,6 +1032,9 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 	// node or the disk itself.
 	if err := resetActorDirs(actorUID); err != nil {
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
+	}
+	if globalActorDiskPool != nil {
+		globalActorDiskPool.RecordActorRef(actorUID, req.GetAtespace(), req.GetActorName())
 	}
 
 	tMount := time.Now()
@@ -1350,6 +1360,46 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	}
 
 	return &ateletpb.TerminateResponse{}, nil
+}
+
+func (s *AteomHerder) ExportActorDisk(ctx context.Context, req *ateletpb.ExportActorDiskRequest) (*ateletpb.ExportActorDiskResponse, error) {
+	actorUID := req.GetActorUid()
+	if actorUID == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "actor_uid must be provided")
+	}
+	if globalActorDiskPool == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor disk pool is not enabled on this node")
+	}
+	gceDiskName, deviceName, err := globalActorDiskPool.ExportActorDisk(ctx, actorUID)
+	if err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
+		return nil, status.Errorf(codes.Internal, "failed to export actor disk for %s: %v", actorUID, err)
+	}
+	return &ateletpb.ExportActorDiskResponse{
+		GceDiskName: gceDiskName,
+		DeviceName:  deviceName,
+	}, nil
+}
+
+func (s *AteomHerder) ImportActorDisk(ctx context.Context, req *ateletpb.ImportActorDiskRequest) (*ateletpb.ImportActorDiskResponse, error) {
+	actorUID := req.GetActorUid()
+	gceDiskName := req.GetGceDiskName()
+	deviceName := req.GetDeviceName()
+	if actorUID == "" || gceDiskName == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "actor_uid and gce_disk_name must be provided")
+	}
+	if globalActorDiskPool == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor disk pool is not enabled on this node")
+	}
+	if err := globalActorDiskPool.ImportActorDisk(ctx, actorUID, gceDiskName, deviceName); err != nil {
+		if _, ok := status.FromError(err); ok {
+			return nil, err
+		}
+		return nil, status.Errorf(codes.Internal, "failed to import actor disk %s for %s: %v", gceDiskName, actorUID, err)
+	}
+	return &ateletpb.ImportActorDiskResponse{}, nil
 }
 
 func (s *AteomHerder) copyLocalCheckpoint(ctx context.Context, snapshotName string, srcDir, dstDir string, files []string) error {

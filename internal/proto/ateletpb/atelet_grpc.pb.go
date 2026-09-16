@@ -200,6 +200,8 @@ const (
 	AteomHerder_Restore_FullMethodName                = "/atelet.AteomHerder/Restore"
 	AteomHerder_UploadPausedCheckpoint_FullMethodName = "/atelet.AteomHerder/UploadPausedCheckpoint"
 	AteomHerder_Terminate_FullMethodName              = "/atelet.AteomHerder/Terminate"
+	AteomHerder_ExportActorDisk_FullMethodName        = "/atelet.AteomHerder/ExportActorDisk"
+	AteomHerder_ImportActorDisk_FullMethodName        = "/atelet.AteomHerder/ImportActorDisk"
 )
 
 // AteomHerderClient is the client API for AteomHerder service.
@@ -228,6 +230,12 @@ type AteomHerderClient interface {
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
+	// ExportActorDisk unmounts and detaches the actor's dedicated disk from this
+	// node so it can be attached to another node during cross-node resume.
+	ExportActorDisk(ctx context.Context, in *ExportActorDiskRequest, opts ...grpc.CallOption) (*ExportActorDiskResponse, error)
+	// ImportActorDisk attaches and mounts an actor's dedicated disk onto this
+	// node during cross-node resume.
+	ImportActorDisk(ctx context.Context, in *ImportActorDiskRequest, opts ...grpc.CallOption) (*ImportActorDiskResponse, error)
 }
 
 type ateomHerderClient struct {
@@ -288,6 +296,26 @@ func (c *ateomHerderClient) Terminate(ctx context.Context, in *TerminateRequest,
 	return out, nil
 }
 
+func (c *ateomHerderClient) ExportActorDisk(ctx context.Context, in *ExportActorDiskRequest, opts ...grpc.CallOption) (*ExportActorDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExportActorDiskResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_ExportActorDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ateomHerderClient) ImportActorDisk(ctx context.Context, in *ImportActorDiskRequest, opts ...grpc.CallOption) (*ImportActorDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ImportActorDiskResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_ImportActorDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AteomHerderServer is the server API for AteomHerder service.
 // All implementations must embed UnimplementedAteomHerderServer
 // for forward compatibility.
@@ -314,6 +342,12 @@ type AteomHerderServer interface {
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
+	// ExportActorDisk unmounts and detaches the actor's dedicated disk from this
+	// node so it can be attached to another node during cross-node resume.
+	ExportActorDisk(context.Context, *ExportActorDiskRequest) (*ExportActorDiskResponse, error)
+	// ImportActorDisk attaches and mounts an actor's dedicated disk onto this
+	// node during cross-node resume.
+	ImportActorDisk(context.Context, *ImportActorDiskRequest) (*ImportActorDiskResponse, error)
 	mustEmbedUnimplementedAteomHerderServer()
 }
 
@@ -338,6 +372,12 @@ func (UnimplementedAteomHerderServer) UploadPausedCheckpoint(context.Context, *U
 }
 func (UnimplementedAteomHerderServer) Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Terminate not implemented")
+}
+func (UnimplementedAteomHerderServer) ExportActorDisk(context.Context, *ExportActorDiskRequest) (*ExportActorDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExportActorDisk not implemented")
+}
+func (UnimplementedAteomHerderServer) ImportActorDisk(context.Context, *ImportActorDiskRequest) (*ImportActorDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ImportActorDisk not implemented")
 }
 func (UnimplementedAteomHerderServer) mustEmbedUnimplementedAteomHerderServer() {}
 func (UnimplementedAteomHerderServer) testEmbeddedByValue()                     {}
@@ -450,6 +490,42 @@ func _AteomHerder_Terminate_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AteomHerder_ExportActorDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExportActorDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).ExportActorDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_ExportActorDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).ExportActorDisk(ctx, req.(*ExportActorDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _AteomHerder_ImportActorDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ImportActorDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).ImportActorDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_ImportActorDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).ImportActorDisk(ctx, req.(*ImportActorDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AteomHerder_ServiceDesc is the grpc.ServiceDesc for AteomHerder service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -476,6 +552,14 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Terminate",
 			Handler:    _AteomHerder_Terminate_Handler,
+		},
+		{
+			MethodName: "ExportActorDisk",
+			Handler:    _AteomHerder_ExportActorDisk_Handler,
+		},
+		{
+			MethodName: "ImportActorDisk",
+			Handler:    _AteomHerder_ImportActorDisk_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

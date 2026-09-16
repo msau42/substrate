@@ -90,6 +90,32 @@ service AteomHerder {
   // Terminate tells atelet to terminate/kill any running workload for an actor,
   // unmount its volumes, and clean up actor state on the node.
   rpc Terminate(TerminateRequest) returns (TerminateResponse) {}
+
+  // ExportActorDisk unmounts and detaches the actor's dedicated disk from this
+  // node so it can be attached to another node during cross-node resume.
+  rpc ExportActorDisk(ExportActorDiskRequest) returns (ExportActorDiskResponse) {}
+
+  // ImportActorDisk attaches and mounts an actor's dedicated disk onto this
+  // node during cross-node resume.
+  rpc ImportActorDisk(ImportActorDiskRequest) returns (ImportActorDiskResponse) {}
+}
+
+message ExportActorDiskRequest {
+  string actor_uid = 1;
+}
+
+message ExportActorDiskResponse {
+  string gce_disk_name = 1;
+  string device_name = 2;
+}
+
+message ImportActorDiskRequest {
+  string actor_uid = 1;
+  string gce_disk_name = 2;
+  string device_name = 3;
+}
+
+message ImportActorDiskResponse {
 }
 
 message TerminateRequest {

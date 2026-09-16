@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
@@ -33,6 +34,16 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
+
+const detachedDiskPrefix = "detached."
+
+func isDetachedDiskEntry(nodeOrDisk string) bool {
+	return strings.HasPrefix(nodeOrDisk, detachedDiskPrefix)
+}
+
+func detachedDiskName(nodeOrDisk string) string {
+	return strings.TrimPrefix(nodeOrDisk, detachedDiskPrefix)
+}
 
 // resumeSnapshotSource is the boot source resolved once by loadActorForResume
 // and passed by value to the restore step — never mutated after resolution.
@@ -122,6 +133,9 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 	}
 	actor = assigned
 	if err = w.ensureVolumesAttached(leaseCtx, actor, worker, actorTemplate); err != nil {
+		return nil, false, err
+	}
+	if actor, err = w.ensureLocalSnapshotDiskMigrated(leaseCtx, actorRef, actor, worker); err != nil {
 		return nil, false, err
 	}
 	if tele, err = w.ensureAteletRestored(leaseCtx, actorRef, actor, actorTemplate, src); err != nil {
@@ -444,6 +458,13 @@ func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *atea
 	if w.scheduler.Applies(worker, constraints) {
 		return worker, nil
 	}
+	if len(constraints.RequiredNodes) > 0 {
+		fallback := constraints
+		fallback.RequiredNodes = nil
+		if w.scheduler.Applies(worker, fallback) {
+			return worker, nil
+		}
+	}
 
 	_, err = w.store.ReleaseActorFromWorker(ctx, workerName, actorUID)
 	if err != nil {
@@ -458,6 +479,134 @@ func (w *ActorWorkflow) workerHoldingStaleClaim(ctx context.Context, actor *atea
 // success.
 func schedulerRecordable(err error) bool {
 	return !errors.Is(err, store.ErrVersionConflict)
+}
+
+var errDiskOpQueueFull = errors.New("disk operation queue full on source node")
+
+// exportLocalSnapshotDiskBeforeBinding exports the actor's dedicated disk from
+// oldNode BEFORE claiming a worker on a destination node (late worker binding).
+// This prevents target workers from sitting idle while waiting for GCE disk
+// detachment on the source node.
+func (w *ActorWorkflow) exportLocalSnapshotDiskBeforeBinding(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, oldNode string) (*ateapipb.Actor, error) {
+	if w.dialer == nil {
+		return actor, nil
+	}
+	oldConn, err := w.dialer.DialForAteletOnNode(oldNode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial atelet on source node %q for late-binding disk export: %w", oldNode, err)
+	}
+	oldClient := ateletpb.NewAteomHerderClient(oldConn)
+	exportResp, err := oldClient.ExportActorDisk(ctx, &ateletpb.ExportActorDiskRequest{
+		ActorUid: actor.GetMetadata().GetUid(),
+	})
+	if err != nil {
+		code := status.Code(err)
+		if code == codes.ResourceExhausted {
+			return nil, errDiskOpQueueFull
+		}
+		if code == codes.Unimplemented || code == codes.FailedPrecondition {
+			slog.InfoContext(ctx, "Source node does not support actor disk export; rejecting cross-node scheduling",
+				slog.Any("actor", actorRef),
+				slog.String("oldNode", oldNode),
+				slog.Any("err", err))
+			return nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
+		}
+		return nil, fmt.Errorf("failed to export actor disk from node %q: %w", oldNode, err)
+	}
+
+	gceDiskName := exportResp.GetGceDiskName()
+	detachedEntry := detachedDiskPrefix + gceDiskName
+	slog.InfoContext(ctx, "Exported actor local snapshot disk before worker binding (late worker binding)",
+		slog.Any("actor", actorRef),
+		slog.String("gceDiskName", gceDiskName),
+		slog.String("oldNode", oldNode))
+
+	// Persist the detached disk state so that any subsequent retry or step knows
+	// the disk is already detached in GCE and floating.
+	var updatedActor *ateapipb.Actor
+	for attempt := 0; attempt < 5; attempt++ {
+		updatedActor, err = w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+			if toUpdate.GetStatus().GetLocalSnapshotInfo() != nil {
+				toUpdate.Status.LocalSnapshotInfo.NodeVmsWithLocalSnapshots = []string{detachedEntry}
+			}
+			return nil
+		})
+		if err == nil {
+			return updatedActor, nil
+		}
+		if !errors.Is(err, store.ErrVersionConflict) {
+			return nil, fmt.Errorf("failed to persist detached disk state after export: %w", err)
+		}
+		fresh, gerr := w.store.GetActor(ctx, actorRef)
+		if gerr != nil {
+			return nil, fmt.Errorf("failed to refresh actor after version conflict during disk export: %w", gerr)
+		}
+		actor = fresh
+	}
+	return nil, fmt.Errorf("failed to persist detached disk state after retries: %w", err)
+}
+
+// importLocalSnapshotDiskBeforeBinding imports the actor's detached dedicated disk
+// onto targetNode BEFORE claiming a worker on that node (late worker binding).
+// This prevents target workers from sitting idle while waiting for GCE disk
+// attachment (and any required idle disk eviction) on the target node.
+func (w *ActorWorkflow) importLocalSnapshotDiskBeforeBinding(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, targetNode string) (*ateapipb.Actor, error) {
+	if w.dialer == nil {
+		return actor, nil
+	}
+	local := actor.GetStatus().GetLocalSnapshotInfo()
+	if local == nil || len(local.GetNodeVmsWithLocalSnapshots()) == 0 {
+		return actor, nil
+	}
+	entry := local.GetNodeVmsWithLocalSnapshots()[0]
+	if !isDetachedDiskEntry(entry) {
+		return actor, nil
+	}
+	gceDiskName := detachedDiskName(entry)
+	targetConn, err := w.dialer.DialForAteletOnNode(targetNode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial atelet on destination node %q for late-binding disk import: %w", targetNode, err)
+	}
+	targetClient := ateletpb.NewAteomHerderClient(targetConn)
+	_, err = targetClient.ImportActorDisk(ctx, &ateletpb.ImportActorDiskRequest{
+		ActorUid:    actor.GetMetadata().GetUid(),
+		GceDiskName: gceDiskName,
+		DeviceName:  gceDiskName,
+	})
+	if err != nil {
+		code := status.Code(err)
+		if code == codes.ResourceExhausted {
+			return nil, errDiskOpQueueFull
+		}
+		return nil, fmt.Errorf("failed to import actor disk %q onto node %q: %w", gceDiskName, targetNode, err)
+	}
+
+	slog.InfoContext(ctx, "Imported detached actor local snapshot disk before worker binding (late worker binding)",
+		slog.Any("actor", actorRef),
+		slog.String("gceDiskName", gceDiskName),
+		slog.String("targetNode", targetNode))
+
+	var updatedActor *ateapipb.Actor
+	for attempt := 0; attempt < 5; attempt++ {
+		updatedActor, err = w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+			if toUpdate.GetStatus().GetLocalSnapshotInfo() != nil {
+				toUpdate.Status.LocalSnapshotInfo.NodeVmsWithLocalSnapshots = []string{targetNode}
+			}
+			return nil
+		})
+		if err == nil {
+			return updatedActor, nil
+		}
+		if !errors.Is(err, store.ErrVersionConflict) {
+			return nil, fmt.Errorf("failed to persist attached disk state after import: %w", err)
+		}
+		fresh, gerr := w.store.GetActor(ctx, actorRef)
+		if gerr != nil {
+			return nil, fmt.Errorf("failed to refresh actor after version conflict during disk import: %w", gerr)
+		}
+		actor = fresh
+	}
+	return nil, fmt.Errorf("failed to persist attached disk state after retries: %w", err)
 }
 
 // assignWorkerAttempt makes one attempt at claiming a worker for the actor
@@ -491,16 +640,121 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	}
 	if assignedWorker == nil {
 		pickedWorker, err := w.scheduler.Schedule(ctx, constraints)
+		if err != nil && errors.Is(err, scheduling.ErrNoCapacity) && len(constraints.RequiredNodes) > 0 {
+			oldNode := constraints.RequiredNodes[0]
+			slog.InfoContext(ctx, "No capacity on required node(s) for paused actor; falling back to cross-node scheduling with late worker binding",
+				slog.Any("actor", actorRef),
+				slog.Any("requiredNodes", constraints.RequiredNodes))
+			fallbackConstraints := constraints
+			fallbackConstraints.RequiredNodes = nil
+			// Verify cluster has free capacity somewhere before detaching disk from oldNode.
+			if _, checkErr := w.scheduler.Schedule(ctx, fallbackConstraints); checkErr != nil {
+				if errors.Is(checkErr, scheduling.ErrNoCapacity) {
+					outcome = ateattr.SchedulerOutcomeNoFreeWorker
+					return nil, nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
+				}
+				return nil, nil, checkErr
+			}
+			for {
+				exportedActor, exportErr := w.exportLocalSnapshotDiskBeforeBinding(ctx, actorRef, actor, oldNode)
+				if exportErr == nil {
+					actor = exportedActor
+					constraints = fallbackConstraints
+					pickedWorker, err = w.scheduler.Schedule(ctx, constraints)
+					break
+				}
+				if !errors.Is(exportErr, errDiskOpQueueFull) {
+					return nil, nil, exportErr
+				}
+				slog.InfoContext(ctx, "Disk attach/detach queue full on source node; retrying same-node scheduling",
+					slog.Any("actor", actorRef),
+					slog.String("oldNode", oldNode))
+				select {
+				case <-ctx.Done():
+					return actor, nil, ctx.Err()
+				case <-time.After(150 * time.Millisecond):
+				}
+				if sameNodeWorker, sErr := w.scheduler.Schedule(ctx, constraints); sErr == nil {
+					slog.InfoContext(ctx, "Successfully scheduled actor on same node after disk queue limit retry",
+						slog.Any("actor", actorRef),
+						slog.String("node", oldNode),
+						slog.String("worker", sameNodeWorker.GetWorkerPod()))
+					pickedWorker = sameNodeWorker
+					err = nil
+					break
+				}
+			}
+		}
 		if err != nil {
 			if errors.Is(err, scheduling.ErrNoCapacity) {
 				outcome = ateattr.SchedulerOutcomeNoFreeWorker
-				return nil, nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
+				return actor, nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
 			}
-			return nil, nil, err
+			return actor, nil, err
+		}
+
+		// Late Worker Binding for detached disks: if the actor's disk is currently detached
+		// in GCE ("detached.<gceDiskName>", either from proactive background detachment or
+		// from exportLocalSnapshotDiskBeforeBinding above), import and mount it onto the
+		// destination node BEFORE claiming a worker pod. This keeps worker pods 100% free
+		// while GCE attach/mount operations execute.
+		if local := actor.GetStatus().GetLocalSnapshotInfo(); local != nil && len(local.GetNodeVmsWithLocalSnapshots()) > 0 && isDetachedDiskEntry(local.GetNodeVmsWithLocalSnapshots()[0]) {
+			for {
+				targetNode := pickedWorker.GetNodeName()
+				importedActor, importErr := w.importLocalSnapshotDiskBeforeBinding(ctx, actorRef, actor, targetNode)
+				if importErr == nil {
+					actor = importedActor
+					constraints.ExcludedNodes = nil
+					constraints.RequiredNodes = []string{targetNode}
+					for waitAttempt := 0; waitAttempt < 15; waitAttempt++ {
+						pickedWorker, err = w.scheduler.Schedule(ctx, constraints)
+						if err == nil || !errors.Is(err, scheduling.ErrNoCapacity) {
+							break
+						}
+						select {
+						case <-ctx.Done():
+							return actor, nil, ctx.Err()
+						case <-time.After(150 * time.Millisecond):
+						}
+					}
+					break
+				}
+				if !errors.Is(importErr, errDiskOpQueueFull) {
+					return nil, nil, importErr
+				}
+				slog.InfoContext(ctx, "Disk attach/detach queue full on destination node; retrying scheduling",
+					slog.Any("actor", actorRef),
+					slog.String("targetNode", targetNode))
+				constraints.ExcludedNodes = append(constraints.ExcludedNodes, targetNode)
+				pickedWorker, err = w.scheduler.Schedule(ctx, constraints)
+				if err == nil {
+					continue
+				}
+				// All nodes with free capacity currently have full disk queues; clear exclusions and wait briefly.
+				constraints.ExcludedNodes = nil
+				select {
+				case <-ctx.Done():
+					return actor, nil, ctx.Err()
+				case <-time.After(150 * time.Millisecond):
+				}
+				pickedWorker, err = w.scheduler.Schedule(ctx, constraints)
+				if err != nil {
+					break
+				}
+			}
+			if err != nil {
+				if errors.Is(err, scheduling.ErrNoCapacity) {
+					outcome = ateattr.SchedulerOutcomeNoFreeWorker
+					return actor, nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
+				}
+				return actor, nil, err
+			}
 		}
 
 		assignedWorker = pickedWorker
 		slog.InfoContext(ctx, "Picked worker", slog.Any("worker", pickedWorker.String()))
+	} else if len(constraints.RequiredNodes) > 0 && !w.scheduler.Applies(assignedWorker, constraints) {
+		constraints.RequiredNodes = nil
 	}
 
 	assignment := &ateapipb.ActorAssignment{
@@ -527,9 +781,9 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	if err := w.store.BindActorToWorker(ctx, assignedWorker.GetMetadata().GetName(), assignment, admit); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			w.workerCache.Forget(assignedWorker.GetMetadata().GetName())
-			return nil, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
+			return actor, nil, fmt.Errorf("selected worker disappeared before claim: %w", store.ErrVersionConflict)
 		}
-		return nil, nil, err
+		return actor, nil, err
 	}
 
 	newAssignment := workerAssignmentFrom(assignedWorker)
@@ -540,20 +794,20 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 	})
 	if err != nil {
 		if !errors.Is(err, store.ErrVersionConflict) {
-			return nil, nil, err
+			return actor, nil, err
 		}
 		// refresh the version of actor to avoid always failure in rest retries.
 		fresh, gerr := w.store.GetActor(ctx, actorRef)
 		if gerr != nil {
 			slog.WarnContext(ctx, "Failed to refresh actor after assignment conflict", slog.Any("err", gerr))
-			return nil, nil, err
+			return actor, nil, err
 		}
 		switch fresh.GetStatus().GetState() {
 		case ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED:
 			slog.InfoContext(ctx, "Retrying assignment due to actor version conflict", slog.Any("actor", actorRef))
 			return fresh, nil, err
 		default:
-			return nil, nil, status.Errorf(codes.Aborted, "actor %s is %s and can no longer be resumed", actorRef, fresh.GetStatus().GetState())
+			return actor, nil, status.Errorf(codes.Aborted, "actor %s is %s and can no longer be resumed", actorRef, fresh.GetStatus().GetState())
 		}
 	}
 	poolNamespace = assignedWorker.GetWorkerNamespace()
@@ -606,10 +860,16 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 	if err != nil {
 		return scheduling.Constraints{}, fmt.Errorf("invalid template resource limits: %w", err)
 	}
+	var requiredNodes []string
+	for _, n := range actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots() {
+		if !isDetachedDiskEntry(n) {
+			requiredNodes = append(requiredNodes, n)
+		}
+	}
 	c := scheduling.Constraints{
 		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
-		RequiredNodes: actor.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(),
+		RequiredNodes: requiredNodes,
 		Limits:        limits.Proto(),
 	}
 	if sel := tmpl.GetWorkerSelector(); sel != nil {
@@ -643,6 +903,101 @@ func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actor *ateapi
 		}
 	}
 	return nil
+}
+
+// ensureLocalSnapshotDiskMigrated imports (and if needed, exports) the actor's
+// dedicated local-snapshot disk onto the newly assigned worker's node.
+// Under late worker binding, the disk was already exported from the source node
+// prior to worker assignment and recorded as "detached.<gceDiskName>" in
+// NodeVmsWithLocalSnapshots, so only ImportActorDisk on the target node is required.
+func (w *ActorWorkflow) ensureLocalSnapshotDiskMigrated(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, worker *ateapipb.Worker) (_ *ateapipb.Actor, err error) {
+	ctx, done := stepSpan(ctx, "MigrateLocalSnapshotDisk")
+	defer func() { err = done(err) }()
+
+	local := actor.GetStatus().GetLocalSnapshotInfo()
+	if local == nil || len(local.GetNodeVmsWithLocalSnapshots()) == 0 {
+		return actor, nil
+	}
+
+	oldEntry := local.GetNodeVmsWithLocalSnapshots()[0]
+	newNode := worker.GetNodeName()
+	if oldEntry == "" || newNode == "" || oldEntry == newNode {
+		return actor, nil
+	}
+
+	var gceDiskName, deviceName string
+	if isDetachedDiskEntry(oldEntry) {
+		gceDiskName = detachedDiskName(oldEntry)
+		deviceName = gceDiskName
+		slog.InfoContext(ctx, "Importing pre-exported actor local snapshot disk onto assigned node",
+			slog.Any("actor", actorRef),
+			slog.String("actorUID", actor.GetMetadata().GetUid()),
+			slog.String("gceDiskName", gceDiskName),
+			slog.String("newNode", newNode))
+	} else {
+		oldNode := oldEntry
+		slog.InfoContext(ctx, "Migrating actor local snapshot disk across nodes",
+			slog.Any("actor", actorRef),
+			slog.String("actorUID", actor.GetMetadata().GetUid()),
+			slog.String("oldNode", oldNode),
+			slog.String("newNode", newNode))
+
+		oldConn, err := w.dialer.DialForAteletOnNode(oldNode)
+		if err != nil {
+			return nil, fmt.Errorf("failed to dial atelet on source node %q for disk export: %w", oldNode, err)
+		}
+		oldClient := ateletpb.NewAteomHerderClient(oldConn)
+		exportResp, err := oldClient.ExportActorDisk(ctx, &ateletpb.ExportActorDiskRequest{
+			ActorUid: actor.GetMetadata().GetUid(),
+		})
+		if err != nil {
+			if code := status.Code(err); code == codes.Unimplemented || code == codes.FailedPrecondition {
+				slog.InfoContext(ctx, "Source node does not support actor disk export; reverting cross-node assignment",
+					slog.Any("actor", actorRef),
+					slog.String("oldNode", oldNode),
+					slog.Any("err", err))
+				_, _ = w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(), actor.GetMetadata().GetUid())
+				_, _ = w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+					toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSED
+					toUpdate.Status.WorkerAssignment = nil
+					return nil
+				})
+				return nil, status.Errorf(codes.ResourceExhausted, "no free workers available")
+			}
+			return nil, fmt.Errorf("failed to export actor disk from node %q: %w", oldNode, err)
+		}
+		gceDiskName = exportResp.GetGceDiskName()
+		deviceName = exportResp.GetDeviceName()
+	}
+
+	newConn, err := w.dialer.DialForAteletOnNode(newNode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial atelet on destination node %q for disk import: %w", newNode, err)
+	}
+	newClient := ateletpb.NewAteomHerderClient(newConn)
+	if _, err := newClient.ImportActorDisk(ctx, &ateletpb.ImportActorDiskRequest{
+		ActorUid:    actor.GetMetadata().GetUid(),
+		GceDiskName: gceDiskName,
+		DeviceName:  deviceName,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to import actor disk %q onto node %q: %w", gceDiskName, newNode, err)
+	}
+
+	updatedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		if toUpdate.GetStatus().GetLocalSnapshotInfo() != nil {
+			toUpdate.Status.LocalSnapshotInfo.NodeVmsWithLocalSnapshots = []string{newNode}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to update actor local snapshot node after disk migration: %w", err)
+	}
+
+	slog.InfoContext(ctx, "Successfully migrated actor local snapshot disk across nodes",
+		slog.Any("actor", actorRef),
+		slog.String("gceDiskName", gceDiskName),
+		slog.String("newNode", newNode))
+	return updatedActor, nil
 }
 
 // ensureAteletRestored brings the workload up on the assigned worker:

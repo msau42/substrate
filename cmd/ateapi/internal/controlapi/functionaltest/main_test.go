@@ -29,6 +29,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/testenv"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -127,6 +129,12 @@ type FakeAteletServer struct {
 	UploadRequest *ateletpb.UploadPausedCheckpointRequest
 	FailUpload    error
 
+	EnableDiskExport bool
+	ExportCalled     bool
+	ExportRequest    *ateletpb.ExportActorDiskRequest
+	ImportCalled     bool
+	ImportRequest    *ateletpb.ImportActorDiskRequest
+
 	// objectStore, when set, receives the objects a checkpoint or an upload
 	// writes, so the control plane's copy and release steps have real external
 	// snapshots to act on. setupTest points it at the test's own store.
@@ -174,7 +182,40 @@ func (f *FakeAteletServer) Reset() {
 	f.UploadRequest = nil
 	f.FailUpload = nil
 
+	f.EnableDiskExport = false
+	f.ExportCalled = false
+	f.ExportRequest = nil
+	f.ImportCalled = false
+	f.ImportRequest = nil
+
 	f.objectStore = nil
+}
+
+func (f *FakeAteletServer) ExportActorDisk(ctx context.Context, req *ateletpb.ExportActorDiskRequest) (*ateletpb.ExportActorDiskResponse, error) {
+	f.Lock.Lock()
+	defer f.Lock.Unlock()
+
+	if !f.EnableDiskExport {
+		return nil, status.Errorf(codes.Unimplemented, "method ExportActorDisk not implemented")
+	}
+	f.ExportCalled = true
+	f.ExportRequest = proto.Clone(req).(*ateletpb.ExportActorDiskRequest)
+	return &ateletpb.ExportActorDiskResponse{
+		GceDiskName: "actor-disk-0",
+		DeviceName:  "actor-disk-0",
+	}, nil
+}
+
+func (f *FakeAteletServer) ImportActorDisk(ctx context.Context, req *ateletpb.ImportActorDiskRequest) (*ateletpb.ImportActorDiskResponse, error) {
+	f.Lock.Lock()
+	defer f.Lock.Unlock()
+
+	if !f.EnableDiskExport {
+		return nil, status.Errorf(codes.Unimplemented, "method ImportActorDisk not implemented")
+	}
+	f.ImportCalled = true
+	f.ImportRequest = proto.Clone(req).(*ateletpb.ImportActorDiskRequest)
+	return &ateletpb.ImportActorDiskResponse{}, nil
 }
 
 func (f *FakeAteletServer) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.UploadPausedCheckpointRequest) (*ateletpb.UploadPausedCheckpointResponse, error) {

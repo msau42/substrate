@@ -1493,7 +1493,8 @@ var Control_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	WorkerService_SetWorkerCapacity_FullMethodName = "/ateapi.WorkerService/SetWorkerCapacity"
+	WorkerService_SetWorkerCapacity_FullMethodName       = "/ateapi.WorkerService/SetWorkerCapacity"
+	WorkerService_ReportActorDiskDetached_FullMethodName = "/ateapi.WorkerService/ReportActorDiskDetached"
 )
 
 // WorkerServiceClient is the client API for WorkerService service.
@@ -1513,6 +1514,9 @@ type WorkerServiceClient interface {
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity is not a write.
 	SetWorkerCapacity(ctx context.Context, in *SetWorkerCapacityRequest, opts ...grpc.CallOption) (*SetWorkerCapacityResponse, error)
+	// ReportActorDiskDetached records that an atelet has proactively detached a
+	// paused Actor's local snapshot disk in GCE.
+	ReportActorDiskDetached(ctx context.Context, in *ReportActorDiskDetachedRequest, opts ...grpc.CallOption) (*ReportActorDiskDetachedResponse, error)
 }
 
 type workerServiceClient struct {
@@ -1527,6 +1531,16 @@ func (c *workerServiceClient) SetWorkerCapacity(ctx context.Context, in *SetWork
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetWorkerCapacityResponse)
 	err := c.cc.Invoke(ctx, WorkerService_SetWorkerCapacity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *workerServiceClient) ReportActorDiskDetached(ctx context.Context, in *ReportActorDiskDetachedRequest, opts ...grpc.CallOption) (*ReportActorDiskDetachedResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportActorDiskDetachedResponse)
+	err := c.cc.Invoke(ctx, WorkerService_ReportActorDiskDetached_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1550,6 +1564,9 @@ type WorkerServiceServer interface {
 	// atelet calls this with its own client certificate, as it does for
 	// MintCert. Idempotent: re-sending the same capacity is not a write.
 	SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error)
+	// ReportActorDiskDetached records that an atelet has proactively detached a
+	// paused Actor's local snapshot disk in GCE.
+	ReportActorDiskDetached(context.Context, *ReportActorDiskDetachedRequest) (*ReportActorDiskDetachedResponse, error)
 	mustEmbedUnimplementedWorkerServiceServer()
 }
 
@@ -1562,6 +1579,9 @@ type UnimplementedWorkerServiceServer struct{}
 
 func (UnimplementedWorkerServiceServer) SetWorkerCapacity(context.Context, *SetWorkerCapacityRequest) (*SetWorkerCapacityResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetWorkerCapacity not implemented")
+}
+func (UnimplementedWorkerServiceServer) ReportActorDiskDetached(context.Context, *ReportActorDiskDetachedRequest) (*ReportActorDiskDetachedResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReportActorDiskDetached not implemented")
 }
 func (UnimplementedWorkerServiceServer) mustEmbedUnimplementedWorkerServiceServer() {}
 func (UnimplementedWorkerServiceServer) testEmbeddedByValue()                       {}
@@ -1602,6 +1622,24 @@ func _WorkerService_SetWorkerCapacity_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _WorkerService_ReportActorDiskDetached_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportActorDiskDetachedRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(WorkerServiceServer).ReportActorDiskDetached(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: WorkerService_ReportActorDiskDetached_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(WorkerServiceServer).ReportActorDiskDetached(ctx, req.(*ReportActorDiskDetachedRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // WorkerService_ServiceDesc is the grpc.ServiceDesc for WorkerService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1612,6 +1650,10 @@ var WorkerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetWorkerCapacity",
 			Handler:    _WorkerService_SetWorkerCapacity_Handler,
+		},
+		{
+			MethodName: "ReportActorDiskDetached",
+			Handler:    _WorkerService_ReportActorDiskDetached_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

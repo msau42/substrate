@@ -71,8 +71,10 @@ func grantGkeNodePermissions(ctx context.Context, cfg *Config) error {
 	// TODO: Don't grant these permissions at project level.
 	changed1 := addProjectIamBinding(policy, "roles/storage.objectViewer", member)
 	changed2 := addProjectIamBinding(policy, "roles/artifactregistry.reader", member)
+	changed3 := addProjectIamBinding(policy, "roles/compute.instanceAdmin.v1", member)
+	changed4 := addProjectIamBinding(policy, "roles/iam.serviceAccountUser", member)
 
-	if !changed1 && !changed2 {
+	if !changed1 && !changed2 && !changed3 && !changed4 {
 		slog.Info("IAM policy already has required GKE node permissions. Skipping update.", slog.String("project", cfg.ProjectID))
 		return nil
 	}
@@ -113,8 +115,10 @@ func grantAteletPermissions(ctx context.Context, cfg *Config) error {
 	// use.
 	changed1 := addProjectIamBinding(policy, "roles/storage.objectAdmin", member)
 	changed2 := addProjectIamBinding(policy, "roles/artifactregistry.reader", member)
+	changed3 := addProjectIamBinding(policy, "roles/compute.instanceAdmin.v1", member)
+	changed4 := addProjectIamBinding(policy, "roles/iam.serviceAccountUser", member)
 
-	if !changed1 && !changed2 {
+	if !changed1 && !changed2 && !changed3 && !changed4 {
 		slog.Info("IAM policy already has required GKE node permissions. Skipping update.", slog.String("project", cfg.ProjectID))
 		return nil
 	}

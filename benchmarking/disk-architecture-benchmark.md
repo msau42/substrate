@@ -42,13 +42,18 @@ This document defines the repeatable benchmarking plan, empirical results on 1 a
   - When provisioning `c3-standard-8-lssd`, GKE automatically formats and builds a RAID-0 array across the local NVMe SSDs (`2x 375 GB = 750 GB`) and mounts it on the host at `/mnt/stateful_partition/kube-ephemeral-disks`.
   - To ensure `/var/lib/ateom-gvisor` is backed by the local SSD RAID device (`/dev/md0`), bind-mount `/mnt/stateful_partition/kube-ephemeral-disks/ateom-gvisor` to `/var/lib/ateom-gvisor` on the host before starting `atelet`.
 
-### 3.3 Architecture 3: `Pause` with One Dedicated Hyperdisk per Actor (`atelet` Integration)
+### 3.3 Architecture 3: `Pause` with One Dedicated Hyperdisk per Actor (`atelet` Integration & Cross-Node Migration)
 - **Modifying `atelet` for Per-Actor Disk Assignment**:
-  - Because `/var/lib/ateom-gvisor` is mounted into both `atelet` and all `ateom` worker pods at `/var/lib/ateom-gvisor`, any subdirectory under `/var/lib/ateom-gvisor/disk-pool/disk-i` is visible at the identical path inside both `atelet` and `ateom` containers.
-  - Because `atelet` drops `CAP_SYS_ADMIN`, it cannot call `mount(2)`, **but it can create symlinks (`os.Symlink`) as root**.
+  - Because `/var/lib/ateom-gvisor` is mounted into `atelet` (`mountPropagation: Bidirectional`) and all `ateom` worker pods (`mountPropagation: HostToContainer`), any disk mounted under `/var/lib/ateom-gvisor/disk-pool/<diskName>` is visible at the identical path inside both `atelet` and `ateom` containers.
   - When `--actor-disk-pool-dir=/var/lib/ateom-gvisor/disk-pool` is enabled in `cmd/atelet/main.go`:
-    1. Pre-attach and mount $N$ dedicated `hyperdisk-balanced` volumes (`disk-0`, `disk-1`, ..., `disk-N`) under `/var/lib/ateom-gvisor/disk-pool/disk-i` on the host using `benchmarking/scripts/disk-arch/setup_disk_pool.py`.
-    2. In `atelet`, `ActorDiskPool` maps `actorUID` $\leftrightarrow$ `disk-i` and symlinks `/var/lib/ateom-gvisor/actors/<actorUID>` $\to$ `/var/lib/ateom-gvisor/disk-pool/disk-i/<actorUID>`.
+    1. Pre-attach and mount $N$ dedicated `hyperdisk-balanced` volumes (`actor-disk-<idx>`) under `/var/lib/ateom-gvisor/disk-pool/` on the host using `benchmarking/scripts/disk-arch/setup_disk_pool.py`, which assigns globally unique, node-agnostic disk names (`actor-disk-0`, `actor-disk-1`, ...) across the cluster and writes self-describing `.disk-metadata.json` (`gceDiskName` and `deviceName`) onto each disk root.
+    2. In `atelet`, `ActorDiskPool` maps `actorUID` $\leftrightarrow$ `diskPath` and symlinks `/var/lib/ateom-gvisor/actors/<actorUID>` $\to$ `<diskPath>/<actorUID>`.
+- **Cross-Node Disk Migration when Previous Node is Out of Capacity**:
+  - When a paused actor resumes (`ResumeActor`) and its previous node (`NodeVmsWithLocalSnapshots`) has no free worker capacity (`scheduling.ErrNoCapacity`), `assignWorkerAttempt` in `cmd/ateapi/internal/controlapi/workflow_resume.go` automatically falls back to scheduling the actor onto another node with available worker capacity.
+  - Before invoking `Restore` on the target node's `atelet`, `ensureLocalSnapshotDiskMigrated` orchestrates cross-node block volume migration:
+    1. Calls `ExportActorDisk` on the old node's `atelet`: unmounts the actor's dedicated Hyperdisk, removes it from the old node's `ActorDiskPool`, and calls GCE `instances.detachDisk`.
+    2. Calls `ImportActorDisk` on the new node's `atelet`: calls GCE `instances.attachDisk`, mounts the block device under `/var/lib/ateom-gvisor/disk-pool/<gceDiskName>`, registers the disk in the new node's `ActorDiskPool`, and creates `/var/lib/ateom-gvisor/actors/<actorUID>` symlink.
+    3. Updates the actor's `NodeVmsWithLocalSnapshots` in PostgreSQL to `[newNode]` and proceeds with local checkpoint restore on `newNode` without requiring object storage upload/download.
 
 ---
 

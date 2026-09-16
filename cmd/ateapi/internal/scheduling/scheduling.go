@@ -43,6 +43,10 @@ type Constraints struct {
 	// to specific node VMs.
 	RequiredNodes []string
 
+	// ExcludedNodes, when non-empty, excludes workers running on any of these
+	// nodes from placement (e.g., when a node's disk operation queue is full).
+	ExcludedNodes []string
+
 	// Limits are the actor's declared resource limits, named as a Worker names
 	// the capacity it reports, so the two subtract.
 	Limits *ateapipb.Resources
@@ -142,6 +146,10 @@ func (s *scheduler) Applies(worker *ateapipb.Worker, constraints Constraints) bo
 		return false
 	}
 	if constraints.ActorSelector != nil && !constraints.ActorSelector.Matches(set) {
+		return false
+	}
+
+	if len(constraints.ExcludedNodes) > 0 && slices.Contains(constraints.ExcludedNodes, worker.GetNodeName()) {
 		return false
 	}
 

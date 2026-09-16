@@ -210,3 +210,71 @@ func TestSetWorkerCapacity_RejectsNonsense(t *testing.T) {
 		t.Errorf("capacity changed despite every report being refused (-want +got):\n%s", diff)
 	}
 }
+
+func TestReportActorDiskDetached(t *testing.T) {
+	ctx := context.Background()
+	st, cleanup := storetest.SetupTestStore(t)
+	defer cleanup()
+	s := New(st)
+
+	if _, err := st.CreateAtespace(ctx, &ateapipb.Atespace{
+		Metadata: &ateapipb.ResourceMetadata{Name: "default"},
+	}); err != nil {
+		t.Fatalf("CreateAtespace: %v", err)
+	}
+
+	created, err := st.CreateActor(ctx, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: "default", Name: "actor-detach-test"},
+	})
+	if err != nil {
+		t.Fatalf("CreateActor: %v", err)
+	}
+
+	actorRef := resources.ActorRef{Atespace: "default", Name: "actor-detach-test"}
+	paused, err := st.UpdateActor(ctx, actorRef, store.PreconditionFrom(created), func(toUpdate *ateapipb.Actor) error {
+		if toUpdate.Status == nil {
+			toUpdate.Status = &ateapipb.ActorStatus{}
+		}
+		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSED
+		toUpdate.Status.LocalSnapshotInfo = &ateapipb.LocalSnapshotInfo{
+			SnapshotName:              "snap-1",
+			NodeVmsWithLocalSnapshots: []string{capNode},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("UpdateActor to PAUSED: %v", err)
+	}
+
+	authedOwner := ateletauthtest.ContextWith(ateletauthtest.CertOn(t, capNode))
+	authedOther := ateletauthtest.ContextWith(ateletauthtest.CertOn(t, "other-node"))
+
+	// 1. Non-owner node cannot report detachment
+	_, err = s.ReportActorDiskDetached(authedOther, &ateapipb.ReportActorDiskDetachedRequest{
+		Actor:       &ateapipb.ObjectRef{Atespace: "default", Name: "actor-detach-test"},
+		ActorUid:    paused.GetMetadata().GetUid(),
+		GceDiskName: "actor-disk-5",
+	})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("non-owner node code = %v, want FailedPrecondition", got)
+	}
+
+	// 2. Owner node successfully updates local_snapshot_info to detached.actor-disk-5
+	_, err = s.ReportActorDiskDetached(authedOwner, &ateapipb.ReportActorDiskDetachedRequest{
+		Actor:       &ateapipb.ObjectRef{Atespace: "default", Name: "actor-detach-test"},
+		ActorUid:    paused.GetMetadata().GetUid(),
+		GceDiskName: "actor-disk-5",
+	})
+	if err != nil {
+		t.Fatalf("owner ReportActorDiskDetached failed: %v", err)
+	}
+
+	after, err := st.GetActor(ctx, actorRef)
+	if err != nil {
+		t.Fatalf("GetActor: %v", err)
+	}
+	gotNodes := after.GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots()
+	if len(gotNodes) != 1 || gotNodes[0] != "detached.actor-disk-5" {
+		t.Errorf("NodeVmsWithLocalSnapshots = %v, want [detached.actor-disk-5]", gotNodes)
+	}
+}

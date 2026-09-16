@@ -3306,6 +3306,78 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	}
 }
 
+// TestResumeActor_CrossNodeDiskMigrationWhenNodeFull verifies that when a PAUSED
+// actor's node (node1) is full and dedicated actor disk export/import is enabled
+// (Arch 3), ResumeActor automatically schedules the actor onto another node with
+// free capacity (node2), exports the disk from node1, imports it onto node2,
+// updates NodeVmsWithLocalSnapshots to [node2], and restores the actor without
+// requiring SuspendActor or object storage upload.
+func TestResumeActor_CrossNodeDiskMigrationWhenNodeFull(t *testing.T) {
+	ns := namespaceForTest("ns-resume-migrate")
+	tc := setupTest(t, ns)
+	defer tc.cleanup()
+
+	tc.fakeAtelet.Lock.Lock()
+	tc.fakeAtelet.EnableDiskExport = true
+	tc.fakeAtelet.Lock.Unlock()
+
+	createTemplate(t, tc, ns)
+	workerName := createWorkerPod(t, tc, ns, "worker-1", "node1", "pool1")
+
+	const migrating, squatter = "actor-migrating", "actor-squatter"
+	for _, name := range []string{migrating, squatter} {
+		if _, err := tc.client.CreateActor(context.Background(), &ateapipb.CreateActorRequest{Actor: &ateapipb.Actor{
+			Metadata:      &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: name},
+			ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
+		}}); err != nil {
+			t.Fatalf("CreateActor(%s) failed: %v", name, err)
+		}
+	}
+
+	// Boot and pause actor-migrating on node1
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: migrating},
+	}); err != nil {
+		t.Fatalf("ResumeActor(%s) failed: %v", migrating, err)
+	}
+	if _, err := tc.client.PauseActor(context.Background(), &ateapipb.PauseActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: migrating},
+	}); err != nil {
+		t.Fatalf("PauseActor(%s) failed: %v", migrating, err)
+	}
+	waitForWorkerAvailable(t, tc, workerName)
+
+	// Fill node1's only worker with actor-squatter
+	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: squatter},
+	}); err != nil {
+		t.Fatalf("ResumeActor(%s) failed: %v", squatter, err)
+	}
+	createWorkerPod(t, tc, ns, "worker-2", "node2", "pool1")
+	setupAteletOnNode(t, tc, "atelet-node2", "node2")
+
+	// Resume actor-migrating: should succeed directly by migrating disk from node1 -> node2
+	resumed, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: migrating},
+	})
+	if err != nil {
+		t.Fatalf("ResumeActor(%s) with cross-node disk migration failed: %v", migrating, err)
+	}
+	if got := resumed.GetActor().GetStatus().GetWorkerAssignment().GetWorkerPod(); got != "worker-2" {
+		t.Errorf("resumed onto worker %q, want worker-2 (on node2)", got)
+	}
+	if got := resumed.GetActor().GetStatus().GetLocalSnapshotInfo().GetNodeVmsWithLocalSnapshots(); len(got) != 1 || got[0] != "node2" {
+		t.Errorf("NodeVmsWithLocalSnapshots after migration = %v, want [node2]", got)
+	}
+	tc.fakeAtelet.Lock.Lock()
+	exportCalled := tc.fakeAtelet.ExportCalled
+	importCalled := tc.fakeAtelet.ImportCalled
+	tc.fakeAtelet.Lock.Unlock()
+	if !exportCalled || !importCalled {
+		t.Errorf("expected ExportActorDisk (%v) and ImportActorDisk (%v) to be called", exportCalled, importCalled)
+	}
+}
+
 // TestLifecycleOpPoolAttributesOnSuccess is the regression test for #957: a
 // successful suspend and pause must stamp the pool they ran on. Both recorded
 // the histogram from a defer that read the finalized record, whose assignment

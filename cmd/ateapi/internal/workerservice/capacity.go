@@ -134,3 +134,81 @@ func validateReportedCapacity(reported *ateapipb.WorkerResources) error {
 	}
 	return nil
 }
+
+// ReportActorDiskDetached updates a paused Actor's local_snapshot_info in the
+// store to "detached.<gceDiskName>" when the calling atelet has proactively
+// detached its disk in GCE.
+func (s *Server) ReportActorDiskDetached(ctx context.Context, req *ateapipb.ReportActorDiskDetachedRequest) (*ateapipb.ReportActorDiskDetachedResponse, error) {
+	caller, err := ateletauth.Authenticate(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetActor() == nil || req.GetActor().GetAtespace() == "" || req.GetActor().GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor reference (atespace and name) is required")
+	}
+	if req.GetActorUid() == "" || req.GetGceDiskName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "actor_uid and gce_disk_name are required")
+	}
+
+	actorRef := resources.ActorRef{
+		Atespace: req.GetActor().GetAtespace(),
+		Name:     req.GetActor().GetName(),
+	}
+	actor, err := s.store.GetActor(ctx, actorRef)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, status.Errorf(codes.NotFound, "Actor %s not found", actorRef)
+		}
+		return nil, fmt.Errorf("while fetching actor %s: %w", actorRef, err)
+	}
+	if actor.GetMetadata().GetUid() != req.GetActorUid() {
+		return nil, status.Errorf(codes.NotFound, "Actor %s (uid %s) not found", actorRef, req.GetActorUid())
+	}
+
+	detachedEntry := "detached." + req.GetGceDiskName()
+	local := actor.GetStatus().GetLocalSnapshotInfo()
+	if local == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s has no local snapshot info", actorRef)
+	}
+	nodes := local.GetNodeVmsWithLocalSnapshots()
+	if slices.Contains(nodes, detachedEntry) {
+		return &ateapipb.ReportActorDiskDetachedResponse{}, nil
+	}
+	if !slices.Contains(nodes, caller.NodeName) {
+		slog.WarnContext(ctx, "Refusing proactive disk detachment report from non-owner node",
+			slog.Any("actor", actorRef),
+			slog.Any("recorded_nodes", nodes),
+			slog.String("caller_node", caller.NodeName))
+		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s local snapshot is not on caller node %s", actorRef, caller.NodeName)
+	}
+	if actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+		return nil, status.Errorf(codes.FailedPrecondition, "Actor %s is %s, not PAUSED", actorRef, actor.GetStatus().GetState())
+	}
+
+	_, err = s.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		if toUpdate.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
+			return store.ErrFailedPrecondition
+		}
+		if toUpdate.GetStatus().GetLocalSnapshotInfo() == nil {
+			return store.ErrFailedPrecondition
+		}
+		toUpdate.Status.LocalSnapshotInfo.NodeVmsWithLocalSnapshots = []string{detachedEntry}
+		return nil
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrUIDConflict):
+		return nil, status.Errorf(codes.NotFound, "Actor %s not found", actorRef)
+	case errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrFailedPrecondition):
+		return nil, status.Error(codes.Aborted, "concurrent actor state change, skipping proactive detach update")
+	default:
+		return nil, fmt.Errorf("while recording detached disk for actor %s: %w", actorRef, err)
+	}
+
+	slog.InfoContext(ctx, "Recorded proactive actor disk detachment in local_snapshot_info",
+		slog.Any("actor", actorRef),
+		slog.String("actor_uid", req.GetActorUid()),
+		slog.String("gce_disk_name", req.GetGceDiskName()),
+		slog.String("caller_node", caller.NodeName))
+	return &ateapipb.ReportActorDiskDetachedResponse{}, nil
+}
