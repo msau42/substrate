@@ -85,6 +85,13 @@ func (c *Client) Close() {
 // NewClient creates a new Ate API client. If endpoint is empty, it automatically port-forwards
 // to the ate-api-server pod in the ate-system namespace.
 func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool) (*Client, error) {
+	if endpoint == "" {
+		endpoint = os.Getenv("ATEAPI_ENDPOINT")
+	}
+	if tokenFile == "" {
+		tokenFile = os.Getenv("ATEAPI_TOKEN_FILE")
+	}
+
 	tp, err := initTracing(ctx, traceEnabled)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize tracing: %w", err)
@@ -109,27 +116,45 @@ func NewClient(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenF
 }
 
 func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, tokenFile string, traceEnabled bool) (*Client, error) {
-	config, err := LoadKubeConfig(kubeconfigPath, k8sContext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+	caFile := os.Getenv("ATEAPI_CA_FILE")
+	var (
+		tlsCfg    *tls.Config
+		clientset *kubernetes.Clientset
+		err       error
+	)
+
+	if caFile != "" {
+		tlsCfg, err = serverTLSConfigFromFile(caFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
-	// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
-	// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
-	// clusters), client-go will print out a warning every time it initializes.
-	config.WarningHandlerWithContext = &rest.NoWarnings{}
+	if tlsCfg == nil || tokenFile == "" {
+		config, err := LoadKubeConfig(kubeconfigPath, k8sContext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load kubeconfig: %w", err)
+		}
 
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create k8s client: %w", err)
-	}
+		// We fetch a ClusterTrustBundle via the certificates.k8s.io/v1beta1 API in
+		// serverTLSConfig().  Until we migrate to certificates.k8s.io/v1
+		// ClusterTrustBundle (which locks us into supporting only k8s 1.37+
+		// clusters), client-go will print out a warning every time it initializes.
+		config.WarningHandlerWithContext = &rest.NoWarnings{}
 
-	// Verify the server before attaching the bearer token below: the token
-	// must never be sent over an unauthenticated channel.
-	tlsCfg, err := serverTLSConfig(ctx, clientset)
-	if err != nil {
-		return nil, err
+		clientset, err = kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create k8s client: %w", err)
+		}
+
+		if tlsCfg == nil {
+			// Verify the server before attaching the bearer token below: the token
+			// must never be sent over an unauthenticated channel.
+			tlsCfg, err = serverTLSConfig(ctx, clientset)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	var opts []grpc.DialOption
@@ -154,6 +179,22 @@ func dialDirect(ctx context.Context, kubeconfigPath, k8sContext, endpoint, token
 		ControlClient: ateapipb.NewControlClient(conn),
 		conn:          conn,
 		cancel:        func() {},
+	}, nil
+}
+
+func serverTLSConfigFromFile(caFile string) (*tls.Config, error) {
+	pemBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read CA file %q: %w", caFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("CA file %q contains no valid certificates", caFile)
+	}
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+		RootCAs:    pool,
+		ServerName: apiServerName,
 	}, nil
 }
 

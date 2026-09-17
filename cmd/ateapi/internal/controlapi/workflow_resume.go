@@ -663,10 +663,10 @@ func (w *ActorWorkflow) assignWorkerAttempt(ctx context.Context, actorRef resour
 					pickedWorker, err = w.scheduler.Schedule(ctx, constraints)
 					break
 				}
-				if !errors.Is(exportErr, errDiskOpQueueFull) {
+				if !errors.Is(exportErr, errDiskOpQueueFull) && status.Code(exportErr) != codes.FailedPrecondition {
 					return nil, nil, exportErr
 				}
-				slog.InfoContext(ctx, "Disk attach/detach queue full on source node; retrying same-node scheduling",
+				slog.InfoContext(ctx, "Disk export unavailable or queue full on source node; retrying same-node scheduling",
 					slog.Any("actor", actorRef),
 					slog.String("oldNode", oldNode))
 				select {

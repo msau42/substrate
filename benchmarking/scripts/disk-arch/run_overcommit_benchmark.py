@@ -35,6 +35,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 
@@ -96,47 +98,29 @@ def cleanup_benchmark_actors():
     )
 
 
-def wait_for_node_proactive_trim(node: str, target_max: int = 19, timeout_sec: int = 75):
-    """Wait for atelet proactive background eviction to trim mounted pool disks to <= target_max."""
-    p = run(
-        [
-            "kubectl",
-            "get",
-            "pods",
-            "-n",
-            "ate-system",
-            "-l",
-            "app=atelet",
-            f"--field-selector=spec.nodeName={node}",
-            "-o",
-            "jsonpath={.items[0].metadata.name}",
-        ],
-        check=False,
-        verbose=False,
-    )
-    pod = p.stdout.strip()
-    if not pod:
-        time.sleep(2.0)
+def wait_for_node_proactive_trim(node: str, target_max: int = 19, timeout_sec: int = 75, skip: bool = False):
+    """Wait for atelet proactive background eviction to trim attached pool disks to <= target_max."""
+    if skip:
         return
     t0 = time.time()
     while time.time() - t0 < timeout_sec:
         res = run(
             [
-                "kubectl",
-                "exec",
-                "-n",
-                "ate-system",
-                pod,
-                "--",
-                "sh",
-                "-c",
-                "ls -1d /var/lib/ateom-gvisor/disk-pool/actor-disk-* 2>/dev/null | wc -l",
+                "gcloud",
+                "compute",
+                "instances",
+                "describe",
+                node,
+                f"--zone={ZONE}",
+                f"--project={PROJECT_ID}",
+                "--format=value(disks[].deviceName)",
             ],
             check=False,
             verbose=False,
         )
-        if res.returncode == 0 and res.stdout.strip().isdigit():
-            cnt = int(res.stdout.strip())
+        if res.returncode == 0:
+            dev_names = [d.strip() for d in res.stdout.strip().split(";") if d.strip()]
+            cnt = sum(1 for d in dev_names if d.startswith("actor-disk-"))
             if cnt <= target_max:
                 return
         time.sleep(1.5)
@@ -226,7 +210,7 @@ def add_second_worker_on_node2(node1: str, node2: str):
     time.sleep(2)
 
 
-def setup_two_node_topology(node1: str, node2: str, disks_per_node: int, throughput: int, skip_disk_setup: bool):
+def setup_two_node_topology(node1: str, node2: str, disks_per_node: int, throughput: int, skip_disk_setup: bool, nodepool: str = ""):
     """Provision disks across both nodes if needed."""
     run(["kubectl", "uncordon", node1, node2], verbose=False)
     cleanup_benchmark_actors()
@@ -247,9 +231,97 @@ def setup_two_node_topology(node1: str, node2: str, disks_per_node: int, through
     )
 
     if not skip_disk_setup:
-        print(f"\n--- Provisioning {disks_per_node} dedicated Hyperdisks per node ({throughput} MiB/s) ---")
-        run(
-            [
+        if disks_per_node == 0:
+            print("\n--- Configuring Arch 1 Mode (Shared Node Boot Disk, 0 Dedicated Hyperdisks) ---")
+            unmount_script = """
+set -e
+for d in /var/lib/ateom-gvisor/disk-pool/*; do
+    if [ -d "$d" ]; then
+        umount -lf "$d" || true
+        rm -rf "$d" || true
+    fi
+done
+rm -f /var/lib/ateom-gvisor/disk-pool/.detached-pool.json
+rm -rf /var/lib/ateom-gvisor/actors/*
+"""
+            for n in [node1, node2]:
+                run(
+                    [
+                        "kubectl",
+                        "debug",
+                        f"node/{n}",
+                        "--image=alpine",
+                        "--profile=sysadmin",
+                        "-i",
+                        "--",
+                        "chroot",
+                        "/host",
+                        "bash",
+                        "-c",
+                        unmount_script,
+                    ],
+                    check=False,
+                    verbose=False,
+                )
+            p_ds = run(
+                ["kubectl", "get", "ds", "-n", "ate-system", "-l", "app=atelet", "-o", "jsonpath={.items[0].metadata.name}"],
+                check=False,
+                verbose=False,
+            )
+            ds_name = p_ds.stdout.strip()
+            if ds_name:
+                p_args = run(
+                    ["kubectl", "get", "ds", "-n", "ate-system", ds_name, "-o", "jsonpath={.spec.template.spec.containers[0].args}"],
+                    check=False,
+                    verbose=False,
+                )
+                if p_args.returncode == 0 and p_args.stdout.strip():
+                    args_list = json.loads(p_args.stdout)
+                    new_args = [a for a in args_list if not a.startswith("--actor-disk-pool-dir")]
+                    new_args.append("--actor-disk-pool-dir=")
+                    run(
+                        [
+                            "kubectl",
+                            "patch",
+                            "ds",
+                            "-n",
+                            "ate-system",
+                            ds_name,
+                            "--type=json",
+                            f"-p=[{{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": {json.dumps(new_args)}}}]",
+                        ]
+                    )
+        else:
+            p_ds = run(
+                ["kubectl", "get", "ds", "-n", "ate-system", "-l", "app=atelet", "-o", "jsonpath={.items[0].metadata.name}"],
+                check=False,
+                verbose=False,
+            )
+            ds_name = p_ds.stdout.strip()
+            if ds_name:
+                p_args = run(
+                    ["kubectl", "get", "ds", "-n", "ate-system", ds_name, "-o", "jsonpath={.spec.template.spec.containers[0].args}"],
+                    check=False,
+                    verbose=False,
+                )
+                if p_args.returncode == 0 and p_args.stdout.strip():
+                    args_list = json.loads(p_args.stdout)
+                    new_args = [a for a in args_list if not a.startswith("--actor-disk-pool-dir")]
+                    new_args.append("--actor-disk-pool-dir=/var/lib/ateom-gvisor/disk-pool")
+                    run(
+                        [
+                            "kubectl",
+                            "patch",
+                            "ds",
+                            "-n",
+                            "ate-system",
+                            ds_name,
+                            "--type=json",
+                            f"-p=[{{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": {json.dumps(new_args)}}}]",
+                        ]
+                    )
+            print(f"\n--- Provisioning {disks_per_node} dedicated Hyperdisks per node ({throughput} MiB/s) ---")
+            pool_cmd = [
                 "python3",
                 "benchmarking/scripts/disk-arch/setup_disk_pool.py",
                 "--count",
@@ -257,8 +329,34 @@ def setup_two_node_topology(node1: str, node2: str, disks_per_node: int, through
                 "--throughput",
                 str(throughput),
             ]
-        )
-        print("Restarting atelet DaemonSet to discover disk pools...")
+            if nodepool:
+                pool_cmd.extend(["--nodepool", nodepool])
+            run(pool_cmd)
+        print("Restarting atelet DaemonSet...")
+        run(["kubectl", "rollout", "restart", "ds", "-n", "ate-system", "-l", "app=atelet"])
+        run(["kubectl", "rollout", "status", "ds", "-n", "ate-system", "-l", "app=atelet", "--timeout=120s"])
+    elif disks_per_node > 0:
+        print("Clearing .actor-uid markers on mounted pool disks and restarting atelet...")
+        clear_script = "rm -f /var/lib/ateom-gvisor/disk-pool/*/.actor-uid && rm -rf /var/lib/ateom-gvisor/actors/*"
+        for n in [node1, node2]:
+            run(
+                [
+                    "kubectl",
+                    "debug",
+                    f"node/{n}",
+                    "--image=alpine",
+                    "--profile=sysadmin",
+                    "-i",
+                    "--",
+                    "chroot",
+                    "/host",
+                    "bash",
+                    "-c",
+                    clear_script,
+                ],
+                check=False,
+                verbose=False,
+            )
         run(["kubectl", "rollout", "restart", "ds", "-n", "ate-system", "-l", "app=atelet"])
         run(["kubectl", "rollout", "status", "ds", "-n", "ate-system", "-l", "app=atelet", "--timeout=120s"])
 
@@ -361,7 +459,7 @@ jsonPayload.method:("/atelet.AteomHerder/ImportActorDisk" OR "/atelet.AteomHerde
                     import_ms.append(elapsed)
                 elif method == "/atelet.AteomHerder/Restore":
                     req = payload.get("req", {})
-                    if req.get("type") == 1 or req.get("type") == "SNAPSHOT_TYPE_LOCAL":
+                    if req.get("type") in (1, 2, "SNAPSHOT_TYPE_LOCAL", "SNAPSHOT_TYPE_EXTERNAL"):
                         restore_ms.append(elapsed)
             if import_ms or restore_ms:
                 return {
@@ -392,7 +490,7 @@ jsonPayload.method:("/atelet.AteomHerder/ImportActorDisk" OR "/atelet.AteomHerde
             import_ms.append(parse_duration_str(elapsed))
         elif method == "/atelet.AteomHerder/Restore" and entry.get("err") is None:
             req = entry.get("req", {})
-            if req.get("type") == 1:
+            if req.get("type") in (1, 2, "SNAPSHOT_TYPE_LOCAL", "SNAPSHOT_TYPE_EXTERNAL"):
                 restore_ms.append(parse_duration_str(elapsed))
     return {
         "export_ms": export_ms,
@@ -564,202 +662,268 @@ def scale_worker_pool(replicas: int):
         ],
         verbose=False,
     )
-
-
 def run_stochastic_overcommit_benchmark(
     node1: str,
     node2: str,
     num_workers: int,
     num_actors: int,
     duration_sec: int,
+    use_suspend: bool = False,
 ) -> dict:
     """Run A concurrent actor threads competing for W workers across 2 nodes."""
     workers_per_node = num_workers // 2
     mid = num_actors // 2
+    idle_verb = "suspend" if use_suspend else "pause"
     print(
-        f"\n=== Running Stochastic Multi-Actor Overcommit Pool Benchmark ({num_actors} Actors on {num_workers} Workers [{workers_per_node}/node] across 2 Nodes, {duration_sec}s) ==="
+        f"\n=== Running Stochastic Multi-Actor Overcommit Pool Benchmark ({num_actors} Actors on {num_workers} Workers [{workers_per_node}/node] across 2 Nodes, {duration_sec}s, idle={idle_verb}) ==="
     )
     cleanup_benchmark_actors()
 
-    # 1. Create all actors in parallel
-    actors = [f"overcommit-pool-{i}-{uuid.uuid4().hex[:4]}" for i in range(num_actors)]
-    print(f"Creating {num_actors} actors in parallel...")
-
-    def _create(a):
-        run(["./bin/kubectl-ate", "-a", "benchmark-workloads", "create", "actor", a, "--template=sleep"], verbose=False)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-        list(ex.map(_create, actors))
-
-    # 2. Scale to workers_per_node on node1 only
-    print(f"Scaling worker pool to {workers_per_node} workers on {node1}...")
-    run(["kubectl", "cordon", node2], verbose=False)
-    run(["kubectl", "uncordon", node1], verbose=False)
-    scale_worker_pool(0)
-    time.sleep(4)
-    scale_worker_pool(workers_per_node)
-    wait_for_ready_pods_on_node(node1, workers_per_node)
-
-    def _resume_retry(a: str):
-        for attempt in range(6):
-            p = run(["./bin/kubectl-ate", "-a", "benchmark-workloads", "resume", "actor", a], check=False, verbose=False)
-            if p.returncode == 0:
-                return
-            time.sleep(1.5)
-        raise RuntimeError(f"Failed to resume {a}: {p.stderr}")
-
-    def _pause_retry(a: str):
-        for attempt in range(6):
-            p = run(["./bin/kubectl-ate", "-a", "benchmark-workloads", "pause", "actor", a], check=False, verbose=False)
-            if p.returncode == 0:
-                return
-            time.sleep(1.5)
-        raise RuntimeError(f"Failed to pause {a}: {p.stderr}")
-
-    # 3. Initialize first half of actors (actors[:mid]) on node1 in adaptive waves
-    print(f"Initializing {mid} actors on {node1}...")
-    wave_idx = 0
-    while wave_idx < mid:
-        cur_wave_size = 3 if wave_idx >= 25 else min(workers_per_node, 10)
-        wave = actors[wave_idx : min(wave_idx + cur_wave_size, mid)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
-            list(ex.map(_resume_retry, wave))
-        time.sleep(0.5)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
-            list(ex.map(_pause_retry, wave))
-        wait_for_node_proactive_trim(node1, target_max=29)
-        print(f"  Initialized actors {wave_idx}..{wave_idx + len(wave) - 1} on {node1}")
-        wave_idx += len(wave)
-
-    # 4. Occupy all workers on node1 using the most recently paused (warm mounted) actors
-    print(f"Occupying {workers_per_node} workers on {node1} to isolate {node2} initialization...")
-    blockers_node1 = actors[mid - workers_per_node : mid]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(blockers_node1)) as ex:
-        list(ex.map(_resume_retry, blockers_node1))
-
-    # 5. Scale up to num_workers by adding workers_per_node on node2
-    print(f"Adding {workers_per_node} workers on {node2} (total {num_workers} workers)...")
-    run(["kubectl", "uncordon", node2], verbose=False)
-    run(["kubectl", "cordon", node1], verbose=False)
-    scale_worker_pool(num_workers)
-    wait_for_ready_pods_on_node(node2, workers_per_node)
-
-    # 6. Initialize second half of actors (actors[mid:]) on node2 in adaptive waves
-    print(f"Initializing {num_actors - mid} actors on {node2}...")
-    wave_idx = mid
-    while wave_idx < num_actors:
-        local_idx = wave_idx - mid
-        cur_wave_size = 3 if local_idx >= 25 else min(workers_per_node, 10)
-        wave = actors[wave_idx : min(wave_idx + cur_wave_size, num_actors)]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
-            list(ex.map(_resume_retry, wave))
-        time.sleep(0.5)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
-            list(ex.map(_pause_retry, wave))
-        wait_for_node_proactive_trim(node2, target_max=29)
-        print(f"  Initialized actors {wave_idx}..{wave_idx + len(wave) - 1} on {node2}")
-        wave_idx += len(wave)
-
-    # 7. Pause node1 blockers and uncordon node1
-    print(f"Releasing {node1} blockers and uncordoning all nodes...")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(blockers_node1)) as ex:
-        list(ex.map(_pause_retry, blockers_node1))
-    wait_for_node_proactive_trim(node1, target_max=29)
-    wait_for_node_proactive_trim(node2, target_max=29)
-    run(["kubectl", "uncordon", node1], verbose=False)
-    time.sleep(1.0)
-
-    print(
-        f"Initialization complete: {mid} actors paused on {node1}, {num_actors - mid} actors paused on {node2}; {num_workers} idle workers ready."
+    proxy_proc = subprocess.Popen(
+        ["./bin/kubectl-ate", "proxy", "--port", "18080"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
-    start_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for _ in range(40):
+        try:
+            if urllib.request.urlopen("http://127.0.0.1:18080/healthz", timeout=1).status == 200:
+                break
+        except Exception:
+            time.sleep(0.25)
 
-    lock = threading.Lock()
-    pause_ms = []
-    same_node_ms = []
-    detached_import_ms = []
-    cross_node_ms = []
-    stop_event = threading.Event()
-    last_worker_node = {a: (node1 if i < mid else node2) for i, a in enumerate(actors)}
+    def _proxy_post(action: str, actor_name: str, timeout: float = 120.0) -> dict:
+        data = json.dumps({"atespace": "benchmark-workloads", "name": actor_name}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:18080/{action}",
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
-    # Gate concurrency to at most num_workers active actors at a time
-    worker_sem = threading.Semaphore(num_workers)
+    def _proxy_get_actor(actor_name: str, timeout: float = 15.0) -> dict:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:18080/actor?atespace=benchmark-workloads&name={actor_name}",
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
-    def actor_loop(actor_name: str, idx: int):
-        # Stagger initial start slightly across actors
-        time.sleep((idx % 20) * 0.12)
-        while not stop_event.is_set():
-            if not worker_sem.acquire(timeout=1.0):
-                continue
-            try:
-                if stop_event.is_set():
-                    break
-                prev_node = get_actor_snapshot_node(actor_name)
-                t0 = time.time()
-                res = run(
-                    ["./bin/kubectl-ate", "-a", "benchmark-workloads", "resume", "actor", actor_name],
-                    check=False,
-                    verbose=False,
-                )
-                r_ms = (time.time() - t0) * 1000.0
-                if res.returncode == 0:
-                    cur_node = get_actor_worker_node(actor_name)
-                    prev_host = last_worker_node.get(actor_name, "")
-                    if cur_node:
-                        last_worker_node[actor_name] = cur_node
-                    with lock:
-                        if prev_node.startswith("detached."):
-                            detached_import_ms.append(r_ms)
-                            loc_tag = "same-node" if prev_host == cur_node else f"{prev_host[-4:]}->{cur_node[-4:]}"
-                            print(f"  [Actor {idx:02d}] DETACHED-IMPORT ({loc_tag}) on {cur_node[-4:]}: {r_ms:.0f} ms")
-                        elif prev_node != "" and cur_node != "" and prev_node != cur_node:
-                            cross_node_ms.append(r_ms)
-                            print(f"  [Actor {idx:02d}] LIVE-MIGRATED {prev_node[-4:]} -> {cur_node[-4:]}: {r_ms:.0f} ms")
-                        else:
-                            same_node_ms.append(r_ms)
-                            if len(same_node_ms) % 10 == 1:
-                                print(f"  [Actor {idx:02d}] WARM SAME-NODE on {cur_node[-4:]}: {r_ms:.0f} ms (total hits={len(same_node_ms)})")
+    try:
+        # 1. Create all actors in parallel
+        actors = [f"overcommit-pool-{i}-{uuid.uuid4().hex[:4]}" for i in range(num_actors)]
+        print(f"Creating {num_actors} actors in parallel...")
 
-                    # Active work duration while holding worker
-                    time.sleep(0.6)
+        def _create(a: str):
+            run(["./bin/kubectl-ate", "-a", "benchmark-workloads", "create", "actor", a, "--template=sleep"], verbose=False)
 
-                    t1 = time.time()
-                    p_res = run(
-                        ["./bin/kubectl-ate", "-a", "benchmark-workloads", "pause", "actor", actor_name],
-                        check=False,
-                        verbose=False,
-                    )
-                    p_dur = (time.time() - t1) * 1000.0
-                    if p_res.returncode == 0:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+            list(ex.map(_create, actors))
+
+        # 2. Scale to workers_per_node on node1 only
+        print(f"Scaling worker pool to {workers_per_node} workers on {node1}...")
+        run(["kubectl", "cordon", node2], verbose=False)
+        run(["kubectl", "uncordon", node1], verbose=False)
+        scale_worker_pool(0)
+        time.sleep(4)
+        scale_worker_pool(workers_per_node)
+        wait_for_ready_pods_on_node(node1, workers_per_node)
+
+        def _resume_retry(a: str):
+            for attempt in range(6):
+                try:
+                    _proxy_post("resume", a)
+                    return
+                except Exception as exc:
+                    time.sleep(1.5)
+            raise RuntimeError(f"Failed to resume {a}")
+
+        def _pause_retry(a: str):
+            for attempt in range(6):
+                try:
+                    _proxy_post(idle_verb, a)
+                    return
+                except Exception as exc:
+                    time.sleep(1.5)
+            raise RuntimeError(f"Failed to {idle_verb} {a}")
+
+        # 3. Initialize first half of actors (actors[:mid]) on node1 in adaptive waves
+        print(f"Initializing {mid} actors on {node1}...")
+        wave_idx = 0
+        while wave_idx < mid:
+            cur_wave_size = workers_per_node if use_suspend else (3 if wave_idx >= 25 else min(workers_per_node, 10))
+            wave = actors[wave_idx : min(wave_idx + cur_wave_size, mid)]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
+                list(ex.map(_resume_retry, wave))
+            time.sleep(0.5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
+                list(ex.map(_pause_retry, wave))
+            wait_for_node_proactive_trim(node1, target_max=29, skip=use_suspend)
+            print(f"  Initialized actors {wave_idx}..{wave_idx + len(wave) - 1} on {node1}")
+            wave_idx += len(wave)
+
+        # 4. Occupy all workers on node1 using the most recently paused (warm mounted) actors
+        print(f"Occupying {workers_per_node} workers on {node1} to isolate {node2} initialization...")
+        blockers_node1 = actors[mid - workers_per_node : mid]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(blockers_node1)) as ex:
+            list(ex.map(_resume_retry, blockers_node1))
+
+        # 5. Scale up to num_workers by adding workers_per_node on node2
+        print(f"Adding {workers_per_node} workers on {node2} (total {num_workers} workers)...")
+        run(["kubectl", "uncordon", node2], verbose=False)
+        run(["kubectl", "cordon", node1], verbose=False)
+        scale_worker_pool(num_workers)
+        wait_for_ready_pods_on_node(node2, workers_per_node)
+
+        # 6. Initialize second half of actors (actors[mid:]) on node2 in adaptive waves
+        print(f"Initializing {num_actors - mid} actors on {node2}...")
+        wave_idx = mid
+        while wave_idx < num_actors:
+            local_idx = wave_idx - mid
+            cur_wave_size = workers_per_node if use_suspend else (3 if local_idx >= 25 else min(workers_per_node, 10))
+            wave = actors[wave_idx : min(wave_idx + cur_wave_size, num_actors)]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
+                list(ex.map(_resume_retry, wave))
+            time.sleep(0.5)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(wave)) as ex:
+                list(ex.map(_pause_retry, wave))
+            wait_for_node_proactive_trim(node2, target_max=29, skip=use_suspend)
+            print(f"  Initialized actors {wave_idx}..{wave_idx + len(wave) - 1} on {node2}")
+            wave_idx += len(wave)
+
+        # 7. Pause node1 blockers and uncordon node1
+        print(f"Releasing {node1} blockers and uncordoning all nodes...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(blockers_node1)) as ex:
+            list(ex.map(_pause_retry, blockers_node1))
+        wait_for_node_proactive_trim(node1, target_max=29, skip=use_suspend)
+        wait_for_node_proactive_trim(node2, target_max=29, skip=use_suspend)
+        run(["kubectl", "uncordon", node1], verbose=False)
+        time.sleep(1.0)
+
+        # Build static pod_to_node map so we never call kubectl get pod during steady-state
+        pod_to_node = {}
+        p_pods = run(
+            ["kubectl", "get", "pods", "-n", "benchmark-workloads", "-l", "ate.dev/worker-pool=benchmark-ateom", "-o", "json"],
+            check=False,
+            verbose=False,
+        )
+        if p_pods.returncode == 0:
+            for item in json.loads(p_pods.stdout).get("items", []):
+                pname = item.get("metadata", {}).get("name", "")
+                nname = item.get("spec", {}).get("nodeName", "")
+                if pname and nname:
+                    pod_to_node[pname] = nname
+
+        print(
+            f"Initialization complete: {mid} actors {idle_verb}ed on {node1}, {num_actors - mid} actors {idle_verb}ed on {node2}; {num_workers} idle workers ready."
+        )
+        start_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        lock = threading.Lock()
+        pause_ms = []
+        same_node_ms = []
+        detached_import_ms = []
+        cross_node_ms = []
+        stop_event = threading.Event()
+        last_worker_node = {a: (node1 if i < mid else node2) for i, a in enumerate(actors)}
+
+        # Gate concurrency to at most num_workers active actors at a time
+        worker_sem = threading.Semaphore(num_workers)
+
+        def actor_loop(actor_name: str, idx: int):
+            # Stagger initial start slightly across actors
+            time.sleep((idx % 20) * 0.12)
+            while not stop_event.is_set():
+                if not worker_sem.acquire(timeout=1.0):
+                    continue
+                try:
+                    if stop_event.is_set():
+                        break
+                    prev_node = ""
+                    if not use_suspend:
+                        try:
+                            info = _proxy_get_actor(actor_name)
+                            snodes = info.get("snapshot_nodes") or []
+                            prev_node = snodes[0] if snodes else ""
+                        except Exception:
+                            pass
+
+                    try:
+                        res_data = _proxy_post("resume", actor_name)
+                        r_ms = res_data.get("elapsed_ms", 0.0)
+                        pod_name = res_data.get("worker_pod", "")
+                        cur_node = pod_to_node.get(pod_name, "")
+                        if not cur_node and pod_name:
+                            cur_node = get_actor_worker_node(actor_name)
+                            if cur_node:
+                                pod_to_node[pod_name] = cur_node
+                        prev_host = last_worker_node.get(actor_name, "")
+                        if cur_node:
+                            last_worker_node[actor_name] = cur_node
+                        with lock:
+                            if use_suspend:
+                                if prev_host != "" and cur_node != "" and prev_host != cur_node:
+                                    cross_node_ms.append(r_ms)
+                                    print(f"  [Actor {idx:02d}] CROSS-NODE (GCS) {prev_host[-4:]} -> {cur_node[-4:]}: {r_ms:.0f} ms")
+                                else:
+                                    same_node_ms.append(r_ms)
+                                    if len(same_node_ms) % 10 == 1:
+                                        print(f"  [Actor {idx:02d}] SAME-NODE (GCS) on {cur_node[-4:]}: {r_ms:.0f} ms (total same-node={len(same_node_ms)})")
+                            elif prev_node.startswith("detached."):
+                                detached_import_ms.append(r_ms)
+                                loc_tag = "same-node" if prev_host == cur_node else f"{prev_host[-4:]}->{cur_node[-4:]}"
+                                print(f"  [Actor {idx:02d}] DETACHED-IMPORT ({loc_tag}) on {cur_node[-4:]}: {r_ms:.0f} ms")
+                            elif prev_node != "" and cur_node != "" and prev_node != cur_node:
+                                cross_node_ms.append(r_ms)
+                                print(f"  [Actor {idx:02d}] LIVE-MIGRATED {prev_node[-4:]} -> {cur_node[-4:]}: {r_ms:.0f} ms")
+                            else:
+                                same_node_ms.append(r_ms)
+                                if len(same_node_ms) % 10 == 1:
+                                    print(f"  [Actor {idx:02d}] WARM SAME-NODE on {cur_node[-4:]}: {r_ms:.0f} ms (total hits={len(same_node_ms)})")
+
+                        # Active work duration while holding worker
+                        time.sleep(0.6)
+
+                        p_data = _proxy_post(idle_verb, actor_name)
+                        p_dur = p_data.get("elapsed_ms", 0.0)
                         with lock:
                             pause_ms.append(p_dur)
-            finally:
-                worker_sem.release()
+                    except Exception as exc:
+                        pass
+                finally:
+                    worker_sem.release()
 
-            # Idle think time before next wake-up
-            time.sleep(0.5 + ((idx % 10) * 0.15))
+                # Idle think time before next wake-up
+                time.sleep(0.5 + ((idx % 10) * 0.15))
 
-    threads = [threading.Thread(target=actor_loop, args=(a, idx)) for idx, a in enumerate(actors)]
-    for t in threads:
-        t.start()
+        threads = [threading.Thread(target=actor_loop, args=(a, idx)) for idx, a in enumerate(actors)]
+        for t in threads:
+            t.start()
 
-    time.sleep(duration_sec)
-    print("Stopping stochastic overcommit pool benchmark...")
-    stop_event.set()
-    for t in threads:
-        t.join()
+        time.sleep(duration_sec)
+        print("Stopping stochastic overcommit pool benchmark...")
+        stop_event.set()
+        for t in threads:
+            t.join()
 
-    breakdown = fetch_atelet_migration_breakdown(start_ts)
-    cleanup_benchmark_actors()
-    return {
-        "pause_ms": pause_ms,
-        "same_node_resume_ms": same_node_ms,
-        "detached_import_ms": detached_import_ms,
-        "cross_node_resume_ms": cross_node_ms,
-        "export_ms": breakdown["export_ms"],
-        "import_ms": breakdown["import_ms"],
-        "restore_ms": breakdown["restore_ms"],
-    }
+        breakdown = fetch_atelet_migration_breakdown(start_ts)
+        cleanup_benchmark_actors()
+        return {
+            "pause_ms": pause_ms,
+            "same_node_resume_ms": same_node_ms,
+            "detached_import_ms": detached_import_ms,
+            "cross_node_resume_ms": cross_node_ms,
+            "export_ms": breakdown["export_ms"],
+            "import_ms": breakdown["import_ms"],
+            "restore_ms": breakdown["restore_ms"],
+        }
+    finally:
+        proxy_proc.terminate()
+        try:
+            proxy_proc.wait(timeout=5)
+        except Exception:
+            proxy_proc.kill()
 
 
 def print_summary_report(ctrl: dict, stoch: dict | None):
@@ -787,18 +951,18 @@ def print_summary_report(ctrl: dict, stoch: dict | None):
         print("\n### 2. Stochastic Multi-Actor Overcommit Pool Results")
         print(
             f"- **Total Completed Resume Cycles**: {total_resumes} "
-            f"({warm_hits} Warm Same-Node Hits, {detached_imports} Detached Cold Imports [0 Export RPCs], {live_migs} Live Cross-Node Migrations)"
+            f"({warm_hits} Same-Node Resumes, {detached_imports} Detached Cold Imports [0 Export RPCs], {live_migs} Cross-Node Resumes)"
         )
-        print(f"- **Warm Mounted Same-Node `ResumeActor` Latency**:  {format_stats(stoch['same_node_resume_ms'])}")
+        print(f"- **Same-Node `ResumeActor` Latency**:  {format_stats(stoch['same_node_resume_ms'])}")
         if detached_imports > 0:
             print(f"- **Detached Cold Import `ResumeActor` Latency**:    {format_stats(stoch['detached_import_ms'])}")
         if live_migs > 0:
-            print(f"- **Live Cross-Node Migration `ResumeActor` Latency**: {format_stats(stoch['cross_node_resume_ms'])}")
+            print(f"- **Cross-Node `ResumeActor` Latency**: {format_stats(stoch['cross_node_resume_ms'])}")
         print(f"- **Combined Cold/Migrated `ResumeActor` Latency**:  {format_stats(cold_or_mig)}")
         print(f"- **Blended Overall `ResumeActor` Latency**:         {format_stats(all_resumes)}")
-        print(f"- **Blended `PauseActor` Latency**:                  {format_stats(stoch['pause_ms'])}")
-        if stoch.get("export_ms") or stoch.get("import_ms"):
-            print("\n#### Server-Side Breakdown of Cold/Cross-Node Operations in Stochastic Pool:")
+        print(f"- **Blended `PauseActor`/`SuspendActor` Latency**:   {format_stats(stoch['pause_ms'])}")
+        if stoch.get("export_ms") or stoch.get("import_ms") or stoch.get("restore_ms"):
+            print("\n#### Server-Side Breakdown of Operations in Stochastic Pool:")
             print(f"  1. **`ExportActorDisk` (Unmount + GCE `detachDisk`)**: {format_stats(stoch['export_ms'])}")
             print(f"  2. **`ImportActorDisk` (GCE `attachDisk` + Mount)**:   {format_stats(stoch['import_ms'])}")
             print(f"  3. **`AteomHerder/Restore` (gVisor Checkpoint Restore)**: {format_stats(stoch['restore_ms'])}")
@@ -816,12 +980,13 @@ def main():
     parser.add_argument("--throughput", type=int, default=800, help="Hyperdisk throughput MiB/s")
     parser.add_argument("--nodepool", type=str, default="", help="Optional GKE nodepool label filter")
     parser.add_argument("--skip-setup", action="store_true", help="Skip disk pool re-provisioning")
+    parser.add_argument("--use-suspend", action="store_true", help="Use SuspendActor (GCS snapshot) instead of PauseActor")
     parser.add_argument("--mode", choices=["controlled", "stochastic", "both"], default="both")
     args = parser.parse_args()
 
     nodes = get_substrate_nodes(args.nodepool)
     node1, node2 = nodes[0], nodes[1]
-    setup_two_node_topology(node1, node2, args.disks_per_node, args.throughput, args.skip_setup)
+    setup_two_node_topology(node1, node2, args.disks_per_node, args.throughput, args.skip_setup, args.nodepool)
 
     ctrl_res = {"pause_ms": [], "same_node_resume_ms": [], "cross_node_resume_ms": [], "export_ms": [], "import_ms": [], "restore_ms": []}
     stoch_res = None
@@ -831,7 +996,7 @@ def main():
 
     if args.mode in ("stochastic", "both"):
         stoch_res = run_stochastic_overcommit_benchmark(
-            node1, node2, args.pool_workers, args.pool_actors, args.pool_duration
+            node1, node2, args.pool_workers, args.pool_actors, args.pool_duration, args.use_suspend
         )
 
     print_summary_report(ctrl_res, stoch_res)

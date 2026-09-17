@@ -195,3 +195,31 @@ func TestServerTLSConfigErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestServerTLSConfigFromFile(t *testing.T) {
+	caPEM := testCAPEM(t, "file-ca")
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := serverTLSConfigFromFile(caFile)
+	if err != nil {
+		t.Fatalf("serverTLSConfigFromFile: %v", err)
+	}
+	if cfg.ServerName != apiServerName {
+		t.Errorf("ServerName = %q, want %q", cfg.ServerName, apiServerName)
+	}
+	wantPool := x509.NewCertPool()
+	wantPool.AppendCertsFromPEM(caPEM)
+	if !cfg.RootCAs.Equal(wantPool) {
+		t.Error("RootCAs does not match CA file")
+	}
+
+	invalidFile := filepath.Join(t.TempDir(), "bad.pem")
+	if err := os.WriteFile(invalidFile, []byte("not a cert"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := serverTLSConfigFromFile(invalidFile); err == nil {
+		t.Error("serverTLSConfigFromFile with invalid PEM: want error, got nil")
+	}
+}
