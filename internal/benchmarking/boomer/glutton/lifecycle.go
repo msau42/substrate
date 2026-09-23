@@ -71,6 +71,13 @@ const (
 	resumeMaxBackoff    = 50 * time.Millisecond
 	resumeBackoffJitter = 5 * time.Millisecond
 
+	// Retry budget for transient ResourceExhausted errors on ResumeActor
+	// (e.g. "disk operation queue full on node" or "no free workers available").
+	resumeResourceExhaustedMaxAttempts    = 15
+	resumeResourceExhaustedInitialBackoff = 150 * time.Millisecond
+	resumeResourceExhaustedMaxBackoff     = 1 * time.Second
+	resumeResourceExhaustedJitter         = 50 * time.Millisecond
+
 	// Per-wake ping loop: pings after the first are spaced by a random gap
 	// in [minPingGap, maxPingGap). The loop stops early once the live
 	// window (liveWait) elapses so we still suspend on schedule.
@@ -353,27 +360,45 @@ func (u *gluttonActor) resume(ctx context.Context) bool {
 		// the ateapi contract. Kept inside the tracedCall closure so the
 		// reported latency spans every attempt and the span carries the
 		// last attempt's server trailer, same as any other single-shot RPC.
-		var backoff time.Duration // 0 → first retry runs immediately
+		var backoff time.Duration // 0 → first retry runs immediately for conflicts
 		var lastErr error
-		for range resumeMaxAttempts {
+		maxAttempts := resumeMaxAttempts
+		for attempt := 0; attempt < maxAttempts; attempt++ {
 			_, lastErr = u.cfg.APIStub.ResumeActor(callCtx, &ateapipb.ResumeActorRequest{
 				Actor: u.ref(),
 			}, grpc.Trailer(tr))
 			if lastErr == nil {
 				return nil
 			}
-			if !isConcurrentUpdateConflict(lastErr) {
+			var jitterRange time.Duration
+			switch {
+			case isConcurrentUpdateConflict(lastErr):
+				jitterRange = resumeBackoffJitter
+			case isResourceExhausted(lastErr):
+				maxAttempts = resumeResourceExhaustedMaxAttempts
+				if backoff < resumeResourceExhaustedInitialBackoff {
+					backoff = resumeResourceExhaustedInitialBackoff
+				}
+				jitterRange = resumeResourceExhaustedJitter
+			default:
 				return lastErr
 			}
+			if attempt+1 >= maxAttempts {
+				break
+			}
 			if backoff > 0 {
-				jitter := time.Duration(rand.Float64() * float64(resumeBackoffJitter))
+				jitter := time.Duration(rand.Float64() * float64(jitterRange))
 				select {
 				case <-time.After(backoff + jitter):
 				case <-callCtx.Done():
 					return callCtx.Err()
 				}
 			}
-			backoff = resumeMaxBackoff
+			if isConcurrentUpdateConflict(lastErr) {
+				backoff = resumeMaxBackoff
+			} else {
+				backoff = min(backoff*2, resumeResourceExhaustedMaxBackoff)
+			}
 		}
 		return lastErr
 	})
@@ -403,6 +428,10 @@ func (u *gluttonActor) resume(ctx context.Context) bool {
 func isConcurrentUpdateConflict(err error) bool {
 	s, ok := status.FromError(err)
 	return ok && s.Code() == codes.Aborted && strings.Contains(s.Message(), concurrentUpdateMsg)
+}
+
+func isResourceExhausted(err error) bool {
+	return status.Code(err) == codes.ResourceExhausted
 }
 
 // hibernate takes the actor off its worker by whichever operation the

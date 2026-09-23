@@ -102,3 +102,27 @@ func TestResumeRetryHonorsContextCancellation(t *testing.T) {
 		t.Errorf("ResumeActor calls = %d, want 2 after cancellation", got)
 	}
 }
+
+func TestResumeRetriesResourceExhausted(t *testing.T) {
+	u, fakeCtrl := newResumeTestActor(
+		t,
+		status.Error(codes.ResourceExhausted, "disk operation queue full on node (2 pending operations, max 2)"),
+		status.Error(codes.ResourceExhausted, "no free workers available"),
+	)
+
+	start := time.Now()
+	ok := u.resume(context.Background())
+	elapsed := time.Since(start)
+
+	if !ok {
+		t.Fatal("resume = false, want true after ResourceExhausted clears")
+	}
+	if got := resumeCalls(fakeCtrl); got != 3 {
+		t.Errorf("ResumeActor calls = %d, want 3 (two ResourceExhausted, then success)", got)
+	}
+	wantMin := resumeResourceExhaustedInitialBackoff * 3 // 150ms + 300ms = 450ms
+	if elapsed < wantMin {
+		t.Errorf("elapsed = %v, want >= %v (ResourceExhausted retries must back off)", elapsed, wantMin)
+	}
+}
+

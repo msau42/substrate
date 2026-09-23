@@ -1024,20 +1024,24 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			{ateattr.SnapshotPhaseTotal, time.Since(tStart)},
 		}
 		s.instruments.recordRestore(ctx, op, outcome, phases...)
-		slog.LogAttrs(ctx, slog.LevelInfo, "Restore timing breakdown",
-			snapshotLogAttrs(attribution, op, restoreDurationMetric, outcome, phases)...)
+		attrs := snapshotLogAttrs(attribution, op, restoreDurationMetric, outcome, phases)
+		if globalActorDiskPool != nil {
+			attrs = append(attrs, slog.Bool("ate.actor.restore.cross_node_simulated", globalActorDiskPool.WasCrossNodeRestore(actorUID)))
+		}
+		slog.LogAttrs(ctx, slog.LevelInfo, "Restore timing breakdown", attrs...)
 	}()
 
 	// Not crashing the actor, because terminal errors here indicate problems with atelet,
 	// node or the disk itself.
+	tMount := time.Now()
 	if err := resetActorDirs(actorUID); err != nil {
+		dMount = time.Since(tMount)
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 	if globalActorDiskPool != nil {
 		globalActorDiskPool.RecordActorRef(actorUID, req.GetAtespace(), req.GetActorName())
 	}
 
-	tMount := time.Now()
 	mountErr := s.mountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
 	dMount = time.Since(tMount)
 	if mountErr != nil {
@@ -2034,6 +2038,10 @@ func releaseActorDirs(actorUID string) error {
 		return wrapFileSystemErr("while deleting actor dir: %w", err)
 	}
 	return nil
+}
+
+func removeActorDirs(actorUID string) error {
+	return releaseActorDirs(actorUID)
 }
 
 // ateletServerTLSConfig builds a *tls.Config for a gRPC server that presents the

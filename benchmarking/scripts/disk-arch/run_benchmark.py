@@ -668,6 +668,67 @@ for k, (run_name, flags, users) in BASE_WORKLOADS.items():
     WORKLOADS[f"{k}_microvm"] = (f"{run_name}_microvm", flags, users, "microvm")
 
 
+def configure_simulated_cross_node_restores(
+    cross_node_pct: float | None, simulate_disk_op_ms: int = 1000
+):
+    """Configure ATELET_SIMULATE_CROSS_NODE_PCT and ATELET_SIMULATE_DISK_OP_MS on atelet DaemonSet."""
+    p_ds = subprocess.run(
+        [
+            "kubectl",
+            "get",
+            "ds",
+            "-n",
+            "ate-system",
+            "-l",
+            "app=atelet",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    ds_name = p_ds.stdout.strip()
+    if not ds_name:
+        return
+    if cross_node_pct is None:
+        return
+    pct_val = max(0.0, min(100.0, float(cross_node_pct)))
+    print(
+        f"Configuring atelet ({ds_name}) with simulated cross-node restore percentage={pct_val}% (disk_op_ms={simulate_disk_op_ms}ms)..."
+    )
+    subprocess.run(
+        [
+            "kubectl",
+            "set",
+            "env",
+            f"ds/{ds_name}",
+            "-n",
+            "ate-system",
+            f"ATELET_SIMULATE_CROSS_NODE_PCT={pct_val}",
+            f"ATELET_SIMULATE_DISK_OP_MS={simulate_disk_op_ms if pct_val > 0 else 0}",
+            f"ATELET_DETACH_ON_PAUSE={'true' if pct_val >= 100.0 else 'false'}",
+            "ATELET_MAX_DISK_OP_QUEUE=64",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["kubectl", "rollout", "restart", f"ds/{ds_name}", "-n", "ate-system"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "kubectl",
+            "rollout",
+            "status",
+            f"ds/{ds_name}",
+            "-n",
+            "ate-system",
+            "--timeout=90s",
+        ],
+        check=True,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Execute repeatable 1-active-node W1 and W2 benchmarks for gVisor or microVM."
@@ -682,6 +743,18 @@ def main():
         "--deploy-workloads",
         action="store_true",
         help="Deploy benchmark WorkerPool/ActorTemplates (with --actor-memory 1536Mi) and pin to active node before running",
+    )
+    parser.add_argument(
+        "--cross-node-restore-pct",
+        type=float,
+        default=None,
+        help="Percentage (0..100) of Pause->Resume cycles in Arch 3 that simulate a cross-node disk detach/attach and cold restore",
+    )
+    parser.add_argument(
+        "--simulate-disk-op-ms",
+        type=int,
+        default=1000,
+        help="Simulated parallel Hyperdisk attach/detach duration in milliseconds when --cross-node-restore-pct > 0 (default: 1000)",
     )
     parser.add_argument(
         "targets",
@@ -708,12 +781,20 @@ def main():
             actor_memory="1536Mi",
         )
 
+    if args.cross_node_restore_pct is not None:
+        configure_simulated_cross_node_restores(
+            args.cross_node_restore_pct, args.simulate_disk_op_ms
+        )
+
     for t in args.targets:
         lookup = t
         if args.sandbox_class == "microvm" and not t.endswith("_microvm"):
             lookup = f"{t}_microvm"
         if lookup in WORKLOADS:
             name, flags, users, _ = WORKLOADS[lookup]
+            if args.cross_node_restore_pct is not None:
+                pct_str = str(args.cross_node_restore_pct).replace(".", "p")
+                name = f"{name}_xnode{pct_str}pct"
             run_job(
                 name,
                 flags,
@@ -727,3 +808,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

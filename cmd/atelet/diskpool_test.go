@@ -372,3 +372,95 @@ func TestActorDiskPool_ConcurrentImportRespectsHyperdiskLimit(t *testing.T) {
 		t.Errorf("expected at least 5 paused disks evicted to detachedDisks, got %d", totalDetached)
 	}
 }
+
+func TestActorDiskPool_DetachOnPauseParallel(t *testing.T) {
+	t.Setenv("ATELET_DETACH_ON_PAUSE", "true")
+
+	root := t.TempDir()
+	poolDir := filepath.Join(root, "disk-pool")
+	actorsDir := filepath.Join(root, "actors")
+	for i := 0; i < 3; i++ {
+		d := filepath.Join(poolDir, "actor-disk-"+string(rune('0'+i)))
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pool, err := NewActorDiskPool(poolDir, actorsDir)
+	if err != nil {
+		t.Fatalf("NewActorDiskPool failed: %v", err)
+	}
+	pool.attacher = &fakeDiskAttacher{}
+
+	for i := 0; i < 3; i++ {
+		uid := "actor-" + string(rune('0'+i))
+		if err := pool.EnsureActorDir(uid); err != nil {
+			t.Fatalf("EnsureActorDir %s failed: %v", uid, err)
+		}
+		pool.NotifyActorPaused(uid)
+	}
+
+	// EnsureActorDir immediately after NotifyActorPaused should wait for the background detach and re-import cleanly
+	for i := 0; i < 3; i++ {
+		uid := "actor-" + string(rune('0'+i))
+		if err := pool.EnsureActorDir(uid); err != nil {
+			t.Fatalf("EnsureActorDir on resume for %s failed: %v", uid, err)
+		}
+		if !pool.WasCrossNodeRestore(uid) {
+			t.Errorf("expected WasCrossNodeRestore(%s) == true when ATELET_DETACH_ON_PAUSE=true", uid)
+		}
+		if _, err := os.Readlink(filepath.Join(actorsDir, uid)); err != nil {
+			t.Errorf("expected symlink restored after re-import for %s, got err=%v", uid, err)
+		}
+	}
+}
+
+func TestActorDiskPool_SimulatedCrossNodeRestorePct(t *testing.T) {
+	root := t.TempDir()
+	poolDir := filepath.Join(root, "disk-pool")
+	actorsDir := filepath.Join(root, "actors")
+	d := filepath.Join(poolDir, "actor-disk-0")
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	pool, err := NewActorDiskPool(poolDir, actorsDir)
+	if err != nil {
+		t.Fatalf("NewActorDiskPool failed: %v", err)
+	}
+	pool.attacher = &fakeDiskAttacher{}
+
+	uid := "actor-pct-test"
+	if err := pool.EnsureActorDir(uid); err != nil {
+		t.Fatalf("initial EnsureActorDir failed: %v", err)
+	}
+
+	// 1. 0% cross-node restore -> 100% same-node warm reuse
+	t.Setenv("ATELET_SIMULATE_CROSS_NODE_PCT", "0")
+	for i := 0; i < 10; i++ {
+		pool.NotifyActorPaused(uid)
+		if err := pool.EnsureActorDir(uid); err != nil {
+			t.Fatalf("EnsureActorDir (0%%) failed: %v", err)
+		}
+		if pool.WasCrossNodeRestore(uid) {
+			t.Fatalf("expected WasCrossNodeRestore == false at 0%%, got true on iter %d", i)
+		}
+	}
+
+	// 2. 50% cross-node restore -> both cross-node and same-node restores occur over 100 cycles
+	t.Setenv("ATELET_SIMULATE_CROSS_NODE_PCT", "50")
+	crossCount := 0
+	for i := 0; i < 100; i++ {
+		pool.NotifyActorPaused(uid)
+		if err := pool.EnsureActorDir(uid); err != nil {
+			t.Fatalf("EnsureActorDir (50%%) failed on iter %d: %v", i, err)
+		}
+		if pool.WasCrossNodeRestore(uid) {
+			crossCount++
+		}
+	}
+	if crossCount < 20 || crossCount > 80 {
+		t.Errorf("expected roughly 50/100 cross-node restores at 50%%, got %d", crossCount)
+	}
+}
+

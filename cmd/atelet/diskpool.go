@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,13 +92,14 @@ type ActorDiskPool struct {
 	activeActors        map[string]time.Time
 	pausedActors        map[string]time.Time
 	actorRefs           map[string]resources.ActorRef
-	detachingDisks      map[string]chan struct{}
-	attachingDisks      map[string]struct{}
-	activeAttaches      int
-	attacher            DiskAttacher
-	workerClient        ateapipb.WorkerServiceClient
-	pendingOps          atomic.Int32
-	proactiveRunning    atomic.Bool
+	detachingDisks       map[string]chan struct{}
+	attachingDisks       map[string]struct{}
+	lastRestoreCrossNode map[string]bool
+	activeAttaches       int
+	attacher             DiskAttacher
+	workerClient         ateapipb.WorkerServiceClient
+	pendingOps           atomic.Int32
+	proactiveRunning     atomic.Bool
 }
 
 var globalActorDiskPool *ActorDiskPool
@@ -130,18 +132,19 @@ func NewActorDiskPool(poolDir, actorsDir string) (*ActorDiskPool, error) {
 	}
 
 	p := &ActorDiskPool{
-		poolDir:        poolDir,
-		actorsDir:      actorsDir,
-		disks:          disks,
-		actorToDisk:    make(map[string]string),
-		diskToActor:    make(map[string]string),
-		detachedDisks:  make(map[string]string),
-		activeActors:   make(map[string]time.Time),
-		pausedActors:   make(map[string]time.Time),
-		actorRefs:      make(map[string]resources.ActorRef),
-		detachingDisks: make(map[string]chan struct{}),
-		attachingDisks: make(map[string]struct{}),
-		attacher:       NewGCEDiskAttacher(),
+		poolDir:              poolDir,
+		actorsDir:            actorsDir,
+		disks:                disks,
+		actorToDisk:          make(map[string]string),
+		diskToActor:          make(map[string]string),
+		detachedDisks:        make(map[string]string),
+		activeActors:         make(map[string]time.Time),
+		pausedActors:         make(map[string]time.Time),
+		actorRefs:            make(map[string]resources.ActorRef),
+		detachingDisks:       make(map[string]chan struct{}),
+		attachingDisks:       make(map[string]struct{}),
+		lastRestoreCrossNode: make(map[string]bool),
+		attacher:             NewGCEDiskAttacher(),
 	}
 
 	// Load unallocated detached disks from .detached-pool.json if present.
@@ -225,8 +228,58 @@ func (p *ActorDiskPool) RecordActorRef(actorUID, atespace, actorName string) {
 	}
 }
 
+func detachOnPauseEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("ATELET_DETACH_ON_PAUSE")))
+	return v == "true" || v == "1"
+}
+
+// simulatedCrossNodeRestorePct returns the configured percentage (0..100) of
+// Pause->Resume cycles that should simulate a cross-node disk detach/attach.
+// Controlled via ATELET_SIMULATE_CROSS_NODE_PCT (0..100). If unset, falls back
+// to 100% when ATELET_DETACH_ON_PAUSE=true, or 0% otherwise.
+func simulatedCrossNodeRestorePct() float64 {
+	if raw := strings.TrimSpace(os.Getenv("ATELET_SIMULATE_CROSS_NODE_PCT")); raw != "" {
+		if pct, err := strconv.ParseFloat(raw, 64); err == nil {
+			if pct <= 0 {
+				return 0
+			}
+			if pct >= 100 {
+				return 100
+			}
+			return pct
+		}
+	}
+	if detachOnPauseEnabled() {
+		return 100
+	}
+	return 0
+}
+
+func shouldSimulateCrossNodeRestore() bool {
+	pct := simulatedCrossNodeRestorePct()
+	if pct <= 0 {
+		return false
+	}
+	if pct >= 100 {
+		return true
+	}
+	return rand.Float64()*100.0 < pct
+}
+
+// WasCrossNodeRestore returns true if the most recent EnsureActorDir call for
+// actorUID re-imported a detached disk (simulating a cross-node restore).
+func (p *ActorDiskPool) WasCrossNodeRestore(actorUID string) bool {
+	if p == nil || actorUID == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastRestoreCrossNode[actorUID]
+}
+
 // NotifyActorPaused marks actorUID as paused and triggers background proactive
-// detachment if the number of attached disks exceeds the proactive target.
+// detachment if the number of attached disks exceeds the proactive target (or
+// immediately in parallel with probability ATELET_SIMULATE_CROSS_NODE_PCT).
 func (p *ActorDiskPool) NotifyActorPaused(actorUID string) {
 	if p == nil || actorUID == "" {
 		return
@@ -234,6 +287,46 @@ func (p *ActorDiskPool) NotifyActorPaused(actorUID string) {
 	p.mu.Lock()
 	delete(p.activeActors, actorUID)
 	p.pausedActors[actorUID] = time.Now()
+	if shouldSimulateCrossNodeRestore() {
+		diskPath, ok := p.actorToDisk[actorUID]
+		if ok && diskPath != "" {
+			gName, dName, _ := p.attacher.ResolveDiskMetadata(context.Background(), diskPath)
+			if gName == "" {
+				gName = filepath.Base(diskPath)
+				dName = gName
+			}
+			var remaining []string
+			for _, d := range p.disks {
+				if d != diskPath {
+					remaining = append(remaining, d)
+				}
+			}
+			p.disks = remaining
+			delete(p.actorToDisk, actorUID)
+			delete(p.diskToActor, diskPath)
+			p.detachedDisks[actorUID] = gName
+			doneCh := make(chan struct{})
+			p.detachingDisks[gName] = doneCh
+			_ = os.Remove(filepath.Join(p.actorsDir, actorUID))
+			p.mu.Unlock()
+
+			go func(uid, dPath, gceName, devName string, ch chan struct{}) {
+				t0 := time.Now()
+				err := p.attacher.UnmountAndDetach(context.Background(), dPath, devName)
+				p.mu.Lock()
+				delete(p.detachingDisks, gceName)
+				close(ch)
+				p.mu.Unlock()
+				slog.Info("Completed async parallel detach on pause",
+					slog.String("actorUID", uid),
+					slog.String("gceDiskName", gceName),
+					slog.Bool("crossNodeSimulated", true),
+					slog.Duration("elapsed", time.Since(t0)),
+					slog.Any("err", err))
+			}(actorUID, diskPath, gName, dName, doneCh)
+			return
+		}
+	}
 	p.mu.Unlock()
 	p.triggerProactiveEviction()
 }
@@ -411,25 +504,37 @@ func (p *ActorDiskPool) EnsureActorDir(actorUID string) error {
 	if gceDiskName, isDetached := p.detachedDisks[actorUID]; isDetached {
 		doneCh, isDetaching := p.detachingDisks[gceDiskName]
 		delete(p.detachedDisks, actorUID)
+		p.lastRestoreCrossNode[actorUID] = true
 		p.mu.Unlock()
+		tWait := time.Now()
 		if isDetaching && doneCh != nil {
 			slog.Info("Waiting for in-flight proactive detach before local re-import",
 				slog.String("actorUID", actorUID), slog.String("gceDiskName", gceDiskName))
 			<-doneCh
 		}
+		waitDur := time.Since(tWait)
+		tImport := time.Now()
 		slog.Info("Re-importing previously evicted actor disk on local resume",
-			slog.String("actorUID", actorUID), slog.String("gceDiskName", gceDiskName))
-		if err := p.ImportActorDisk(context.Background(), actorUID, gceDiskName, gceDiskName); err != nil {
+			slog.String("actorUID", actorUID), slog.String("gceDiskName", gceDiskName),
+			slog.Bool("crossNodeRestore", true),
+			slog.Duration("waitDetach", waitDur))
+		if err := p.importActorDiskInternal(context.Background(), actorUID, gceDiskName, gceDiskName, false); err != nil {
 			p.mu.Lock()
 			p.detachedDisks[actorUID] = gceDiskName
 			p.mu.Unlock()
 			return err
 		}
+		slog.Info("Completed local re-import on resume",
+			slog.String("actorUID", actorUID), slog.String("gceDiskName", gceDiskName),
+			slog.Bool("crossNodeRestore", true),
+			slog.Duration("waitDetach", waitDur),
+			slog.Duration("importDuration", time.Since(tImport)))
 		return nil
 	}
 
 	// 2. Reuse if already attached and mounted on this node.
 	if diskPath, ok := p.actorToDisk[actorUID]; ok {
+		p.lastRestoreCrossNode[actorUID] = false
 		defer p.mu.Unlock()
 		targetDir := filepath.Join(diskPath, actorUID)
 		if err := os.MkdirAll(targetDir, 0o700); err != nil {
@@ -447,6 +552,8 @@ func (p *ActorDiskPool) EnsureActorDir(actorUID string) error {
 		}
 		return nil
 	}
+
+	p.lastRestoreCrossNode[actorUID] = false
 
 	// 3. Allocate a free mounted disk if one is available.
 	var chosenDisk string
