@@ -18,18 +18,48 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
 
 	"cloud.google.com/go/storage"
+	"cloud.google.com/go/storage/experimental"
 	"google.golang.org/api/iterator"
 )
 
+func isRapidBucket(bucket string) bool {
+	if strings.Contains(strings.ToLower(bucket), "rapid") {
+		return true
+	}
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("ATE_GCS_RAPID")))
+	return v == "true" || v == "1"
+}
+
 type gcsStore struct {
-	client *storage.Client
+	client     *storage.Client
+	grpcOnce   sync.Once
+	grpcClient *storage.Client
 }
 
 // NewGCS returns a Store backed by Google Cloud Storage.
 func NewGCS(client *storage.Client) Store {
 	return &gcsStore{client: client}
+}
+
+func (g *gcsStore) clientForBucket(ctx context.Context, bucket string) *storage.Client {
+	if isRapidBucket(bucket) {
+		g.grpcOnce.Do(func() {
+			c, err := storage.NewGRPCClient(context.WithoutCancel(ctx), experimental.WithZonalBucketAPIs())
+			if err == nil {
+				g.grpcClient = c
+			}
+		})
+		if g.grpcClient != nil {
+			return g.grpcClient
+		}
+	}
+	return g.client
 }
 
 func (g *gcsStore) List(ctx context.Context, bucket, prefix string) ([]string, error) {
@@ -38,7 +68,7 @@ func (g *gcsStore) List(ctx context.Context, bucket, prefix string) ([]string, e
 	if err := query.SetAttrSelection([]string{"Name"}); err != nil {
 		return nil, fmt.Errorf("while selecting object attributes: %w", err)
 	}
-	it := g.client.Bucket(bucket).Objects(ctx, query)
+	it := g.clientForBucket(ctx, bucket).Bucket(bucket).Objects(ctx, query)
 	var objects []string
 	for {
 		attrs, err := it.Next()
@@ -53,7 +83,7 @@ func (g *gcsStore) List(ctx context.Context, bucket, prefix string) ([]string, e
 }
 
 func (g *gcsStore) Delete(ctx context.Context, bucket, object string) error {
-	err := g.client.Bucket(bucket).Object(object).Delete(ctx)
+	err := g.clientForBucket(ctx, bucket).Bucket(bucket).Object(object).Delete(ctx)
 	// An object that is already gone is the state this asks for.
 	if err != nil && !errors.Is(err, storage.ErrObjectNotExist) {
 		return fmt.Errorf("while deleting gs://%s/%s: %w", bucket, object, err)
@@ -62,6 +92,23 @@ func (g *gcsStore) Delete(ctx context.Context, bucket, object string) error {
 }
 
 func (g *gcsStore) Copy(ctx context.Context, srcBucket, srcObject, dstBucket, dstObject string) error {
+	if isRapidBucket(srcBucket) || isRapidBucket(dstBucket) {
+		rc, err := g.clientForBucket(ctx, srcBucket).Bucket(srcBucket).Object(srcObject).NewReader(ctx)
+		if err != nil {
+			return fmt.Errorf("while opening source gs://%s/%s for rapid copy: %w", srcBucket, srcObject, err)
+		}
+		defer rc.Close()
+		w := g.clientForBucket(ctx, dstBucket).Bucket(dstBucket).Object(dstObject).NewWriter(ctx)
+		if isRapidBucket(dstBucket) {
+			w.FinalizeOnClose = true
+		}
+		_, copyErr := io.Copy(w, rc)
+		closeErr := w.Close()
+		if err := errors.Join(copyErr, closeErr); err != nil {
+			return fmt.Errorf("while streaming copy gs://%s/%s to gs://%s/%s: %w", srcBucket, srcObject, dstBucket, dstObject, err)
+		}
+		return nil
+	}
 	src := g.client.Bucket(srcBucket).Object(srcObject)
 	dst := g.client.Bucket(dstBucket).Object(dstObject)
 	// Copier.Run drives GCS's rewrite API, following the rewrite token until

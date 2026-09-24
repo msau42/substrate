@@ -316,18 +316,18 @@ To evaluate `Arch 3` when actor disks are dynamically detached on every `PauseAc
 
 ### 10.2 Measured Single-Node W2 Performance (`c3-standard-44`, $W = 17$ Workers / $N = 15$ Actors, `180s`)
 
-| Metric (`c3-standard-44`, W2 `544 MiB` State, $N=15$) | **Arch 1 (`Suspend` to GCS + Boot Disk)** *(Measured)* | **Arch 2 (`Suspend` to GCS + `tmpfs`)** *(Measured)* | **Arch 3 (`0s` Pre-Attached Hyperdisks)** *(Measured)* | **Arch 3c (`1s` Parallel Attach/Detach, `1.0s` Wait)** *(Measured, n=301)* | **Arch 3c (`1s` Parallel Attach/Detach, `0.0s` Wait)** *(Measured, n=256)* |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **`PauseActor` / `SuspendActor` Latency** *(Med / Avg / p90)* | `3,900 / 4,328 / 6,500 ms` | `5,700 / 5,564 / 7,500 ms` | `870 / 1,061 / 1,800 ms` | **`640 / 810 / 1,500 ms`** *(**`6.09x` faster Med vs Arch 1**; `0 ms` sync detach)* | **`620 / 767 / 1,300 ms`** *(**`6.29x` faster Med vs Arch 1**; `0 ms` sync detach)* |
-| **Background `UnmountAndDetach` (`atelet_async_detach_ms`)** | `N/A` | `N/A` | `N/A` | **`1,707.5 ms` med / `1,652.0 ms` avg** *(`652 ms` NVMe `umount` flush + `1,000 ms` detach)* | **`1,699.9 ms` med / `1,674.0 ms` avg** *(`674 ms` NVMe `umount` flush + `1,000 ms` detach)* |
-| **Wait for In-Flight Detach (`atelet_wait_detach_ms`)** | `0 ms` | `0 ms` | `0 ms` | **`0.0 ms` med / `211.6 ms` avg** *(p90: `697.1 ms`)* | **`1,691.8 ms` med / `1,646.5 ms` avg** *(p90: `1,912.7 ms`)* |
-| **Parallel `AttachAndMount` (`atelet_import_dur_ms`)** | `0 ms` | `0 ms` | `0 ms` | **`1,020.6 ms` med / `1,027.4 ms` avg** *(p90: `1,038.2 ms` — zero `opMu` queue)* | **`1,021.4 ms` med / `1,040.3 ms` avg** *(p90: `1,125.0 ms` — zero `opMu` queue)* |
-| **Checkpoint Stage / Cold NVMe Read (`atelet_restore_download_ms`)** | `2,430 ms` med *(GCS)* | `4,510 ms` med *(GCS)* | `~480 ms` med *(Warm DRAM)* | **`2,584.6 ms` med / `2,663.5 ms` avg** *(`1,892.3 MiB/s` peak physical NVMe read!)* | **`2,305.2 ms` med / `2,381.8 ms` avg** *(`1,526.8 MiB/s` peak physical NVMe read!)* |
-| **Server Warm Restore (`atelet_restore_total_ms` / `ateapi`)** | `2,700 / 2,851 / 4,200 ms` | `4,900 / 4,747 / 6,800 ms` | `675 / 704 / 920 ms` | **`4,014.9 / 4,111.3 / 4,800.7 ms`** *(`ateapi`: `4,090.5 ms` med / `4,196.5 ms` avg)* | **`5,259.8 / 5,288.4 / 5,869.0 ms`** *(`ateapi`: `5,241.3 ms` med / `5,089.5 ms` avg)* |
-| **Client Warm `ResumeActor` Latency** *(Med / Avg / p90)* | `2,700 / 2,851 / 4,200 ms` | `4,900 / 4,747 / 6,800 ms` | `690 / 719 / 940 ms` | **`5,200 / 6,319 / 11,000 ms`** | **`5,400 / 6,181 / 12,000 ms`** |
-| **Server Cycle Overhead (`Hibernate + Server Restore` Med)** | `6,600 ms` | `10,600 ms` | `1,545 ms` | **`4,655 ms` (`1.42x` faster vs Arch 1)** | **`5,880 ms` (`1.12x` faster vs Arch 1)** |
-| **Single-Node System Throughput (`cycles/min`)** | **`103.3 cycles/min`** | **`80.3 cycles/min`** | **`448.0 cycles/min`** | **`102.7 cycles/min`** (`308` cycles in `180s`, `0` GCS traffic) | **`86.7 cycles/min`** (`260` cycles in `180s`, `0` GCS traffic) |
-| **Peak Physical NVMe Write / Read Bandwidth (`MiB/s`)** | `1,000.6 / 0.0 MiB/s` | `1.4 / 0.0 MiB/s` | `2,383.0 / 0.0 MiB/s` | **`2,340.4 MiB/s` Write / `1,892.3 MiB/s` Read** | **`2,328.8 MiB/s` Write / `1,526.8 MiB/s` Read** |
+| Metric (`c3-standard-44`, W2 `544 MiB` State, $N=15$) | **Arch 1 (`Suspend` to Standard Regional GCS + Boot Disk)** *(Measured)* | **Arch 1 (`Suspend` to `RAPID` Zonal GCS Bucket + Boot Disk)** *(Measured, DirectPath gRPC)* | **Arch 2 (`Suspend` to GCS + `tmpfs`)** *(Measured)* | **Arch 3 (`0s` Pre-Attached Hyperdisks)** *(Measured)* | **Arch 3c (`1s` Parallel Attach/Detach, `1.0s` Wait)** *(Measured, n=301)* | **Arch 3c (`1s` Parallel Attach/Detach, `0.0s` Wait)** *(Measured, n=256)* |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`PauseActor` / `SuspendActor` Latency** *(Med / Avg / p90)* | `3,900 / 4,328 / 6,500 ms` | **`2,400 / 2,659 / 3,800 ms`** *(**`1.63x` faster Med vs Standard GCS**)* | `5,700 / 5,564 / 7,500 ms` | `870 / 1,061 / 1,800 ms` | **`640 / 810 / 1,500 ms`** *(**`6.09x` faster Med vs Arch 1**; `0 ms` sync detach)* | **`620 / 767 / 1,300 ms`** *(**`6.29x` faster Med vs Arch 1**; `0 ms` sync detach)* |
+| **Background `UnmountAndDetach` (`atelet_async_detach_ms`)** | `N/A` | `N/A` | `N/A` | `N/A` | **`1,707.5 ms` med / `1,652.0 ms` avg** *(`652 ms` NVMe `umount` flush + `1,000 ms` detach)* | **`1,699.9 ms` med / `1,674.0 ms` avg** *(`674 ms` NVMe `umount` flush + `1,000 ms` detach)* |
+| **Wait for In-Flight Detach (`atelet_wait_detach_ms`)** | `0 ms` | `0 ms` | `0 ms` | `0 ms` | **`0.0 ms` med / `211.6 ms` avg** *(p90: `697.1 ms`)* | **`1,691.8 ms` med / `1,646.5 ms` avg** *(p90: `1,912.7 ms`)* |
+| **Parallel `AttachAndMount` (`atelet_import_dur_ms`)** | `0 ms` | `0 ms` | `0 ms` | `0 ms` | **`1,020.6 ms` med / `1,027.4 ms` avg** *(p90: `1,038.2 ms` — zero `opMu` queue)* | **`1,021.4 ms` med / `1,040.3 ms` avg** *(p90: `1,125.0 ms` — zero `opMu` queue)* |
+| **Checkpoint Stage / Cold NVMe Read (`atelet_restore_download_ms`)** | `2,430 ms` med *(Standard GCS)* | **`1,468.6 ms` med / `1,500.6 ms` avg** *(`RAPID` GCS; `953.5 ms` med upload)* | `4,510 ms` med *(GCS)* | `~480 ms` med *(Warm DRAM)* | **`2,584.6 ms` med / `2,663.5 ms` avg** *(`1,892.3 MiB/s` peak physical NVMe read!)* | **`2,305.2 ms` med / `2,381.8 ms` avg** *(`1,526.8 MiB/s` peak physical NVMe read!)* |
+| **Server Warm Restore (`atelet_restore_total_ms` / `ateapi`)** | `2,700 / 2,851 / 4,200 ms` | **`1,857.9 / 1,877.4 / 2,262.1 ms`** | `4,900 / 4,747 / 6,800 ms` | `675 / 704 / 920 ms` | **`4,014.9 / 4,111.3 / 4,800.7 ms`** *(`ateapi`: `4,090.5 ms` med / `4,196.5 ms` avg)* | **`5,259.8 / 5,288.4 / 5,869.0 ms`** *(`ateapi`: `5,241.3 ms` med / `5,089.5 ms` avg)* |
+| **Client Warm `ResumeActor` Latency** *(Med / Avg / p90)* | `2,700 / 2,851 / 4,200 ms` | **`1,900 / 1,890 / 2,300 ms`** *(**`-29.6%` Med / `-45.2%` p90**)* | `4,900 / 4,747 / 6,800 ms` | `690 / 719 / 940 ms` | **`5,200 / 6,319 / 11,000 ms`** | **`5,400 / 6,181 / 12,000 ms`** |
+| **Server Cycle Overhead (`Hibernate + Server Restore` Med)** | `6,600 ms` | **`4,300 ms` (`1.53x` faster vs Standard GCS)** | `10,600 ms` | `1,545 ms` | **`4,655 ms` (`1.42x` faster vs Arch 1)** | **`5,880 ms` (`1.12x` faster vs Arch 1)** |
+| **Single-Node System Throughput (`cycles/min`)** | **`103.3 cycles/min`** | **`149.3 cycles/min` (`+44.5%`, `1.45x`)** | **`80.3 cycles/min`** | **`448.0 cycles/min`** | **`102.7 cycles/min`** (`308` cycles in `180s`, `0` GCS traffic) | **`86.7 cycles/min`** (`260` cycles in `180s`, `0` GCS traffic) |
+| **Peak Physical NVMe Write / Read Bandwidth (`MiB/s`)** | `1,000.6 / 0.0 MiB/s` | **`2,182.6 / 0.0 MiB/s`** *(`4,562.4 MiB/s` RX / `3,593.2 MiB/s` TX)* | `1.4 / 0.0 MiB/s` | `2,383.0 / 0.0 MiB/s` | **`2,340.4 MiB/s` Write / `1,892.3 MiB/s` Read** | **`2,328.8 MiB/s` Write / `1,526.8 MiB/s` Read** |
 
 ### 10.3 Cross-Node Restore Percentage Sweep (`0%` to `100%`)
 
@@ -337,7 +337,8 @@ Using `--cross-node-restore-pct` (`ATELET_SIMULATE_CROSS_NODE_PCT`), `atelet` pr
 
 | Target Cross-Node % | Observed Cross-Node Restore % | Sustained Throughput (`cycles/min` & vs. Arch 1) | Client `PauseActor` (`p50 / avg / p90`) | `Pause` vs. Arch 1 `Suspend` (`p50 / avg / p90`) | Client `ResumeActor` (`p50 / avg / p90`) | `Resume` vs. Arch 1 `Resume` (`p50 / avg / p90`) | Total Client Cycle (`Pause+Resume` `p50 / avg / p90`) | `Cycle` vs. Arch 1 (`p50 / avg / p90`) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Arch 1 Baseline** *(GCS)* | `N/A` *(100% GCS)* | **`103.3`** *(Baseline)* | `3,900 / 4,328 / 6,500 ms` | *Baseline (`0.0%`)* | `2,700 / 2,851 / 4,200 ms` | *Baseline (`0.0%`)* | `6,600 / 7,179 / 10,700 ms` | *Baseline (`0.0%`)* |
+| **Arch 1 Baseline** *(Standard Regional GCS)* | `N/A` *(100% GCS)* | **`103.3`** *(Baseline)* | `3,900 / 4,328 / 6,500 ms` | *Baseline (`0.0%`)* | `2,700 / 2,851 / 4,200 ms` | *Baseline (`0.0%`)* | `6,600 / 7,179 / 10,700 ms` | *Baseline (`0.0%`)* |
+| **Arch 1 (`RAPID` Zonal GCS Bucket)** *(us-central1-a)* | `N/A` *(100% Rapid GCS)* | **`149.3` (`+44.5%`, `1.45x`)** | `2,400 / 2,659 / 3,800 ms` | **`-38.5% / -38.6% / -41.5%`** | `1,900 / 1,890 / 2,300 ms` | **`-29.6% / -33.7% / -45.2%`** | `4,300 / 4,549 / 6,100 ms` | **`-34.8% / -36.6% / -43.0%`** |
 | **`0%`** *(Pre-Attached)* | **`0.0%`** | **`448.0` (`+333.7%`, `4.34x`)** | `870 / 1,061 / 1,800 ms` | **`-77.7% / -75.5% / -72.3%`** | `690 / 719 / 940 ms` | **`-74.4% / -74.8% / -77.6%`** | `1,560 / 1,780 / 2,740 ms` | **`-76.4% / -75.2% / -74.4%`** |
 | **`5%`** | **`7.8%`** (`30/383`) | **`264.7` (`+156.2%`, `2.56x`)** | `730 / 885 / 1,500 ms` | **`-81.3% / -79.6% / -76.9%`** | `640 / 1,110 / 2,700 ms` | **`-76.3% / -61.1% / -35.7%`** | `1,370 / 1,995 / 4,200 ms` | **`-79.2% / -72.2% / -60.7%`** |
 | **`10%`** | **`12.9%`** (`46/356`) | **`242.0` (`+134.3%`, `2.34x`)** | `730 / 871 / 1,500 ms` | **`-81.3% / -79.9% / -76.9%`** | `670 / 1,356 / 4,200 ms` | **`-75.2% / -52.4% / 0.0%`** | `1,400 / 2,227 / 5,700 ms` | **`-78.8% / -69.0% / -46.7%`** |
@@ -353,8 +354,10 @@ Using `--cross-node-restore-pct` (`ATELET_SIMULATE_CROSS_NODE_PCT`), `atelet` pr
 
 #### Server Sub-Stage & Node Telemetry Breakdown (`0%` to `100%`)
 
-| Target Cross-Node % (`--cross-node-restore-pct`) | Observed Cross-Node Restore % | Sustained Throughput (`cycles/min`) | Client `PauseActor` (`p50 / avg / p90`) | Client `ResumeActor` (`p50 / avg / p90 / p95`) | Server Blended Restore (`p50 / avg / p90 / p95`) | Same-Node Warm Restore (`p50 / avg`, Warm DRAM Copy `p50`) | Cross-Node Cold Restore (`p50 / avg / p90`, `dMount` + Cold NVMe `p50`) | Peak NVMe Write / Read (`MiB/s`) & Mean `iowait` |
+| Target Cross-Node % (`--cross-node-restore-pct`) | Observed Cross-Node Restore % | Sustained Throughput (`cycles/min`) | Client `Pause` / `Suspend` (`p50 / avg / p90`) | Client `ResumeActor` (`p50 / avg / p90 / p95`) | Server Blended Restore (`p50 / avg / p90 / p95`) | Same-Node Warm Restore (`p50 / avg`, Warm DRAM Copy `p50`) | Cross-Node / GCS Cold Restore (`p50 / avg / p90`, `dMount` + Cold Read / Download `p50`) | Peak NVMe Write / Read (`MiB/s`) & Mean `iowait` |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Arch 1 (`STANDARD` GCS)** | `100.0%` *(GCS)* | **`103.3`** | `3,900 / 4,328 / 6,500 ms` | **`2,700 / 2,851 / 4,200 / 5,800 ms`** | **`2,612 / 2,758 / 4,043 / 5,620 ms`** | `N/A` (`0` local hits) | **`2,612 / 2,758 / 4,043 ms`** (`0 ms` mnt + `2,430 ms` GCS dl) | `2,203 W / 0 R` (`2.1%` iowait) |
+| **Arch 1 (`RAPID` Zonal GCS)** | `100.0%` *(Zonal GCS)* | **`149.3`** | `2,400 / 2,659 / 3,800 ms` | **`1,900 / 1,890 / 2,300 / 2,600 ms`** | **`1,858 / 1,877 / 2,262 / 2,424 ms`** | `N/A` (`0` local hits) | **`1,858 / 1,877 / 2,262 ms`** (`0 ms` mnt + `1,469 ms` DirectPath dl) | `2,183 W / 0 R` (`1.4%` iowait) |
 | **`0%`** *(Pre-Attached)* | `0.0%` | **`448.0`** | `870 / 1,061 / 1,800 ms` | **`690 / 719 / 940 / 1,100 ms`** | **`675 / 704 / 920 / 1,080 ms`** | `675 / 704 ms` (`480 ms` copy) | `N/A` (`0` cold restores) | `2,390 W / 0 R` (`8.5%` iowait) |
 | **`5%`** | `7.8%` (`30/383`) | **`264.7`** | `730 / 885 / 1,500 ms` | **`640 / 1,110 / 2,700 / 4,200 ms`** | **`495 / 779 / 637 / 3,953 ms`** | **`491 / 498 ms`** (`275 ms` copy) | **`4,089 / 4,088 / 4,795 ms`** (`1,735 ms` mnt + `2,175 ms` read) | `2,433 W / 926 R` (`4.6%` iowait) |
 | **`10%`** | `12.9%` (`46/356`) | **`242.0`** | `730 / 871 / 1,500 ms` | **`670 / 1,356 / 4,200 / 4,800 ms`** | **`493 / 941 / 3,564 / 4,113 ms`** | **`483 / 495 ms`** (`277 ms` copy) | **`3,952 / 3,954 / 4,691 ms`** (`1,586 ms` mnt + `2,245 ms` read) | `2,399 W / 960 R` (`5.5%` iowait) |
@@ -367,6 +370,81 @@ Using `--cross-node-restore-pct` (`ATELET_SIMULATE_CROSS_NODE_PCT`), `atelet` pr
 | **`80%`** | `84.2%` (`154/183`) | **`123.3`** | `660 / 844 / 1,500 ms` | **`5,400 / 4,765 / 6,700 / 6,900 ms`** | **`5,345 / 4,738 / 6,676 / 6,879 ms`** | **`468 / 492 ms`** (`266 ms` copy) | **`5,781 / 5,538 / 6,716 ms`** (`2,021 ms` mnt + `3,343 ms` read) | `2,374 W / 1,814 R` (`16.8%` iowait) |
 | **`90%`** | `90.2%` (`156/173`) | **`118.7`** | `660 / 798 / 1,500 ms` | **`5,900 / 5,267 / 6,700 / 6,900 ms`** | **`5,791 / 5,199 / 6,692 / 6,961 ms`** | **`518 / 504 ms`** (`271 ms` copy) | **`5,956 / 5,711 / 6,709 ms`** (`2,125 ms` mnt + `3,308 ms` read) | `2,372 W / 2,389 R` (`17.2%` iowait) |
 | **`100%`** *(Every Cycle)* | `100.0%` (`287/287`) | **`102.7`** | `640 / 810 / 1,500 ms` | **`5,200 / 6,319 / 11,000 / 11,000 ms`** | **`4,015 / 4,111 / 4,801 / 5,021 ms`** | `N/A` (`0` warm restores) | **`4,015 / 4,111 / 4,801 ms`** (`1,042 ms` mnt + `2,585 ms` read) | `2,340 W / 1,892 R` (`4.7%` iowait) |
+
+### 10.4 Reproducing Single-Node `Arch 1` (`RAPID` Zonal GCS Bucket) & `Arch 3c` (`0%`–`100%` Cross-Node Sweep)
+
+1. **Build `atelet` and `ate-api-server` images**:
+   ```bash
+   source .ate-dev-env.sh
+   export KO_DOCKER_REPO="gcr.io/${PROJECT_ID}/ate-images"
+   ATELET_IMG=$(ko build ./cmd/atelet)
+   ATEAPI_IMG=$(ko build ./cmd/ateapi)
+   kubectl set image -n ate-system deploy/ate-api-server api-server="$ATEAPI_IMG"
+   ```
+2. **Reproduce `Arch 1` (`RAPID` Zonal GCS Bucket in `us-central1-a`)**:
+   ```bash
+   export RAPID_BUCKET="gs://snapshot-substrate-rapid-${PROJECT_ID}"
+   gcloud storage buckets create "$RAPID_BUCKET" \
+     --project="$PROJECT_ID" \
+     --location=us-central1 \
+     --placement=us-central1-a \
+     --default-storage-class=RAPID \
+     --enable-hierarchical-namespace \
+     --uniform-bucket-level-access
+
+   python3 benchmarking/scripts/disk-arch/run_w2_arch1_rapid.py "$ATELET_IMG" 180
+   ```
+3. **Reproduce `Arch 3c` (`1s` Parallel Simulated Hyperdisk Attach/Detach `0%`–`100%` Sweep)**:
+   ```bash
+   python3 benchmarking/scripts/disk-arch/setup_disk_pool.py \
+     --node "$ACTIVE_NODE" --count 17 --size-gb 20 --iops 3000 --throughput 140
+
+   python3 benchmarking/scripts/disk-arch/run_w2_arch3c_sim1s.py "$ATELET_IMG" 1.0 180 \
+     --sweep-pcts 5,10,20,30,40,50,60,70,80,90,100
+   ```
+
+---
+
+## 11. Multi-Node Actor Overcommit Benchmark (`1.0x` to `5.0x`: `30` to `150` Actors across `2x c3-standard-44` Nodes)
+
+We evaluated **Workload W2 (`544 MiB` dirty state per transition)** across **`2x c3-standard-44` worker nodes** at **`30` ready workers (`15` workers/node)** across five overcommit tiers (`1.0x = 30` actors, `2.0x = 60` actors, `3.0x = 90` actors, `4.0x = 120` actors, `5.0x = 150` actors) comparing **Architecture 1 (`SuspendActor` to GCS)** vs. **Architecture 3 (`PauseActor` + Dedicated GCE Hyperdisk Pool with `maxQueue=2` Bounded Disk Admission)**:
+
+| Overcommit Tier | Architecture | Cluster Throughput (`cycles/min`) | Warm Resume (`avg / p90 / p95`) | Hibernate (`avg / p90 / p95`) | Same-Node Disk Hit Rate (%) |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| **`1.0x` (`30` Actors)** | **Arch 1 (`SuspendActor`)** | `159.0 / min` | `3,645 / 6,100 / 7,000 ms` | `5,566 / 8,800 / 18,000 ms` | `N/A` (GCS transfer on 100% of cycles) |
+| | **Arch 3 (`PauseActor`)** | **`673.7 / min` (`+323.7%`)** | **`563 / 670 / 740 ms` (`-84.6%` avg)** | **`952 / 1,500 / 2,100 ms` (`-82.9%` avg)** | **`100.0%`** (`2,049 / 2,049` local hits) |
+| **`2.0x` (`60` Actors)** | **Arch 1 (`SuspendActor`)** | `178.7 / min` | `4,115 / 6,000 / 7,500 ms` | `4,842 / 7,700 / 9,100 ms` | `N/A` (GCS transfer on 100% of cycles) |
+| | **Arch 3 (`PauseActor`)** | **`502.3 / min` (`+181.1%`)** | **`1,149 / 1,300 / 1,600 ms` (`-72.1%` avg)** | **`1,221 / 2,300 / 3,000 ms` (`-74.8%` avg)** | **`98.8%`** (`1,513 / 1,532` local hits) |
+| **`3.0x` (`90` Actors)** | **Arch 1 (`SuspendActor`)** | `199.7 / min` | `3,769 / 5,400 / 6,000 ms` | `4,181 / 6,100 / 7,500 ms` | `N/A` (GCS transfer on 100% of cycles) |
+| | **Arch 3 (`PauseActor`)** | **`363.0 / min` (`+81.8%`)** | **`2,232 / 4,000 / 13,000 ms` (`-40.8%` avg)** | **`947 / 1,400 / 2,200 ms` (`-77.3%` avg)** | **`98.1%`** (`1,085 / 1,106` local hits) |
+| **`4.0x` (`120` Actors)** | **Arch 1 (`SuspendActor`)** | **`178.0 / min`** | **`4,351 / 6,200 / 6,900 ms`** | `4,953 / 6,700 / 8,800 ms` | `N/A` (GCS transfer on 100% of cycles) |
+| | **Arch 3 (`PauseActor`)** | `120.3 / min` (`-32.4%`) | `7,511 / 25,000 / 41,000 ms` | **`833 / 1,700 / 2,600 ms` (`-83.2%` avg)** | **`98.9%`** of completed restores (`60`-disk VM slot cap reached) |
+| **`5.0x` (`150` Actors)** | **Arch 1 (`SuspendActor`)** | **`181.7 / min`** | **`4,455 / 6,100 / 6,500 ms`** | `4,803 / 7,800 / 8,100 ms` | `N/A` (GCS transfer on 100% of cycles) |
+| | **Arch 3 (`PauseActor`)** | `40.7 / min` (`-77.6%`) | `12,611 / 13,000 / 13,000 ms` | **`849 / 1,000 / 2,900 ms` (`-82.3%` avg)** | **`99.2%`** of completed restores (LRU disk thrashing) |
+
+### 11.1 Reproducing the Multi-Node Overcommit Benchmark (`1.0x` to `5.0x`)
+
+```bash
+# 1. Provision 30 attached Hyperdisks on NODE1, 30 attached on NODE2, and 90 formatted detached pool disks:
+python3 benchmarking/scripts/disk-arch/setup_disk_pool.py \
+  --node "$NODE1" --start-index 0 --count 30 --size-gb 20 --iops 10000 --throughput 800
+python3 benchmarking/scripts/disk-arch/setup_disk_pool.py \
+  --node "$NODE2" --start-index 30 --count 30 --size-gb 20 --iops 10000 --throughput 800
+python3 benchmarking/scripts/disk-arch/setup_disk_pool.py \
+  --node "$NODE1" --start-index 60 --count 90 --size-gb 20 --iops 10000 --throughput 800 --detach-after-format
+
+# 2. Run Arch 1 (SuspendActor to GCS) across 30, 60, 90, 120, 150 actors (30 workers):
+for ACTOR_COUNT in 30 60 90 120 150; do
+  python3 benchmarking/scripts/disk-arch/run_overcommit_benchmark.py \
+    --mode arch1 --workers 30 --actors "$ACTOR_COUNT" --duration-sec 180 --wait-sec 1.0
+done
+
+# 3. Run Arch 3 (PauseActor + Hyperdisk Pool) across 30, 60, 90, 120, 150 actors (30 workers):
+for ACTOR_COUNT in 30 60 90 120 150; do
+  python3 benchmarking/scripts/disk-arch/run_overcommit_benchmark.py \
+    --mode arch3 --workers 30 --actors "$ACTOR_COUNT" --duration-sec 180 --wait-sec 1.0
+done
+```
 
 
 

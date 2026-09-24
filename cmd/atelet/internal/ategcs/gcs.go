@@ -20,13 +20,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"cloud.google.com/go/storage/experimental"
 	"github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/option"
 )
+
+const rapidPartsMagic = "ATE_RAPID_PARTS:"
+
+func isRapidBucket(bucket string) bool {
+	if strings.Contains(strings.ToLower(bucket), "rapid") {
+		return true
+	}
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("ATE_GCS_RAPID")))
+	return v == "true" || v == "1"
+}
 
 type gcsClient struct {
 	client *storage.Client
@@ -38,6 +52,10 @@ type gcsClient struct {
 	// built on first use by uploadClient.
 	poolOnce sync.Once
 	pool     []*storage.Client
+
+	grpcOnce   sync.Once
+	grpcClient *storage.Client
+	grpcPool   []*storage.Client
 }
 
 // NewGCSClient returns a GCS-backed ObjectStorage. It builds its own
@@ -52,6 +70,52 @@ func NewGCSClient(ctx context.Context, opts ...option.ClientOption) (ObjectStora
 	}
 	setRetry(client)
 	return &gcsClient{client: client, opts: opts}, nil
+}
+
+func (g *gcsClient) initGRPC(ctx context.Context) {
+	g.grpcOnce.Do(func() {
+		grpcOpts := append([]option.ClientOption{}, g.opts...)
+		grpcOpts = append(grpcOpts, experimental.WithZonalBucketAPIs())
+		c, err := storage.NewGRPCClient(context.WithoutCancel(ctx), grpcOpts...)
+		if err != nil {
+			slog.WarnContext(ctx, "Failed to create gRPC client for GCS Rapid bucket; falling back to default client", slog.Any("err", err))
+			return
+		}
+		setRetry(c)
+		g.grpcClient = c
+		for range uploadPoolSize {
+			pc, err := storage.NewGRPCClient(context.WithoutCancel(ctx), grpcOpts...)
+			if err != nil {
+				slog.WarnContext(ctx, "Falling back to primary gRPC client for part pool", slog.Any("err", err))
+				return
+			}
+			setRetry(pc)
+			g.grpcPool = append(g.grpcPool, pc)
+		}
+	})
+}
+
+func (g *gcsClient) clientForBucket(ctx context.Context, bucket string) *storage.Client {
+	if isRapidBucket(bucket) {
+		g.initGRPC(ctx)
+		if g.grpcClient != nil {
+			return g.grpcClient
+		}
+	}
+	return g.client
+}
+
+func (g *gcsClient) pooledClientForBucket(ctx context.Context, bucket string, i int) *storage.Client {
+	if isRapidBucket(bucket) {
+		g.initGRPC(ctx)
+		if len(g.grpcPool) > 0 {
+			return g.grpcPool[i%len(g.grpcPool)]
+		}
+		if g.grpcClient != nil {
+			return g.grpcClient
+		}
+	}
+	return g.uploadClient(ctx, i)
 }
 
 // setRetry makes every operation on c retry transient errors (408, 429, 5xx)
@@ -91,6 +155,11 @@ const uploadChunkSize = 64 << 20
 // uploadCompositeMin and as parallel parts above it. The size is not known up front,
 // so this reads that many bytes to find out which case it is, then hands them on.
 func (g *gcsClient) PutObject(ctx context.Context, bucket, object string, reader io.Reader) error {
+	if isRapidBucket(bucket) {
+		// Zonal Rapid buckets do not support ComposeObject; stream directly via BidiWriteObject
+		// with FinalizeOnClose enabled.
+		return g.putSingle(ctx, bucket, object, reader)
+	}
 	head := make([]byte, uploadCompositeMin)
 	n, err := io.ReadFull(reader, head)
 	switch {
@@ -103,10 +172,13 @@ func (g *gcsClient) PutObject(ctx context.Context, bucket, object string, reader
 	return g.putComposite(ctx, bucket, object, bytes.NewReader(head[:n]), reader)
 }
 
-// putSingle writes the whole body in one resumable request.
+// putSingle writes the whole body in one resumable or appendable BidiWriteObject request.
 func (g *gcsClient) putSingle(ctx context.Context, bucket, object string, reader io.Reader) error {
-	wc := g.client.Bucket(bucket).Object(object).NewWriter(ctx)
+	wc := g.clientForBucket(ctx, bucket).Bucket(bucket).Object(object).NewWriter(ctx)
 	wc.ChunkSize = uploadChunkSize
+	if isRapidBucket(bucket) {
+		wc.FinalizeOnClose = true
+	}
 	// io.Copy reports local read errors; wc.Close() reports the actual
 	// GCS upload (auth, permissions, transient). Join both so the caller
 	// doesn't lose either.

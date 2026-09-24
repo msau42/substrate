@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"cloud.google.com/go/storage"
 	"golang.org/x/sync/errgroup"
@@ -60,6 +61,29 @@ func (g *gcsClient) PutSparseFile(ctx context.Context, bucket, object string, f 
 		return res, errSparseTooSmall
 	}
 	groups := planSparseParts(exts, populated, n)
+
+	if isRapidBucket(bucket) {
+		grp, gctx := errgroup.WithContext(ctx)
+		for i, ranges := range groups {
+			partName := fmt.Sprintf("%s.part-%04d", object, i)
+			grp.Go(func() error {
+				obj := g.pooledClientForBucket(gctx, bucket, i).Bucket(bucket).Object(partName)
+				w := obj.NewWriter(gctx)
+				w.ChunkSize = partWriterChunk
+				w.FinalizeOnClose = true
+				if err := writeSparsePart(w, f, size, ranges, i == 0, i == len(groups)-1); err != nil {
+					_ = w.Close()
+					return fmt.Errorf("while writing rapid part %d of %q: %w", i, object, err)
+				}
+				return w.Close()
+			})
+		}
+		if err := grp.Wait(); err != nil {
+			return res, err
+		}
+		header := fmt.Sprintf("%s%d\n", rapidPartsMagic, len(groups))
+		return res, g.putSingle(ctx, bucket, object, strings.NewReader(header))
+	}
 
 	var idBytes [8]byte
 	if _, err := rand.Read(idBytes[:]); err != nil {
