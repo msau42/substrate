@@ -1,0 +1,104 @@
+{
+  "label": "arch3c_sim1s_wait0p0s",
+  "wait_sec": "0.0",
+  "workers": 17,
+  "users": 15,
+  "job_name": "runner-arch3c-sim1s-wait0p0s-9ae5f7",
+  "telemetry": {
+    "peak_tot_write_mib_s": 2329.762631143048,
+    "peak_boot_write_mib_s": 7.136940505124721,
+    "peak_pool_write_mib_s": 2328.841879668202,
+    "peak_pool_read_mib_s": 1526.8018605927577,
+    "active_mean_tot_write_mib_s": 942.376143789454,
+    "peak_tot_aqu_sz": 311.0784139417282,
+    "peak_boot_w_await_ms": 23.35211267605634,
+    "peak_pool_w_await_ms": 34.21536905965622,
+    "active_mean_pool_w_await_ms": 15.346794124198187,
+    "mean_cpu_util_pct": 15.563917748963451,
+    "peak_cpu_util_pct": 38.38687312225561,
+    "peak_iowait_pct": 26.548875631023407,
+    "mean_iowait_pct": 9.371867880039721,
+    "peak_tx_mib_s": 2.9668813972838795,
+    "peak_rx_mib_s": 1.364224632099518
+  },
+  "server_metrics": {
+    "ateapi_hibernate": {
+      "count": 260,
+      "avg": 765.9846292730768,
+      "p50": 624.375842,
+      "p90": 1346.139174,
+      "p95": 1693.089958
+    },
+    "ateapi_resume_cold": {
+      "count": 0,
+      "avg": 0.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "p95": 0.0
+    },
+    "ateapi_resume_warm": {
+      "count": 260,
+      "avg": 5089.506078811539,
+      "p50": 5241.327832999999,
+      "p90": 5874.958388,
+      "p95": 6119.310695
+    },
+    "atelet_wait_detach_ms": {
+      "count": 256,
+      "avg": 1646.50445190625,
+      "p50": 1691.835282,
+      "p90": 1912.725225,
+      "p95": 1996.773698
+    },
+    "atelet_import_dur_ms": {
+      "count": 256,
+      "avg": 1040.3232215742187,
+      "p50": 1021.434135,
+      "p90": 1125.044109,
+      "p95": 1183.15339
+    },
+    "atelet_restore_mount_ms": {
+      "count": 256,
+      "avg": 2708.27088196875,
+      "p50": 2725.648001,
+      "p90": 3024.199747,
+      "p95": 3108.918176
+    },
+    "atelet_restore_download_ms": {
+      "count": 256,
+      "avg": 2381.8055620898435,
+      "p50": 2305.214393,
+      "p90": 2915.577495,
+      "p95": 3167.120399
+    },
+    "atelet_restore_ateom_ms": {
+      "count": 256,
+      "avg": 186.87326692578125,
+      "p50": 182.536117,
+      "p90": 229.93274499999998,
+      "p95": 242.37575
+    },
+    "atelet_restore_total_ms": {
+      "count": 256,
+      "avg": 5288.390695554687,
+      "p50": 5259.758164,
+      "p90": 5868.972895,
+      "p95": 6113.589314999999
+    },
+    "atelet_async_detach_ms": {
+      "count": 260,
+      "avg": 1673.9780948,
+      "p50": 1699.871547,
+      "p90": 1920.250551,
+      "p95": 2004.326552
+    },
+    "atelet_checkpoint_total_ms": {
+      "count": 260,
+      "avg": 759.601911073077,
+      "p50": 617.02415,
+      "p90": 1340.420948,
+      "p95": 1687.123621
+    }
+  },
+  "job_logs_tail": "[locust] [2026-09-21 23:46:27,217] runner-arch3c-sim1s-wait0p0s-9ae5f7-hv4w2/INFO/locust.main: --run-time limit reached, shutting down\n[boomer] {\"time\":\"2026-09-21T23:46:27.217745878Z\",\"level\":\"INFO\",\"msg\":\"Recv quit message from master, all the goroutines are stopped\"}\n[boomer] {\"time\":\"2026-09-21T23:46:27.217794685Z\",\"level\":\"INFO\",\"msg\":\"shutdown\"}\n[boomer] {\"time\":\"2026-09-21T23:46:27.217802931Z\",\"level\":\"INFO\",\"msg\":\"boomer exited; suspending+deleting actors\"}\n[locust] [2026-09-21 23:46:27,217] runner-arch3c-sim1s-wait0p0s-9ae5f7-hv4w2/INFO/locust.runners: Worker 'runner-arch3c-sim1s-wait0p0s-9ae5f7-hv4w2_31aab2151d9c4ad783531612735ce297' (index 0) quit. 0 workers ready.\n[locust] [2026-09-21 23:46:27,218] runner-arch3c-sim1s-wait0p0s-9ae5f7-hv4w2/INFO/locust.runners: The last worker quit, stopping test.\n[locust] [2026-09-21 23:46:28,219] runner-arch3c-sim1s-wait0p0s-9ae5f7-hv4w2/INFO/locust.main: Shutting down (exit code 1)\n[locust] Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s\n[locust] --------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------\n[locust] grpc     CreateActor                                                                       15     0(0.00%) |      1       1       2      1 |    0.08        0.00\n[locust] grpc     CreateAtespace                                                                    15     0(0.00%) |     15       0     227      1 |    0.08        0.00\n[locust] http     GluttonChurnRAM                                                                  260     0(0.00%) |     67      64     128     66 |    1.45        0.00\n[locust] http     GluttonFillRAM                                                                    13     0(0.00%) |   1258    1241    1294   1294 |    0.07        0.00\n[locust] http     GluttonPing                                                                      260     0(0.00%) |      3       2      13      3 |    1.45        0.00\n[locust] http     GluttonReadRAM                                                                   260     0(0.00%) |     28      23      56     27 |    1.45        0.00\n[locust] grpc     PauseActor                                                                       257     0(0.00%) |    767     434    2720    620 |    1.44        0.00\n[locust] grpc     ResumeActor                                                                      278   31(11.15%) |   6181    4322   13676   5400 |    1.55        0.17\n[locust] grpc     ResumeActorFirstResume                                                            57   44(77.19%) |  10162     183   12551  12000 |    0.32        0.25\n[locust] --------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------\n[locust]          Aggregated                                                                      1415    75(5.30%) |   1793       1   13676     66 |    7.91        0.42\n[locust] \n[locust] Response time percentiles (approximated)\n[locust] Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs\n[locust] --------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------\n[locust] grpc     CreateActor                                                                             1      1      1      1      2      2      2      2      2      2      2     15\n[locust] grpc     CreateAtespace                                                                          1      1      1      1      2    230    230    230    230    230    230     15\n[locust] http     GluttonChurnRAM                                                                        66     66     67     68     71     73     77     80    130    130    130    260\n[locust] http     GluttonFillRAM                                                                       1300   1300   1300   1300   1300   1300   1300   1300   1300   1300   1300     13\n[locust] http     GluttonPing                                                                             3      3      3      3      5      6      8      9     13     13     13    260\n[locust] http     GluttonReadRAM                                                                         27     28     29     30     39     43     47     49     56     56     56    260\n[locust] grpc     PauseActor                                                                            620    660    700    730   1300   1700   2200   2700   2700   2700   2700    257\n[locust] grpc     ResumeActor                                                                          5400   5600   5800   5900  12000  12000  13000  13000  14000  14000  14000    278\n[locust] grpc     ResumeActorFirstResume                                                              12000  12000  12000  12000  13000  13000  13000  13000  13000  13000  13000     57\n[locust] --------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------\n[locust]          Aggregated                                                                             66    610   1300   4900   5600  12000  12000  13000  14000  14000  14000   1415\n[locust] \n[locust] Error report\n[locust] # occurrences      Error                                                                                               \n[locust] ------------------|---------------------------------------------------------------------------------------------------------------------------------------------\n[locust] 44                 grpc ResumeActorFirstResume: rpc error: code = ResourceExhausted desc = no free workers available   \n[locust] 31                 grpc ResumeActor: rpc error: code = ResourceExhausted desc = no free workers available              \n[locust] ------------------|---------------------------------------------------------------------------------------------------------------------------------------------\n[locust] \nLocust exited with code 1\nStopping boomer...\nBoomer exited with code 0\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_status.json -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/status.json\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_logs.txt -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/logs.txt\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_traces.txt -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/traces.txt\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15.jsonl -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/stats.jsonl\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_stats.csv -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/stats.csv\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_exceptions.csv -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/exceptions.csv\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_failures.csv -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/failures.csv\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15_stats_history.csv -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/stats_history.csv\nUploaded /tmp/20260921T234325Z-locust-runner/arch3c_sim1s_wait0p0s_w2_w15.jsonl -> gs://snapshot-substrate-test-msau-gke-dev/results/runs/arch3c_sim1s_wait0p0s_w2_w15/run_date=2026-09-21/run_ts=1790034205/run_tag=5c49070e/arch3c_sim1s_wait0p0s_w2_w15.jsonl"
+}
