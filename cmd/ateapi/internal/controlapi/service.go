@@ -24,6 +24,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/localjwtauthority"
 	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/snapshot"
+	"github.com/agent-substrate/substrate/internal/snapshot/object"
 	"github.com/agent-substrate/substrate/internal/volume"
 	"github.com/agent-substrate/substrate/internal/volume/csi"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
@@ -50,6 +52,7 @@ type RPCService struct {
 	mu                    sync.RWMutex
 	volumePlugins         map[string]volume.VolumePluginControlPlane
 	objectStore           objectstore.Store
+	snapshotPlugin        snapshot.SnapshotPluginControlPlane
 
 	actorIdentityJWTIssuer string
 	actorIDJWTPool         localjwtauthority.Pool
@@ -87,6 +90,7 @@ func NewRPCService(
 	actorIDCAPool localca.Pool,
 ) *RPCService {
 	impl := newServiceImpl(persistence, storageClassLister)
+	impl.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(objectStore, object.WithTagResolver(impl.resolveTagForNewActor))
 	s := &RPCService{
 		impl:                   impl,
 		persistence:            persistence,
@@ -97,6 +101,7 @@ func NewRPCService(
 		instruments:            instruments,
 		volumePlugins:          volumePlugins,
 		objectStore:            objectStore,
+		snapshotPlugin:         impl.snapshotPlugin,
 		actorIdentityJWTIssuer: actorIdentityJWTIssuer,
 		actorIDJWTPool:         actorIDJWTPool,
 		actorIDCAPool:          actorIDCAPool,
@@ -168,6 +173,7 @@ type ServiceImpl struct {
 	store store.Interface
 
 	storageClassLister storagev1listers.StorageClassLister
+	snapshotPlugin     snapshot.SnapshotPluginControlPlane
 }
 
 var _ store.Interface = (*ServiceImpl)(nil)
@@ -182,7 +188,15 @@ func newServiceImpl(
 		store:              persistence,
 		storageClassLister: storageClassLister,
 	}
+	s.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(nil, object.WithTagResolver(s.resolveTagForNewActor))
 	return s
+}
+
+func (s *ServiceImpl) getSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
+	if s.snapshotPlugin != nil {
+		return s.snapshotPlugin
+	}
+	return object.NewObjectSnapshotPluginControlPlane(nil, object.WithTagResolver(s.resolveTagForNewActor))
 }
 
 // Pass-through.

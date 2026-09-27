@@ -297,6 +297,9 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := w.getSnapshotPlugin().AssignToNode(ctx, actor, activeActorSnapshot(actor), worker.GetNodeName()); err != nil {
+			return nil, nil, err
+		}
 		markSkipped(ctx, "actor already RESUMING with a valid worker assignment")
 		return actor, worker, nil
 	case ateapipb.ActorState_ACTOR_STATE_SUSPENDED, ateapipb.ActorState_ACTOR_STATE_PAUSED:
@@ -337,7 +340,17 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		}
 		return nil, nil, err
 	}
+	if err := w.getSnapshotPlugin().AssignToNode(ctx, assignedActor, activeActorSnapshot(assignedActor), assignedWorker.GetNodeName()); err != nil {
+		return nil, nil, err
+	}
 	return assignedActor, assignedWorker, nil
+}
+
+func activeActorSnapshot(actor *ateapipb.Actor) *ateapipb.Snapshot {
+	if snap := actor.GetStatus().GetLatestSnapshotStatus(); snap != nil {
+		return snap
+	}
+	return actor.GetStatus().GetDurableSnapshotStatus()
 }
 
 // validateAssignedWorker checks a RESUMING actor's persisted assignment

@@ -23,7 +23,6 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -145,17 +144,13 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 
 	// Fail here rather than at checkpoint time if the template's location
 	// cannot produce a usable URI: nothing has been written yet.
-	uri, err := newInProgressSnapshotURI(actorTemplate, actor)
+	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, actorTemplate, "", ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE)
 	if err != nil {
 		return nil, err
 	}
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDING
-		toUpdate.Status.InProgressSnapshotStatus = &ateapipb.Snapshot{
-			SnapshotId:    uri.Name(),
-			Object:        &ateapipb.ObjectSnapshot{SnapshotUri: uri.String()},
-			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-		}
+		toUpdate.Status.InProgressSnapshotStatus = inProgressSnap
 		return nil
 	})
 	if err != nil {
@@ -320,17 +315,6 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 	return wireSnapshotScope, nil
 }
 
-// newInProgressSnapshotURI is where the snapshot an actor is currently taking is
-// written: under the actor's own prefix, so the objects name their owner.
-func newInProgressSnapshotURI(actorTemplate *ateapipb.ActorTemplate, actor *ateapipb.Actor) (resources.SnapshotURI, error) {
-	atespace := actor.GetMetadata().GetAtespace()
-	uri, err := resources.NewActorSnapshotURI(actorTemplate.GetSnapshotConfig().GetStorageLocation(), atespace, actor.GetMetadata().GetUid(), resources.NewSnapshotName())
-	if err != nil {
-		return resources.SnapshotURI{}, fmt.Errorf("while building the snapshot URI for actor %s/%s: %w", atespace, actor.GetMetadata().GetName(), err)
-	}
-	return uri, nil
-}
-
 // ensureVolumesDetached detaches the actor's mounted external volumes from
 // its worker node. Detachment is idempotent, so a re-entered workflow safely
 // runs it again. spanName distinguishes the suspend and pause steps in
@@ -378,7 +362,10 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	}
 
 	// 1. Free the worker (if it hasn't been freed yet)
-	if latestActor.GetStatus().GetWorkerAssignment() != nil {
+	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
+		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetInProgressSnapshotStatus(), assignment.GetNodeName()); err != nil {
+			return nil, err
+		}
 		t = time.Now()
 		_, _, err := releaseWorker(ctx, w.store, latestActor)
 		dReleaseWorker = time.Since(t)
@@ -459,28 +446,9 @@ func (w *ActorWorkflow) releaseReplacedSnapshot(ctx context.Context, actor *atea
 	defer func() { err = done(err) }()
 
 	previous := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
-	switch {
-	case w.objectStore == nil:
-		markSkipped(ctx, "no object store configured")
-		return nil
-	case previous == "":
-		markSkipped(ctx, "the actor held no external snapshot")
-		return nil
-	case previous == nextSnapshot.GetSnapshotUri():
-		markSkipped(ctx, "the actor's external snapshot is unchanged")
+	if previous == "" || previous == nextSnapshot.GetSnapshotUri() {
+		markSkipped(ctx, "no replaced external snapshot to release")
 		return nil
 	}
-	uri, err := resources.ParseSnapshotURI(previous)
-	if err != nil {
-		return fmt.Errorf("while parsing the replaced external snapshot %q: %w", previous, err)
-	}
-	if !uri.OwnedBy(actorSnapshotOwner(actor)) {
-		markSkipped(ctx, "the replaced external snapshot is owned by another resource")
-		return nil
-	}
-	return objectstore.DeletePrefix(ctx, w.objectStore, uri.Prefix())
-}
-
-func actorSnapshotOwner(actor *ateapipb.Actor) resources.SnapshotOwner {
-	return resources.ActorSnapshotOwner(actor.GetMetadata().GetAtespace(), actor.GetMetadata().GetUid())
+	return w.getSnapshotPlugin().DeleteSnapshot(ctx, actor, actor.GetStatus().GetDurableSnapshotStatus())
 }

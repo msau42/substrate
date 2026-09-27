@@ -89,11 +89,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		return nil, err
 	}
 
-	// Resolve the explicit tag, or freeze the template's current golden default.
-	tagRef := inActor.GetSourceTag()
-	if tagRef == nil {
-		tagRef = template.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag()
-	} else {
+	if inActor.GetSourceTag() != nil {
 		for _, volume := range template.GetVolumes() {
 			if volume.GetExternalVolumeTemplate() != nil {
 				// TODO: Permit cloning after CSI volume snapshots are supported.
@@ -101,17 +97,9 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 			}
 		}
 	}
-	var sourceTag *ateapipb.Tag
-	if tagRef != nil {
-		sourceTag, err = s.resolveTagSource(ctx, inActor.GetMetadata().GetAtespace(), tagRef, template)
-		if err != nil {
-			return nil, err
-		}
-		if inActor.GetSourceTag() == nil {
-			if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot().GetObject()); err != nil {
-				return nil, err
-			}
-		}
+	initialSnapshot, err := s.getSnapshotPlugin().PrepareNewActor(ctx, inActor, template)
+	if err != nil {
+		return nil, err
 	}
 
 	atespace := inActor.GetMetadata().GetAtespace()
@@ -126,28 +114,9 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 	// Verify that the result is properly valid before storing it.
 	outActor := proto.CloneOf(inActor)
 	outActor.Status = &ateapipb.ActorStatus{
-		State:        ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-		ActorVolumes: initVols,
-	}
-	if sourceTag != nil {
-		// The Actor starts out borrowing the tag's external snapshot rather than
-		// copying it. The snapshot URI is under the tag's prefix, not the Actor's, which
-		// is what keeps the Actor from collecting those objects. Its first
-		// suspend writes a snapshot under its own prefix and takes over from
-		// there.
-		snapshot := proto.CloneOf(sourceTag.GetStatus().GetSnapshot())
-		// The Actor is born with guest state, so stamp the template that state
-		// was built on now rather than at the first resume. The Tag records it
-		// beside its snapshot rather than on it, so the clone above does not
-		// carry it. Left empty, a repoint before that first resume reads as "no
-		// guest state" instead of "replaced template", and the resume restores
-		// the old template's memory and rootfs in full instead of the volume
-		// data alone.
-		if snapshot.GetObject() != nil {
-			snapshot.GetObject().ActorTemplateUid = sourceTag.GetStatus().GetActorTemplateUid()
-		}
-		snapshot.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE
-		outActor.Status.DurableSnapshotStatus = snapshot
+		State:                 ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+		ActorVolumes:          initVols,
+		DurableSnapshotStatus: initialSnapshot,
 	}
 	if errs := validateActorUpdate(ctx, field.NewPath("actor"), outActor, inActor, true); len(errs) > 0 {
 		return nil, toGRPCInternalError(errs)
@@ -170,6 +139,19 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 	logActorStateChanged(ctx, stored, ateattr.OperationCreate)
 
 	return stored, nil
+}
+
+func (s *ServiceImpl) resolveTagForNewActor(ctx context.Context, actor *ateapipb.Actor, tagRef *ateapipb.ObjectRef, template *ateapipb.ActorTemplate) (*ateapipb.Tag, error) {
+	sourceTag, err := s.resolveTagSource(ctx, actor.GetMetadata().GetAtespace(), tagRef, template)
+	if err != nil {
+		return nil, err
+	}
+	if actor.GetSourceTag() == nil {
+		if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot().GetObject()); err != nil {
+			return nil, err
+		}
+	}
+	return sourceTag, nil
 }
 
 // resolveTagSource resolves a CreateActor request's source tag

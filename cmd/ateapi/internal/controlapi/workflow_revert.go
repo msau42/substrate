@@ -24,7 +24,6 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel/attribute"
@@ -193,6 +192,9 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 			if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
 				return err
 			}
+			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, actor, actor.GetStatus().GetLatestSnapshotStatus(), assignment.GetNodeName()); err != nil {
+				return err
+			}
 			if _, _, err := releaseWorker(ctx, w.store, actor); err != nil {
 				return fmt.Errorf("while releasing worker: %w", err)
 			}
@@ -208,30 +210,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 	ctx, done := stepSpan(ctx, "DiscardInProgressSnapshot")
 	defer func() { err = done(err) }()
 
-	inProgress := actor.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri()
-	switch {
-	case w.objectStore == nil:
-		markSkipped(ctx, "no object store configured")
-		return nil
-	case inProgress == "":
-		markSkipped(ctx, "no in-progress snapshot recorded")
-		return nil
-	}
-
-	uri, err := resources.ParseSnapshotURI(inProgress)
-	if err != nil {
-		return fmt.Errorf("while parsing the in-progress snapshot %q: %w", inProgress, err)
-	}
-	// A suspend records the in-progress URI under the actor's own prefix
-	// before atelet writes the first object, so a URI owned by anything else
-	// is a corrupted record.
-	owner := actorSnapshotOwner(actor)
-	if !uri.OwnedBy(owner) {
-		return fmt.Errorf("the in-progress snapshot %q is not owned by actor %s", inProgress, owner)
-	}
-	// Only the abandoned snapshot goes, not the actor's whole prefix: the
-	// external snapshot the revert returns the actor to lives under it too.
-	return objectstore.DeletePrefix(ctx, w.objectStore, uri.Prefix())
+	return w.getSnapshotPlugin().DeleteSnapshot(ctx, actor, actor.GetStatus().GetInProgressSnapshotStatus())
 }
 
 // ensureRevertedFinalized commits SUSPENDED and drops every pointer to the

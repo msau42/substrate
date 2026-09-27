@@ -27,6 +27,8 @@ import (
 	"github.com/agent-substrate/substrate/internal/ateattr"
 	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
+	"github.com/agent-substrate/substrate/internal/snapshot"
+	"github.com/agent-substrate/substrate/internal/snapshot/object"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/otel"
@@ -111,6 +113,7 @@ type ActorWorkflow struct {
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
 	objectStore          objectstore.Store
+	snapshotPlugin       snapshot.SnapshotPluginControlPlane
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
@@ -140,7 +143,15 @@ func NewActorWorkflow(
 		egressGatewayAddress: egressGatewayAddress,
 		pluginRegistry:       pluginRegistry,
 		objectStore:          objectStore,
+		snapshotPlugin:       object.NewObjectSnapshotPluginControlPlane(objectStore),
 	}
+}
+
+func (w *ActorWorkflow) getSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
+	if w.snapshotPlugin != nil {
+		return w.snapshotPlugin
+	}
+	return object.NewObjectSnapshotPluginControlPlane(w.objectStore)
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by

@@ -22,7 +22,6 @@ import (
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
 	"github.com/agent-substrate/substrate/internal/ateattr"
-	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -272,7 +271,10 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 		return nil, err
 	}
 
-	if latestActor.GetStatus().GetWorkerAssignment() != nil {
+	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
+		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetLatestSnapshotStatus(), assignment.GetNodeName()); err != nil {
+			return nil, err
+		}
 		_, _, err := releaseWorker(ctx, w.store, latestActor)
 		if err != nil {
 			return nil, err
@@ -370,57 +372,7 @@ func (w *ActorWorkflow) ensureExternalSnapshotsReleased(ctx context.Context, act
 	ctx, done := stepSpan(ctx, "ReleaseExternalSnapshots")
 	defer func() { err = done(err) }()
 
-	if w.objectStore == nil {
-		markSkipped(ctx, "no object store configured")
-		return nil
-	}
-
-	prefix, err := actorSnapshotStoragePrefix(actor)
-	if err != nil {
-		return err
-	}
-	if prefix.IsZero() {
-		markSkipped(ctx, "the actor owns no external snapshot")
-		return nil
-	}
-	return objectstore.DeletePrefix(ctx, w.objectStore, prefix)
-}
-
-// actorSnapshotStoragePrefix returns the prefix holding every object the actor wrote:
-// the snapshot it last took, the one a suspend was in the middle of taking, and
-// anything a crashed suspend stranded. A zero prefix means the actor never
-// wrote anything.
-func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix, error) {
-	actorOwner := actorSnapshotOwner(actor)
-	if snapshotURI := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); snapshotURI != "" {
-		uri, err := resources.ParseSnapshotURI(snapshotURI)
-		if err != nil {
-			return resources.StoragePrefix{}, fmt.Errorf("while parsing the external snapshot %q: %w", snapshotURI, err)
-		}
-		// A URI the actor does not own is a tag's snapshot, borrowed until the actor's
-		// first suspend completes, which means it has written nothing of its
-		// own yet.
-		if uri.OwnedBy(actorOwner) {
-			return uri.OwnerPrefix(), nil
-		}
-	}
-	// Nothing of the actor's own is recorded. Unless a suspend died partway,
-	// nothing was ever written under its prefix: the in-progress URI is
-	// recorded before atelet uploads the first object.
-	inProgress := actor.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri()
-	if inProgress == "" {
-		return resources.StoragePrefix{}, nil
-	}
-	uri, err := resources.ParseSnapshotURI(inProgress)
-	if err != nil {
-		return resources.StoragePrefix{}, fmt.Errorf("while parsing the in-progress snapshot %q: %w", inProgress, err)
-	}
-	if !uri.OwnedBy(actorOwner) {
-		// Corrupted record. This should never happen. An in-progress snapshot should
-		// always be owned by the actor that holds it.
-		return resources.StoragePrefix{}, fmt.Errorf("the in-progress snapshot %q is not owned by actor %s", inProgress, actorOwner)
-	}
-	return uri.OwnerPrefix(), nil
+	return w.getSnapshotPlugin().DeleteActor(ctx, actor)
 }
 
 // finalizeDeleted removes the actor from the store and returns the deleted

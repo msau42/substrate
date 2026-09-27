@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
-	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/uuid"
@@ -70,13 +69,13 @@ func (w *ActorWorkflow) TagActorSnapshot(ctx context.Context, tag *ateapipb.Tag)
 	if err != nil {
 		return nil, err
 	}
-	snapshot := actor.GetStatus().GetDurableSnapshotStatus().GetObject()
+	srcSnapshot := actor.GetStatus().GetDurableSnapshotStatus()
 
-	reserved, dst, err := w.ensureTagReserved(leaseCtx, tagRef, actor, actorTemplate, tag)
+	reserved, err := w.ensureTagReserved(leaseCtx, tagRef, actor, actorTemplate, tag)
 	if err != nil {
 		return nil, err
 	}
-	if err := w.ensureTagSnapshotCopied(leaseCtx, reserved, snapshot, dst); err != nil {
+	if err := w.ensureTagSnapshotCopied(leaseCtx, reserved, srcSnapshot); err != nil {
 		return nil, err
 	}
 	return w.ensureTagFinalized(leaseCtx, reserved)
@@ -183,19 +182,7 @@ func (w *ActorWorkflow) ensureTagSnapshotReleased(ctx context.Context, tag *atea
 	ctx, done := stepSpan(ctx, "ReleaseTagSnapshot")
 	defer func() { err = done(err) }()
 
-	if w.objectStore == nil {
-		markSkipped(ctx, "no object store configured")
-		return nil
-	}
-	tagRef := resources.TagRefFromTag(tag)
-	uri, err := resources.ParseSnapshotURI(tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri())
-	if err != nil {
-		return fmt.Errorf("while resolving the external snapshot of tag %s: %w", tagRef, err)
-	}
-	if err := objectstore.DeletePrefix(ctx, w.objectStore, uri.Prefix()); err != nil {
-		return fmt.Errorf("while releasing the external snapshot %q of tag %s: %w", uri, tagRef, err)
-	}
-	return nil
+	return w.getSnapshotPlugin().DeleteTagSnapshot(ctx, tag)
 }
 
 // finalizeTagDeleted drops the row, once nothing it names is left behind.
@@ -261,75 +248,52 @@ func (w *ActorWorkflow) loadActorForTag(ctx context.Context, actorRef resources.
 // deciding whether the objects under it still belong to the snapshot being
 // tagged, and the row may not even be this actor's; deleting the tag collects
 // them and frees the name, so a retry is a delete followed by a create.
-func (w *ActorWorkflow) ensureTagReserved(ctx context.Context, tagRef resources.TagRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate, tag *ateapipb.Tag) (_ *ateapipb.Tag, _ resources.SnapshotURI, err error) {
+func (w *ActorWorkflow) ensureTagReserved(ctx context.Context, tagRef resources.TagRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate, tag *ateapipb.Tag) (_ *ateapipb.Tag, err error) {
 	ctx, done := stepSpan(ctx, "ReserveTag")
 	defer func() { err = done(err) }()
 
-	location := actorTemplate.GetSnapshotConfig().GetStorageLocation()
-	if err := resources.ValidateSnapshotLocation(location); err != nil {
-		return nil, resources.SnapshotURI{}, fmt.Errorf("invalid storage location for tag %s: %w", tagRef, err)
-	}
 	uid := uuid.NewString()
-	dst, err := resources.NewTagSnapshotURI(location, tagRef.Atespace, uid)
-	if err != nil {
-		return nil, resources.SnapshotURI{}, fmt.Errorf("while building the snapshot URI for tag %s: %w", tagRef, err)
-	}
-	snapshot := actor.GetStatus().GetDurableSnapshotStatus().GetObject()
 	tagToCreate := &ateapipb.Tag{
 		Metadata:    &ateapipb.ResourceMetadata{Atespace: tagRef.Atespace, Name: tagRef.Name, Uid: uid},
 		Scope:       tag.GetScope(),
 		SourceActor: resources.ActorRefFromActor(actor).ToObjectRef(),
-		Status: &ateapipb.TagStatus{
-			State: ateapipb.TagState_TAG_STATE_CREATING,
-			// The tag records the template the snapshot's guest state was built under, not
-			// the one the actor currently points at. A suspended actor can be repointed,
-			// and a tag that claimed the new template would hand clones the old template's
-			// memory under the new one's identity, past the data-only downgrade a resume of
-			// the actor itself would take.
-			ActorTemplateUid: snapshot.GetActorTemplateUid(),
-			Snapshot: &ateapipb.Snapshot{
-				SnapshotId:    dst.Name(),
-				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  dst.String(),
-					ContentScope: snapshot.GetContentScope(),
-				},
-			},
-		},
+	}
+	reservedSnap, err := w.getSnapshotPlugin().ReserveTagSnapshot(ctx, tagToCreate, actor, actorTemplate)
+	if err != nil {
+		return nil, err
+	}
+	snapshot := actor.GetStatus().GetDurableSnapshotStatus().GetObject()
+	tagToCreate.Status = &ateapipb.TagStatus{
+		State: ateapipb.TagState_TAG_STATE_CREATING,
+		// The tag records the template the snapshot's guest state was built under, not
+		// the one the actor currently points at. A suspended actor can be repointed,
+		// and a tag that claimed the new template would hand clones the old template's
+		// memory under the new one's identity, past the data-only downgrade a resume of
+		// the actor itself would take.
+		ActorTemplateUid: snapshot.GetActorTemplateUid(),
+		Snapshot:         reservedSnap,
 	}
 
 	stored, err := w.store.CreateTag(ctx, tagToCreate)
 	switch {
 	case err == nil:
-		return stored, dst, nil
+		return stored, nil
 	case errors.Is(err, store.ErrFailedPrecondition):
-		return nil, resources.SnapshotURI{}, status.Errorf(codes.FailedPrecondition, "Atespace %s not found", tagRef.Atespace)
+		return nil, status.Errorf(codes.FailedPrecondition, "Atespace %s not found", tagRef.Atespace)
 	case errors.Is(err, store.ErrAlreadyExists):
-		return nil, resources.SnapshotURI{}, status.Errorf(codes.AlreadyExists, "Tag %s already exists; delete it and create it again to retry", tagRef)
+		return nil, status.Errorf(codes.AlreadyExists, "Tag %s already exists; delete it and create it again to retry", tagRef)
 	}
-	return nil, resources.SnapshotURI{}, fmt.Errorf("while reserving tag %s: %w", tagRef, err)
+	return nil, fmt.Errorf("while reserving tag %s: %w", tagRef, err)
 }
 
 // ensureTagSnapshotCopied copies the actor's external snapshot to the tag's own
 // prefix, derived from the reserved row's freshly minted UID. The prefix is
 // empty by construction, so the copy never blends with another attempt's objects.
-func (w *ActorWorkflow) ensureTagSnapshotCopied(ctx context.Context, tag *ateapipb.Tag, snapshot *ateapipb.ObjectSnapshot, dst resources.SnapshotURI) (err error) {
+func (w *ActorWorkflow) ensureTagSnapshotCopied(ctx context.Context, tag *ateapipb.Tag, srcSnapshot *ateapipb.Snapshot) (err error) {
 	ctx, done := stepSpan(ctx, "CopyTagSnapshot")
 	defer func() { err = done(err) }()
 
-	if w.objectStore == nil {
-		markSkipped(ctx, "no object store configured")
-		return nil
-	}
-	tagRef := resources.TagRefFromTag(tag)
-	src, err := resources.ParseSnapshotURI(snapshot.GetSnapshotUri())
-	if err != nil {
-		return fmt.Errorf("while parsing the external snapshot %q of the source actor: %w", snapshot.GetSnapshotUri(), err)
-	}
-	if err := objectstore.CopyPrefix(ctx, w.objectStore, src.Prefix(), dst.Prefix()); err != nil {
-		return fmt.Errorf("while copying the external snapshot for tag %s: %w", tagRef, err)
-	}
-	return nil
+	return w.getSnapshotPlugin().CopyToTagSnapshot(ctx, tag, srcSnapshot)
 }
 
 // ensureTagFinalized publishes the copy by setting status.state to

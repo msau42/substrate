@@ -131,14 +131,13 @@ func (w *ActorWorkflow) ensureMarkedPausing(ctx context.Context, actorRef resour
 		return nil, status.Errorf(codes.FailedPrecondition, "actors in atespace %q are golden actors, which cannot be paused", actorRef.Atespace)
 	}
 
-	snapshotName := resources.NewSnapshotName()
+	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, nil, "", ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT)
+	if err != nil {
+		return nil, err
+	}
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSING
-		toUpdate.Status.InProgressSnapshotStatus = &ateapipb.Snapshot{
-			SnapshotId:    snapshotName,
-			Local:         &ateapipb.LocalSnapshot{},
-			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
-		}
+		toUpdate.Status.InProgressSnapshotStatus = inProgressSnap
 		return nil
 	})
 	if err != nil {
@@ -240,6 +239,9 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			slog.Warn("Worker already gone during finalize pause, skipping release", "worker", assignment.GetWorkerPod())
 		} else {
 			nodeName = worker.GetNodeName()
+			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetInProgressSnapshotStatus(), nodeName); err != nil {
+				return nil, err
+			}
 			// Drop just this actor's assignment; any other actors the worker
 			// hosts keep theirs.
 			_, err := w.store.ReleaseActorFromWorker(ctx, worker.GetMetadata().GetName(), latestActor.GetMetadata().GetUid())
