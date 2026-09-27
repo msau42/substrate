@@ -855,32 +855,43 @@ message WorkerAssignment {
   int64 worker_epoch = 8;
 }
 
-// TagStatus is the server-owned state of a Tag.
-// The tag is fixed to one external snapshot once its creation completes, so
-// the rest is immutable provenance.
-message TagStatus {
-  // snapshot is the external snapshot this tag points at. Unset while the tag
-  // is still being created, and immutable once set: a tag never moves between
-  // snapshots. A tag is usable only once this is set.
-  //
-  // +k8s:optional
-  ObjectSnapshot snapshot = 1;
+// TagState is the lifecycle state of a Tag.
+enum TagState {
+  // Unspecified default value.
+  TAG_STATE_UNSPECIFIED = 0;
+  // Tag row reserved; snapshot copy/clone in progress.
+  TAG_STATE_CREATING = 1;
+  // Snapshot copy/clone complete; tag is usable by CreateActor.
+  TAG_STATE_READY = 2;
+  // Tag snapshot is being garbage-collected.
+  TAG_STATE_DELETING = 3;
+  // Keep this in sync with TagStatus.state's maximum.
+}
 
+// TagStatus is the server-owned state of a Tag.
+// The tag is fixed to one snapshot, so snapshot and actor_template_uid are
+// immutable provenance.
+message TagStatus {
   // UID of the ActorTemplate the snapshot was taken under. Actors can only be
   // seeded from a tag under the same template.
   //
   // +k8s:required
   // +k8s:format=k8s-uuid
-  string actor_template_uid = 2;
+  string actor_template_uid = 1;
 
-  // storage_location is the base object-storage URI for this tag's snapshot.
-  // Set by the server from the source actor's template when the tag is created
-  // and immutable thereafter. The full snapshot URI is available in
-  // snapshot.snapshot_uri once tag creation completes.
+  // snapshot is the snapshot this tag points at. Set when the tag is reserved
+  // and immutable thereafter: a tag never moves between snapshots. A tag is
+  // usable only once state is TAG_STATE_READY.
+  //
+  // +k8s:optional
+  Snapshot snapshot = 2;
+
+  // state is the Tag's current lifecycle state.
   //
   // +k8s:required
-  // +k8s:maxLength=1024
-  string storage_location = 3;
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the TagState enum
+  TagState state = 3;
 }
 
 // Tag is an Atespace-owned, stable name for one external snapshot. The

@@ -175,7 +175,7 @@ func TestGoldenTagLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	uri := golden.GetStatus().GetSnapshot().GetSnapshotUri()
+	uri := golden.GetStatus().GetSnapshot().GetObject().GetSnapshotUri()
 	parsed, err := resources.ParseSnapshotURI(uri)
 	if err != nil {
 		t.Fatal(err)

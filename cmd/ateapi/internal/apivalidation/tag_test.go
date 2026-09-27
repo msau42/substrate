@@ -54,9 +54,12 @@ func TestValidateCreateTagRequest(t *testing.T) {
 			req: &ateapipb.CreateTagRequest{
 				Tag: validTag(func(tag *ateapipb.Tag) {
 					tag.Status = &ateapipb.TagStatus{
-						Snapshot:         validObjectSnapshot(),
+						Snapshot: &ateapipb.Snapshot{
+							Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+							Object:        validObjectSnapshot(),
+						},
 						ActorTemplateUid: someActorUID,
-						StorageLocation:  testStorageLocation,
+						State:            ateapipb.TagState_TAG_STATE_READY,
 					}
 				}),
 			},

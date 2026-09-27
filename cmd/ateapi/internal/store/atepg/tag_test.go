@@ -35,7 +35,12 @@ func createTestTag(t *testing.T, s *Persistence, tagAtespace, tagName string) *a
 		Metadata: &ateapipb.ResourceMetadata{Atespace: tagAtespace, Name: tagName},
 		Scope:    ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		Status: &ateapipb.TagStatus{
-			Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "gs://bucket/atespaces/" + tagAtespace + "/tags/" + tagName},
+			State: ateapipb.TagState_TAG_STATE_READY,
+			Snapshot: &ateapipb.Snapshot{
+				SnapshotId:    tagName,
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/" + tagAtespace + "/tags/" + tagName},
+			},
 		},
 	})
 	if err != nil {
@@ -85,7 +90,7 @@ func TestCreateTag_TagForeignKeyErrors(t *testing.T) {
 	_, err := s.CreateTag(ctx, &ateapipb.Tag{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "gone", Name: "latest"},
 		Status: &ateapipb.TagStatus{
-			StorageLocation: "gs://bucket",
+			State: ateapipb.TagState_TAG_STATE_CREATING,
 		},
 	})
 	if !errors.Is(err, store.ErrFailedPrecondition) {

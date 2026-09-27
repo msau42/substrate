@@ -337,32 +337,20 @@ func PrintTagsTo(out io.Writer, tags []*ateapipb.Tag, format string) error {
 		w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(w, "ATESPACE\tNAME\tSCOPE\tSTATE\tSNAPSHOT\tCONTENT SCOPE\tAGE")
 		for _, tag := range tags {
-			// A pending tag has no snapshot yet, so neither its URI nor its
-			// content scope says anything.
 			snapshotURI, contentScope := "<none>", "<none>"
-			if snapshot := tag.GetStatus().GetSnapshot(); snapshot.GetSnapshotUri() != "" {
+			if snapshot := tag.GetStatus().GetSnapshot().GetObject(); snapshot.GetSnapshotUri() != "" {
 				snapshotURI = snapshot.GetSnapshotUri()
 				contentScope = snapshot.GetContentScope().String()
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				tag.GetMetadata().GetAtespace(), tag.GetMetadata().GetName(), tag.GetScope(),
-				tagState(tag), snapshotURI, contentScope,
+				tag.GetStatus().GetState(), snapshotURI, contentScope,
 				formatAge(tag.GetMetadata().GetCreateTime()))
 		}
 		return w.Flush()
 	default:
 		return fmt.Errorf("unsupported format %q", format)
 	}
-}
-
-// tagState reports whether a tag is usable. A tag is Pending until
-// the copy of its own snapshot lands; until then it names nothing an Actor can
-// be created from, and deleting it collects whatever the create stranded.
-func tagState(tag *ateapipb.Tag) string {
-	if tag.GetStatus().GetSnapshot().GetSnapshotUri() == "" {
-		return "Pending"
-	}
-	return "Ready"
 }
 
 // PrintTagTo prints a single tag to the provided writer.

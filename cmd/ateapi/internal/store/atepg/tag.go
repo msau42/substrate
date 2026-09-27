@@ -157,8 +157,12 @@ func (p *Persistence) listTagsGlobal(ctx context.Context, pageSize int32, pageTo
 func (p *Persistence) CreateTag(ctx context.Context, tag *ateapipb.Tag) (*ateapipb.Tag, error) {
 	atespace := tag.GetMetadata().GetAtespace()
 	name := tag.GetMetadata().GetName()
+	uid := tag.GetMetadata().GetUid()
 	dbTag := proto.CloneOf(tag)
 	setCreateMetadata(dbTag.Metadata)
+	if uid != "" {
+		dbTag.Metadata.Uid = uid
+	}
 	protoBytes, err := proto.Marshal(dbTag)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling tag: %w", err)
@@ -192,11 +196,8 @@ func validateUpdateTagMutation(storedTag, mutatedTag *ateapipb.Tag) error {
 	if stored, mutated := storedTag.GetMetadata().GetName(), mutatedTag.GetMetadata().GetName(); stored != mutated {
 		return fmt.Errorf("metadata.name is immutable: mutation changed it from %q to %q", stored, mutated)
 	}
-	if stored, mutated := storedTag.GetStatus().GetSnapshot(), mutatedTag.GetStatus().GetSnapshot(); stored != nil && !proto.Equal(stored, mutated) {
-		return fmt.Errorf("status.snapshot is immutable once set: mutation changed it from %s to %s", stored, mutated)
-	}
-	if stored, mutated := storedTag.GetStatus().GetStorageLocation(), mutatedTag.GetStatus().GetStorageLocation(); stored != mutated {
-		return fmt.Errorf("status.storage_location is immutable: mutation changed it from %q to %q", stored, mutated)
+	if stored, mutated := storedTag.GetStatus().GetSnapshot(), mutatedTag.GetStatus().GetSnapshot(); !proto.Equal(stored, mutated) {
+		return fmt.Errorf("status.snapshot is immutable: mutation changed it from %s to %s", stored, mutated)
 	}
 	if stored, mutated := storedTag.GetStatus().GetActorTemplateUid(), mutatedTag.GetStatus().GetActorTemplateUid(); stored != mutated {
 		return fmt.Errorf("status.actor_template_uid is immutable: mutation changed it from %q to %q", stored, mutated)

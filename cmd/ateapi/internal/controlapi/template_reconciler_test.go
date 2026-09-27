@@ -261,7 +261,13 @@ func (c *fakeGoldenControl) CreateTag(_ context.Context, req *ateapipb.CreateTag
 		return nil, c.tagErr
 	}
 	c.tag = proto.CloneOf(req.GetTag())
-	c.tag.Status = &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot}}
+	c.tag.Status = &ateapipb.TagStatus{
+		State:            ateapipb.TagState_TAG_STATE_READY,
+		ActorTemplateUid: testTemplateUID,
+		Snapshot: &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot},
+		},
+	}
 	return proto.CloneOf(c.tag), nil
 }
 
@@ -856,10 +862,16 @@ func TestReconcileOne_GoldenTagRecovery(t *testing.T) {
 		Metadata:    &ateapipb.ResourceMetadata{Atespace: ref.Atespace, Name: ref.Name},
 		SourceActor: ref,
 		Scope:       ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
-		Status:      &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/tag-snapshot"}},
+		Status: &ateapipb.TagStatus{
+			State:            ateapipb.TagState_TAG_STATE_READY,
+			ActorTemplateUid: testTemplateUID,
+			Snapshot: &ateapipb.Snapshot{
+				Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/tag-snapshot"},
+			},
+		},
 	}
 	incomplete := proto.CloneOf(completed)
-	incomplete.Status.Snapshot = nil
+	incomplete.Status.State = ateapipb.TagState_TAG_STATE_CREATING
 	tests := []struct {
 		name string
 		// tag is the golden tag an earlier pass left behind, if any.
@@ -913,7 +925,7 @@ func TestReconcileOne_GoldenTagRecovery(t *testing.T) {
 			if !proto.Equal(st.storedStatus(t, testTemplateRef).GetGoldenSnapshotStatus().GetGoldenTag(), ref) {
 				t.Fatal("golden tag not recorded")
 			}
-			if control.tag.GetStatus().GetSnapshot().GetSnapshotUri() == "" {
+			if control.tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || control.tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() == "" {
 				t.Fatal("golden tag has no snapshot")
 			}
 			if len(control.createReqs) != 0 || len(control.resumeReqs) != 0 || len(control.suspendReqs) != 0 {
