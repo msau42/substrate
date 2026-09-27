@@ -1127,8 +1127,8 @@ func TestValidateDeleteOptions(t *testing.T) {
 	}
 }
 
-func validExternalSnapshot(mutate ...func(*ateapipb.ExternalSnapshot)) *ateapipb.ExternalSnapshot {
-	s := &ateapipb.ExternalSnapshot{
+func validObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.ObjectSnapshot {
+	s := &ateapipb.ObjectSnapshot{
 		SnapshotUri:  "gs://private/atespaces/as/actors/" + someActorUID + "/snapshots/snap-1",
 		ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 	}
@@ -1138,24 +1138,24 @@ func validExternalSnapshot(mutate ...func(*ateapipb.ExternalSnapshot)) *ateapipb
 	return s
 }
 
-// badExternalSnapshot violates both of ExternalSnapshot's rules at once, so a
+// badObjectSnapshot violates both of ObjectSnapshot's rules at once, so a
 // caller can assert that a containing type reaches every field of it.
-func badExternalSnapshot(mutate ...func(*ateapipb.ExternalSnapshot)) *ateapipb.ExternalSnapshot {
-	breakIt := func(s *ateapipb.ExternalSnapshot) {
+func badObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.ObjectSnapshot {
+	breakIt := func(s *ateapipb.ObjectSnapshot) {
 		s.SnapshotUri = ""
 		s.ContentScope = ateapipb.SnapshotContentScope(3)
 	}
-	return validExternalSnapshot(append([]func(*ateapipb.ExternalSnapshot){breakIt}, mutate...)...)
+	return validObjectSnapshot(append([]func(*ateapipb.ObjectSnapshot){breakIt}, mutate...)...)
 }
 
-func TestValidateExternalSnapshot(t *testing.T) {
-	valid := validExternalSnapshot
+func TestValidateObjectSnapshot(t *testing.T) {
+	valid := validObjectSnapshot
 	uriPath := field.NewPath("snapshot_uri")
 	scopePath := field.NewPath("content_scope")
 
 	tests := []struct {
 		name string
-		obj  *ateapipb.ExternalSnapshot
+		obj  *ateapipb.ObjectSnapshot
 		want field.ErrorList
 	}{
 		{
@@ -1164,7 +1164,7 @@ func TestValidateExternalSnapshot(t *testing.T) {
 		},
 		{
 			name: "valid content_scope: data",
-			obj: valid(func(s *ateapipb.ExternalSnapshot) {
+			obj: valid(func(s *ateapipb.ObjectSnapshot) {
 				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 			}),
 		},
@@ -1172,35 +1172,35 @@ func TestValidateExternalSnapshot(t *testing.T) {
 			// UNSPECIFIED reads as FULL, so optional lets the zero value skip
 			// the bounds rather than failing the minimum.
 			name: "valid content_scope: unspecified",
-			obj: valid(func(s *ateapipb.ExternalSnapshot) {
+			obj: valid(func(s *ateapipb.ObjectSnapshot) {
 				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED
 			}),
 		},
 		{
 			name: "missing snapshot_uri",
-			obj:  valid(func(s *ateapipb.ExternalSnapshot) { s.SnapshotUri = "" }),
+			obj:  valid(func(s *ateapipb.ObjectSnapshot) { s.SnapshotUri = "" }),
 			want: field.ErrorList{field.Required(uriPath, "")},
 		},
 		{
 			name: "snapshot_uri too long",
-			obj: valid(func(s *ateapipb.ExternalSnapshot) {
+			obj: valid(func(s *ateapipb.ObjectSnapshot) {
 				s.SnapshotUri = "gs://" + strings.Repeat("x", 2044)
 			}),
 			want: field.ErrorList{field.TooLong(uriPath, nil, 2048).WithOrigin("maxLength")},
 		},
 		{
 			name: "content_scope above the enum",
-			obj:  valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
+			obj:  valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
 			want: field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
 		},
 		{
 			name: "negative content_scope",
-			obj:  valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(-1) }),
+			obj:  valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(-1) }),
 			want: field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("minimum")},
 		},
 		{
 			name: "every field invalid",
-			obj:  badExternalSnapshot(),
+			obj:  badObjectSnapshot(),
 			want: field.ErrorList{
 				field.Required(uriPath, ""),
 				field.Invalid(scopePath, nil, "").WithOrigin("maximum"),
@@ -1210,20 +1210,20 @@ func TestValidateExternalSnapshot(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := operation.Operation{Type: operation.Create}
-			assertValidateErr(t, Validate_ExternalSnapshot(context.Background(), op, nil, tt.obj, nil), tt.want)
+			assertValidateErr(t, Validate_ObjectSnapshot(context.Background(), op, nil, tt.obj, nil), tt.want)
 		})
 	}
 }
 
-func TestValidateExternalSnapshotUpdate(t *testing.T) {
-	valid := validExternalSnapshot
+func TestValidateObjectSnapshotUpdate(t *testing.T) {
+	valid := validObjectSnapshot
 	uriPath := field.NewPath("snapshot_uri")
 	scopePath := field.NewPath("content_scope")
 
 	tests := []struct {
 		name   string
-		oldObj *ateapipb.ExternalSnapshot
-		newObj *ateapipb.ExternalSnapshot
+		oldObj *ateapipb.ObjectSnapshot
+		newObj *ateapipb.ObjectSnapshot
 		want   field.ErrorList
 	}{
 		{
@@ -1236,84 +1236,118 @@ func TestValidateExternalSnapshotUpdate(t *testing.T) {
 			// before these rules existed does not block updates to the rest of
 			// the object.
 			name:   "unchanged invalid fields are not revalidated",
-			oldObj: badExternalSnapshot(),
-			newObj: badExternalSnapshot(),
+			oldObj: badObjectSnapshot(),
+			newObj: badObjectSnapshot(),
 		},
 		{
 			name:   "content_scope changed to a valid value",
 			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ExternalSnapshot) {
+			newObj: valid(func(s *ateapipb.ObjectSnapshot) {
 				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 			}),
 		},
 		{
 			name:   "content_scope changed to a value outside the enum",
 			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ExternalSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
+			newObj: valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
 			want:   field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
 		},
 		{
 			name:   "snapshot_uri cleared",
 			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ExternalSnapshot) { s.SnapshotUri = "" }),
+			newObj: valid(func(s *ateapipb.ObjectSnapshot) { s.SnapshotUri = "" }),
 			want:   field.ErrorList{field.Required(uriPath, "")},
 		},
 		{
 			// The other side of the ratchet: a row that predates these rules
 			// can still be repaired, one field at a time.
 			name:   "content_scope repaired",
-			oldObj: badExternalSnapshot(),
-			newObj: badExternalSnapshot(func(s *ateapipb.ExternalSnapshot) {
+			oldObj: badObjectSnapshot(),
+			newObj: badObjectSnapshot(func(s *ateapipb.ObjectSnapshot) {
 				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
 			}),
 		},
 		{
 			name:   "snapshot_uri changed to a value that is too long",
 			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ExternalSnapshot) {
+			newObj: valid(func(s *ateapipb.ObjectSnapshot) {
 				s.SnapshotUri = "gs://" + strings.Repeat("x", 2044)
 			}),
 			want: field.ErrorList{field.TooLong(uriPath, nil, 2048).WithOrigin("maxLength")},
 		},
 		{
 			name:   "snapshot_uri repaired",
-			oldObj: badExternalSnapshot(),
-			newObj: badExternalSnapshot(func(s *ateapipb.ExternalSnapshot) { s.SnapshotUri = valid().SnapshotUri }),
+			oldObj: badObjectSnapshot(),
+			newObj: badObjectSnapshot(func(s *ateapipb.ObjectSnapshot) { s.SnapshotUri = valid().SnapshotUri }),
 		},
 		{
 			name:   "every field repaired",
-			oldObj: badExternalSnapshot(),
+			oldObj: badObjectSnapshot(),
 			newObj: valid(),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			op := operation.Operation{Type: operation.Update}
-			assertValidateErr(t, Validate_ExternalSnapshot(context.Background(), op, nil, tt.newObj, tt.oldObj), tt.want)
+			assertValidateErr(t, Validate_ObjectSnapshot(context.Background(), op, nil, tt.newObj, tt.oldObj), tt.want)
 		})
 	}
 }
 
-// TestValidateNestedExternalSnapshot checks that every type that
-// holds ExternalSnapshot has to descend into it, and report under
+// TestValidateNestedObjectSnapshot checks that every type that
+// holds ObjectSnapshot has to descend into it, and report under
 // the holder's own path.
-func TestValidateNestedExternalSnapshot(t *testing.T) {
+func TestValidateNestedObjectSnapshot(t *testing.T) {
 	tests := []struct {
 		name string
-		// path is where the offending ExternalSnapshot sits in the holder.
+		// path is where the offending ObjectSnapshot sits in the holder.
 		path     *field.Path
 		validate func(ctx context.Context) field.ErrorList
 	}{
 		{
-			name: "actor.status.external_snapshot",
-			path: field.NewPath("status", "external_snapshot"),
+			name: "actor.status.durable_snapshot_status.object",
+			path: field.NewPath("status", "durable_snapshot_status", "object"),
 			validate: func(ctx context.Context) field.ErrorList {
-				// The live path: the server validates the Actor it is about to
-				// write, as an update against the stored one.
 				op := operation.Operation{Type: operation.Update}
 				oldVal := validActor(withActorStatus())
 				newVal := validActor(withActorStatus(func(s *ateapipb.ActorStatus) {
-					s.ExternalSnapshot = badExternalSnapshot()
+					s.DurableSnapshotStatus = &ateapipb.Snapshot{
+						SnapshotId:    "snap-1",
+						Object:        badObjectSnapshot(),
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+					}
+				}))
+				return Validate_Actor(ctx, op, nil, newVal, oldVal)
+			},
+		},
+		{
+			name: "actor.status.latest_snapshot_status.object",
+			path: field.NewPath("status", "latest_snapshot_status", "object"),
+			validate: func(ctx context.Context) field.ErrorList {
+				op := operation.Operation{Type: operation.Update}
+				oldVal := validActor(withActorStatus())
+				newVal := validActor(withActorStatus(func(s *ateapipb.ActorStatus) {
+					s.LatestSnapshotStatus = &ateapipb.Snapshot{
+						SnapshotId:    "snap-1",
+						Object:        badObjectSnapshot(),
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+					}
+				}))
+				return Validate_Actor(ctx, op, nil, newVal, oldVal)
+			},
+		},
+		{
+			name: "actor.status.in_progress_snapshot_status.object",
+			path: field.NewPath("status", "in_progress_snapshot_status", "object"),
+			validate: func(ctx context.Context) field.ErrorList {
+				op := operation.Operation{Type: operation.Update}
+				oldVal := validActor(withActorStatus())
+				newVal := validActor(withActorStatus(func(s *ateapipb.ActorStatus) {
+					s.InProgressSnapshotStatus = &ateapipb.Snapshot{
+						SnapshotId:    "snap-1",
+						Object:        badObjectSnapshot(),
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+					}
 				}))
 				return Validate_Actor(ctx, op, nil, newVal, oldVal)
 			},
@@ -1324,7 +1358,7 @@ func TestValidateNestedExternalSnapshot(t *testing.T) {
 			validate: func(ctx context.Context) field.ErrorList {
 				op := operation.Operation{Type: operation.Create}
 				obj := validTag(func(tag *ateapipb.Tag) {
-					tag.Status.Snapshot = badExternalSnapshot()
+					tag.Status.Snapshot = badObjectSnapshot()
 				})
 				return Validate_Tag(ctx, op, nil, obj, nil)
 			},
@@ -1341,11 +1375,137 @@ func TestValidateNestedExternalSnapshot(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshot(t *testing.T) {
+	validLocal := func(mutate ...func(*ateapipb.Snapshot)) *ateapipb.Snapshot {
+		s := &ateapipb.Snapshot{
+			SnapshotId: "snap-1",
+			Local: &ateapipb.LocalSnapshot{
+				NodeVmsWithLocalSnapshots: []string{"node-1"},
+				ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			},
+			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+		}
+		for _, m := range mutate {
+			m(s)
+		}
+		return s
+	}
+	validObject := func(mutate ...func(*ateapipb.Snapshot)) *ateapipb.Snapshot {
+		s := &ateapipb.Snapshot{
+			SnapshotId:    "snap-1",
+			Object:        validObjectSnapshot(),
+			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+		}
+		for _, m := range mutate {
+			m(s)
+		}
+		return s
+	}
+
+	tests := []struct {
+		name string
+		obj  *ateapipb.Snapshot
+		want field.ErrorList
+	}{
+		{
+			name: "valid local snapshot (RESIDENT)",
+			obj:  validLocal(),
+		},
+		{
+			name: "valid local snapshot (LOCAL)",
+			obj: validLocal(func(s *ateapipb.Snapshot) {
+				s.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_LOCAL
+			}),
+		},
+		{
+			name: "valid object snapshot (DURABLE)",
+			obj:  validObject(),
+		},
+		{
+			name: "neither union member set",
+			obj: &ateapipb.Snapshot{
+				SnapshotId:    "snap-1",
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
+			want: field.ErrorList{field.Invalid(nil, nil, "").WithOrigin("union")},
+		},
+		{
+			name: "both union members set",
+			obj: validLocal(func(s *ateapipb.Snapshot) {
+				s.Object = validObjectSnapshot()
+			}),
+			want: field.ErrorList{field.Invalid(nil, nil, "").WithOrigin("union")},
+		},
+		{
+			name: "optional snapshot_id",
+			obj:  validLocal(func(s *ateapipb.Snapshot) { s.SnapshotId = "" }),
+		},
+		{
+			name: "missing survivability",
+			obj: validLocal(func(s *ateapipb.Snapshot) {
+				s.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_UNSPECIFIED
+			}),
+			want: field.ErrorList{field.Required(field.NewPath("survivability"), "")},
+		},
+		{
+			name: "survivability out of range",
+			obj:  validLocal(func(s *ateapipb.Snapshot) { s.Survivability = 99 }),
+			want: field.ErrorList{field.Invalid(field.NewPath("survivability"), nil, "").WithOrigin("maximum")},
+		},
+		{
+			name: "object snapshot with RESIDENT survivability",
+			obj: validObject(func(s *ateapipb.Snapshot) {
+				s.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("survivability"), nil, "")},
+		},
+		{
+			name: "object snapshot with LOCAL survivability",
+			obj: validObject(func(s *ateapipb.Snapshot) {
+				s.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_LOCAL
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("survivability"), nil, "")},
+		},
+		{
+			name: "local snapshot with DURABLE survivability",
+			obj: validLocal(func(s *ateapipb.Snapshot) {
+				s.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("survivability"), nil, "")},
+		},
+		{
+			name: "invalid snapshot_id",
+			obj:  validLocal(func(s *ateapipb.Snapshot) { s.SnapshotId = "BAD ID" }),
+			want: field.ErrorList{field.Invalid(field.NewPath("snapshot_id"), nil, "").WithOrigin("format=k8s-short-name")},
+		},
+		{
+			name: "invalid nested local snapshot",
+			obj: validLocal(func(s *ateapipb.Snapshot) {
+				s.Local.NodeVmsWithLocalSnapshots = []string{"BAD NODE"}
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("local", "node_vms_with_local_snapshots").Index(0), nil, "").WithOrigin("format=k8s-long-name")},
+		},
+		{
+			name: "invalid nested object snapshot",
+			obj: validObject(func(s *ateapipb.Snapshot) {
+				s.Object.SnapshotUri = ""
+			}),
+			want: field.ErrorList{field.Required(field.NewPath("object", "snapshot_uri"), "")},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			op := operation.Operation{Type: operation.Create}
+			assertValidateErr(t, Validate_Snapshot(context.Background(), op, nil, tt.obj, nil), tt.want)
+		})
+	}
+}
+
 func validTag(mutate ...func(*ateapipb.Tag)) *ateapipb.Tag {
 	tag := &ateapipb.Tag{
 		Metadata: validResourceMetadata(),
 		Status: &ateapipb.TagStatus{
-			Snapshot:         validExternalSnapshot(),
+			Snapshot:         validObjectSnapshot(),
 			ActorTemplateUid: someActorUID,
 			StorageLocation:  testStorageLocation,
 		},
@@ -1536,7 +1696,7 @@ func TestValidateTagRequestPayloads(t *testing.T) {
 			name: "create: invalid nested snapshot",
 			validate: func(ctx context.Context, op operation.Operation) field.ErrorList {
 				tag := validTag()
-				tag.Status.Snapshot = badExternalSnapshot()
+				tag.Status.Snapshot = badObjectSnapshot()
 				req := &ateapipb.CreateTagRequest{Tag: tag}
 				return Validate_CreateTagRequest(ctx, op, nil, req, nil)
 			},
@@ -1566,7 +1726,7 @@ func TestValidateTagRequestPayloads(t *testing.T) {
 			name: "update: nested snapshot is not descended into",
 			validate: func(ctx context.Context, op operation.Operation) field.ErrorList {
 				tag := validTag()
-				tag.Status.Snapshot = badExternalSnapshot()
+				tag.Status.Snapshot = badObjectSnapshot()
 				req := &ateapipb.UpdateTagRequest{Tag: tag}
 				return Validate_UpdateTagRequest(ctx, op, nil, req, nil)
 			},
