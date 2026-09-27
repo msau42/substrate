@@ -197,7 +197,7 @@ func (c *fakeGoldenControl) CreateActor(_ context.Context, req *ateapipb.CreateA
 	// a status observing the initial SUSPENDED state.
 	return &ateapipb.Actor{
 		Metadata: req.GetActor().GetMetadata(),
-		Status:   &ateapipb.ActorStatus{State: c.goldenState, ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: c.goldenSnapshot}},
+		Status:   &ateapipb.ActorStatus{State: c.goldenState, DurableSnapshotStatus: &ateapipb.Snapshot{Object: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot}}},
 	}, nil
 }
 
@@ -212,7 +212,7 @@ func (c *fakeGoldenControl) GetActor(_ context.Context, req *ateapipb.GetActorRe
 	}
 	return &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: req.GetActor().GetAtespace(), Name: req.GetActor().GetName()},
-		Status:   &ateapipb.ActorStatus{State: c.goldenState, ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: c.goldenSnapshot}},
+		Status:   &ateapipb.ActorStatus{State: c.goldenState, DurableSnapshotStatus: &ateapipb.Snapshot{Object: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot}}},
 	}, nil
 }
 
@@ -239,7 +239,7 @@ func (c *fakeGoldenControl) SuspendActor(_ context.Context, req *ateapipb.Suspen
 		c.goldenSnapshot = c.snapshot
 	}
 	return &ateapipb.SuspendActorResponse{
-		Actor: &ateapipb.Actor{Status: &ateapipb.ActorStatus{ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: c.goldenSnapshot}}},
+		Actor: &ateapipb.Actor{Status: &ateapipb.ActorStatus{DurableSnapshotStatus: &ateapipb.Snapshot{Object: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot}}}},
 	}, nil
 }
 
@@ -260,7 +260,7 @@ func (c *fakeGoldenControl) CreateTag(_ context.Context, req *ateapipb.CreateTag
 		return nil, c.tagErr
 	}
 	c.tag = proto.CloneOf(req.GetTag())
-	c.tag.Status = &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: c.goldenSnapshot}}
+	c.tag.Status = &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ObjectSnapshot{SnapshotUri: c.goldenSnapshot}}
 	return proto.CloneOf(c.tag), nil
 }
 
@@ -855,7 +855,7 @@ func TestReconcileOne_GoldenTagRecovery(t *testing.T) {
 		Metadata:    &ateapipb.ResourceMetadata{Atespace: ref.Atespace, Name: ref.Name},
 		SourceActor: ref,
 		Scope:       ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
-		Status:      &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ExternalSnapshot{SnapshotUri: "gs://bucket/tag-snapshot"}},
+		Status:      &ateapipb.TagStatus{ActorTemplateUid: testTemplateUID, Snapshot: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/tag-snapshot"}},
 	}
 	incomplete := proto.CloneOf(completed)
 	incomplete.Status.Snapshot = nil

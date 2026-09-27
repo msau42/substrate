@@ -55,7 +55,10 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, actorRef r
 				WorkerPodUid:    "uid",
 				WorkerPodIp:     "1.2.3.4",
 			},
-			InProgressSnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot",
+			InProgressSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: "reserved-snapshot",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot"},
+			},
 		},
 	})
 }
@@ -98,8 +101,11 @@ func seedUnboundActor(t *testing.T, ctx context.Context, st store.Interface, act
 	storetest.MustCreateActor(t, ctx, st, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Name: actorRef.Name, Atespace: actorRef.Atespace},
 		Status: &ateapipb.ActorStatus{
-			State:                 ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			InProgressSnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot",
+			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			InProgressSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: "reserved-snapshot",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot"},
+			},
 		},
 	})
 }
@@ -116,8 +122,8 @@ func assertCrashed(t *testing.T, ctx context.Context, st store.Interface, actorR
 		t.Errorf("status = %v, want %v", got.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_CRASHED)
 	}
 	// Keep the snapshot uri for debugging.
-	if got.GetStatus().GetInProgressSnapshotUri() == "" {
-		t.Error(`InProgressSnapshotUri = "", want preserved`)
+	if got.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri() == "" {
+		t.Error(`InProgressSnapshotStatus.Object.SnapshotUri = "", want preserved`)
 	}
 	if got.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("WorkerAssignment = %v, want cleared", got.GetStatus().GetWorkerAssignment())

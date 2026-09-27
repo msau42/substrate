@@ -195,7 +195,7 @@ func TestGoldenTagLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if late.GetStatus().GetExternalSnapshot().GetSnapshotUri() != uri || late.GetStatus().GetExternalSnapshot().GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
+	if late.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() != uri || late.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
 		t.Fatal("actor did not inherit golden tag snapshot and template UID")
 	}
 	waitForWorkerAvailable(t, tc, workerName)

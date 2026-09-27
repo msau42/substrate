@@ -135,7 +135,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		// is what keeps the Actor from collecting those objects. Its first
 		// suspend writes a snapshot under its own prefix and takes over from
 		// there.
-		outActor.Status.ExternalSnapshot = proto.CloneOf(sourceTag.GetStatus().GetSnapshot())
+		objSnapshot := proto.CloneOf(sourceTag.GetStatus().GetSnapshot())
 		// The Actor is born with guest state, so stamp the template that state
 		// was built on now rather than at the first resume. The Tag records it
 		// beside its snapshot rather than on it, so the clone above does not
@@ -143,7 +143,11 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		// guest state" instead of "replaced template", and the resume restores
 		// the old template's memory and rootfs in full instead of the volume
 		// data alone.
-		outActor.Status.ExternalSnapshot.ActorTemplateUid = sourceTag.GetStatus().GetActorTemplateUid()
+		objSnapshot.ActorTemplateUid = sourceTag.GetStatus().GetActorTemplateUid()
+		outActor.Status.DurableSnapshotStatus = &ateapipb.Snapshot{
+			Object:        objSnapshot,
+			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+		}
 	}
 	if errs := validateActorUpdate(ctx, field.NewPath("actor"), outActor, inActor, true); len(errs) > 0 {
 		return nil, toGRPCInternalError(errs)

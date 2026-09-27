@@ -218,7 +218,9 @@ func (w *WorkerWorkflow) releaseBoundActor(ctx context.Context, worker *ateapipb
 		// Local in-progress checkpoint dies with the worker: it lived on the node
 		// that went away. The external in-progress checkpoint is kept so delete
 		// or revert can delete it.
-		toUpdate.Status.InProgressLocalSnapshotName = ""
+		if toUpdate.Status.GetInProgressSnapshotStatus().GetLocal() != nil {
+			toUpdate.Status.InProgressSnapshotStatus = nil
+		}
 		return nil
 	})
 	switch {

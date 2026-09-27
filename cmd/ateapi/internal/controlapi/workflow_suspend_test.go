@@ -45,13 +45,16 @@ func TestEnsureMarkedSuspending_SnapshotURI(t *testing.T) {
 		t.Fatalf("ensureMarkedSuspending: %v", err)
 	}
 
-	uri := mustParseSnapshotURI(t, marked.GetStatus().GetInProgressSnapshotUri())
+	uri := mustParseSnapshotURI(t, marked.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri())
 	if !resources.IsValidResourceName(uri.Name()) {
 		t.Errorf("in-progress snapshot name = %q, want a valid resource name", uri.Name())
 	}
 	want := "gs://bucket/root/atespaces/team-a/actors/" + marked.GetMetadata().GetUid() + "/snapshots/" + uri.Name()
 	if uri.String() != want {
 		t.Errorf("snapshot URI = %q, want %q", uri, want)
+	}
+	if surv := marked.GetStatus().GetInProgressSnapshotStatus().GetSurvivability(); surv != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE {
+		t.Errorf("InProgressSnapshotStatus.Survivability = %v, want DURABLE", surv)
 	}
 }
 
@@ -66,8 +69,11 @@ func TestEnsureMarkedSuspending_ReentryKeepsPersistedSnapshotLocation(t *testing
 	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status: &ateapipb.ActorStatus{
-			State:                 ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
-			InProgressSnapshotUri: firstAttempt,
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			InProgressSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: "first-attempt",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: firstAttempt},
+			},
 		},
 	})
 	w := &ActorWorkflow{store: persistence}
@@ -75,8 +81,8 @@ func TestEnsureMarkedSuspending_ReentryKeepsPersistedSnapshotLocation(t *testing
 	if err != nil {
 		t.Fatalf("ensureMarkedSuspending: %v", err)
 	}
-	if got := marked.GetStatus().GetInProgressSnapshotUri(); got != firstAttempt {
-		t.Errorf("InProgressSnapshotUri = %q, want the first attempt's location", got)
+	if got := marked.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri(); got != firstAttempt {
+		t.Errorf("InProgressSnapshotStatus.Object.SnapshotUri = %q, want the first attempt's location", got)
 	}
 }
 
@@ -241,8 +247,13 @@ func TestEnsureAteletSuspended_DialFailureLeavesActorRetryable(t *testing.T) {
 						WorkerPod:       "pod-gone",
 						NodeName:        "node-gone",
 					},
-					InProgressSnapshotUri: neverWritten,
-					ExternalSnapshot:      &ateapipb.ExternalSnapshot{SnapshotUri: tt.prevSnapshot},
+					InProgressSnapshotStatus: &ateapipb.Snapshot{
+						SnapshotId: "never-written",
+						Object:     &ateapipb.ObjectSnapshot{SnapshotUri: neverWritten},
+					},
+					DurableSnapshotStatus: &ateapipb.Snapshot{
+						Object: &ateapipb.ObjectSnapshot{SnapshotUri: tt.prevSnapshot},
+					},
 				},
 			}
 			created := storetest.MustCreateActor(t, ctx, persistence, actor)
@@ -262,10 +273,10 @@ func TestEnsureAteletSuspended_DialFailureLeavesActorRetryable(t *testing.T) {
 			if stored.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
 				t.Errorf("state = %v, want unchanged SUSPENDING", stored.GetStatus().GetState())
 			}
-			if got := stored.GetStatus().GetInProgressSnapshotUri(); got != neverWritten {
-				t.Errorf("InProgressSnapshotUri = %q, want preserved for debugging", got)
+			if got := stored.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri(); got != neverWritten {
+				t.Errorf("InProgressSnapshotStatus.Object.SnapshotUri = %q, want preserved for debugging", got)
 			}
-			if got := stored.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != tt.prevSnapshot {
+			if got := stored.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != tt.prevSnapshot {
 				t.Errorf("SnapshotUri = %q, want %q", got, tt.prevSnapshot)
 			}
 		})
@@ -286,11 +297,16 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	actor := &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status: &ateapipb.ActorStatus{
-			State:                 ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
-			InProgressSnapshotUri: snapshotURI,
-			LocalSnapshot: &ateapipb.LocalSnapshot{
-				SnapshotName:              "actor-1-pause-snapshot",
-				NodeVmsWithLocalSnapshots: []string{"node1"},
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			InProgressSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: "2026-01-01t00-00-00z-abc",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: snapshotURI},
+			},
+			LatestSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: "actor-1-pause-snapshot",
+				Local: &ateapipb.LocalSnapshot{
+					NodeVmsWithLocalSnapshots: []string{"node1"},
+				},
 			},
 		},
 	}
@@ -309,19 +325,19 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	if stored.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", stored.GetStatus().GetState())
 	}
-	if got := stored.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != snapshotURI {
+	if got := stored.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != snapshotURI {
 		t.Errorf("SnapshotUri = %q, want %q", got, snapshotURI)
 	}
 	// The snapshot carries the template it was captured under, so a later
 	// repoint can tell that its guest state no longer matches.
-	if got := stored.GetStatus().GetExternalSnapshot().GetActorTemplateUid(); got != "tmpl-uid-1" {
-		t.Errorf("ExternalSnapshot.ActorTemplateUid = %q, want %q", got, "tmpl-uid-1")
+	if got := stored.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid(); got != "tmpl-uid-1" {
+		t.Errorf("DurableSnapshotStatus.Object.ActorTemplateUid = %q, want %q", got, "tmpl-uid-1")
 	}
-	if got := stored.GetStatus().GetInProgressSnapshotUri(); got != "" {
-		t.Errorf("InProgressSnapshotUri = %q, want cleared", got)
+	if got := stored.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri(); got != "" {
+		t.Errorf("InProgressSnapshotStatus.Object.SnapshotUri = %q, want cleared", got)
 	}
-	if stored.GetStatus().GetLocalSnapshot() != nil {
-		t.Errorf("LocalSnapshot = %v, want cleared", stored.GetStatus().GetLocalSnapshot())
+	if stored.GetStatus().GetLatestSnapshotStatus().GetLocal() != nil {
+		t.Errorf("LatestSnapshotStatus.Local = %v, want cleared", stored.GetStatus().GetLatestSnapshotStatus().GetLocal())
 	}
 }
 
@@ -376,8 +392,13 @@ func TestEnsureSuspendedFinalized_ReleasesReplacedSnapshot(t *testing.T) {
 			objects.PutSnapshot(t, fresh, "manifest.json")
 
 			mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-				s.InProgressSnapshotUri = fresh.String()
-				s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: previous.String()}
+				s.InProgressSnapshotStatus = &ateapipb.Snapshot{
+					SnapshotId: snapshotName,
+					Object:     &ateapipb.ObjectSnapshot{SnapshotUri: fresh.String()},
+				}
+				s.DurableSnapshotStatus = &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: previous.String()},
+				}
 			})
 
 			stored, err := w.ensureSuspendedFinalized(ctx, actorRef, template)
@@ -386,7 +407,7 @@ func TestEnsureSuspendedFinalized_ReleasesReplacedSnapshot(t *testing.T) {
 			}
 			// Whichever way the previous snapshot went, the actor now owns the
 			// one it just wrote and is no longer borrowing.
-			if got := stored.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != fresh.String() {
+			if got := stored.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != fresh.String() {
 				t.Errorf("external snapshot = %q, want the one this suspend wrote, %q", got, fresh)
 			}
 			if released := len(objects.Snapshot(t, previous)) == 0; released != tt.wantReleased {
@@ -426,8 +447,13 @@ func TestEnsureSuspendedFinalized_RetriesAfterObjectStoreFailure(t *testing.T) {
 	objects.PutSnapshot(t, fresh, "manifest.json")
 
 	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.InProgressSnapshotUri = fresh.String()
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: previous.String()}
+		s.InProgressSnapshotStatus = &ateapipb.Snapshot{
+			SnapshotId: snapshotName,
+			Object:     &ateapipb.ObjectSnapshot{SnapshotUri: fresh.String()},
+		}
+		s.DurableSnapshotStatus = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: previous.String()},
+		}
 	})
 
 	objects.OnDelete = func(string, string) error { return errObjectStore }
@@ -441,7 +467,7 @@ func TestEnsureSuspendedFinalized_RetriesAfterObjectStoreFailure(t *testing.T) {
 	if got := stuck.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
 		t.Errorf("state after the failure = %v, want SUSPENDING (retryable)", got)
 	}
-	if got := stuck.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != previous.String() {
+	if got := stuck.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != previous.String() {
 		t.Errorf("actor snapshot uri after the failure = %q, want the replaced %q", got, previous)
 	}
 
@@ -450,7 +476,7 @@ func TestEnsureSuspendedFinalized_RetriesAfterObjectStoreFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retried ensureSuspendedFinalized: %v", err)
 	}
-	if got := stored.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != fresh.String() {
+	if got := stored.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != fresh.String() {
 		t.Errorf("actor snapshot uri after the retry = %q, want %q", got, fresh)
 	}
 	if got := objects.Snapshot(t, previous); len(got) != 0 {
@@ -498,7 +524,10 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 						WorkerPod:       "pod-1",
 						WorkerPodUid:    testWorkerUID("pod-1"),
 					},
-					InProgressSnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "snapshot-1"),
+					InProgressSnapshotStatus: &ateapipb.Snapshot{
+						SnapshotId: "snapshot-1",
+						Object:     &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "snapshot-1")},
+					},
 				},
 			}
 			created := storetest.MustCreateActor(t, ctx, persistence, actor)
@@ -574,16 +603,16 @@ func TestCommitSnapshotScope(t *testing.T) {
 // no worker assignment, means the suspend uploads a local snapshot.
 func TestIsPausedOriginSuspend(t *testing.T) {
 	assignment := &ateapipb.WorkerAssignment{WorkerNamespace: "ns", WorkerPool: "pool", WorkerPod: "pod-1"}
-	localInfo := &ateapipb.LocalSnapshot{SnapshotName: "snap", NodeVmsWithLocalSnapshots: []string{"node1"}}
+	localInfo := &ateapipb.Snapshot{SnapshotId: "snap", Local: &ateapipb.LocalSnapshot{NodeVmsWithLocalSnapshots: []string{"node1"}}}
 	tests := []struct {
 		name  string
 		actor *ateapipb.Actor
 		want  bool
 	}{
-		{"paused actor", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_PAUSED, LocalSnapshot: localInfo}}, true},
-		{"suspending retry of a paused-origin suspend", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING, LocalSnapshot: localInfo}}, true},
-		{"running actor with stale local snapshot info", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, LocalSnapshot: localInfo, WorkerAssignment: assignment}}, false},
-		{"suspending retry of a running-origin suspend with stale local snapshot info", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING, LocalSnapshot: localInfo, WorkerAssignment: assignment}}, false},
+		{"paused actor", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_PAUSED, LatestSnapshotStatus: localInfo}}, true},
+		{"suspending retry of a paused-origin suspend", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING, LatestSnapshotStatus: localInfo}}, true},
+		{"running actor with stale local snapshot info", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING, LatestSnapshotStatus: localInfo, WorkerAssignment: assignment}}, false},
+		{"suspending retry of a running-origin suspend with stale local snapshot info", &ateapipb.Actor{Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING, LatestSnapshotStatus: localInfo, WorkerAssignment: assignment}}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -629,8 +658,11 @@ func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 			actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
 				Status: &ateapipb.ActorStatus{
-					State:         ateapipb.ActorState_ACTOR_STATE_PAUSED,
-					LocalSnapshot: &ateapipb.LocalSnapshot{SnapshotName: "snap", NodeVmsWithLocalSnapshots: []string{"node1"}, ContentScope: tc.captured},
+					State: ateapipb.ActorState_ACTOR_STATE_PAUSED,
+					LatestSnapshotStatus: &ateapipb.Snapshot{
+						SnapshotId: "snap",
+						Local:      &ateapipb.LocalSnapshot{NodeVmsWithLocalSnapshots: []string{"node1"}, ContentScope: tc.captured},
+					},
 				},
 			})
 
@@ -660,8 +692,11 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 		created := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 			Status: &ateapipb.ActorStatus{
-				State:         ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
-				LocalSnapshot: &ateapipb.LocalSnapshot{SnapshotName: "snap"},
+				State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+				LatestSnapshotStatus: &ateapipb.Snapshot{
+					SnapshotId: "snap",
+					Local:      &ateapipb.LocalSnapshot{},
+				},
 			},
 		})
 
@@ -686,9 +721,15 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 		created := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 			Status: &ateapipb.ActorStatus{
-				State:                 ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
-				InProgressSnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "snap-dest"),
-				LocalSnapshot:         &ateapipb.LocalSnapshot{SnapshotName: "snap", NodeVmsWithLocalSnapshots: []string{"node1"}},
+				State: ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+				InProgressSnapshotStatus: &ateapipb.Snapshot{
+					SnapshotId: "snap-dest",
+					Object:     &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "snap-dest")},
+				},
+				LatestSnapshotStatus: &ateapipb.Snapshot{
+					SnapshotId: "snap",
+					Local:      &ateapipb.LocalSnapshot{NodeVmsWithLocalSnapshots: []string{"node1"}},
+				},
 			},
 		})
 

@@ -140,7 +140,7 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
 // taken before that rule existed — surface a clear error instead of shipping
 // a restore request atelet would reject (or that would boot an empty guest).
-func validateGoldenSnapshotScope(snapshot *ateapipb.ExternalSnapshot) error {
+func validateGoldenSnapshotScope(snapshot *ateapipb.ObjectSnapshot) error {
 	scope := snapshot.GetContentScope()
 	switch scope {
 	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED,
@@ -179,12 +179,12 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	if err != nil {
 		return nil, nil, src, err
 	}
-	if uri := actor.GetStatus().GetExternalSnapshot().GetSnapshotUri(); uri != "" {
+	if uri := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); uri != "" {
 		if src.SnapshotURI, err = resources.ParseSnapshotURI(uri); err != nil {
 			return nil, nil, src, status.Errorf(codes.DataLoss, "Actor %s external snapshot: %v", actorRef, err)
 		}
-		src.Scope = actor.GetStatus().GetExternalSnapshot().GetContentScope()
-		capturedUnder := actor.GetStatus().GetExternalSnapshot().GetActorTemplateUid()
+		src.Scope = actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope()
+		capturedUnder := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid()
 		src.TemplateReplaced = capturedUnder != "" && capturedUnder != actorTemplate.GetMetadata().GetUid()
 	}
 
@@ -198,9 +198,9 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	// content and ignore the policy.
 	if actorTemplate.GetSnapshotConfig().GetOnResume().GetFromData() == ateapipb.ResumeSource_RESUME_SOURCE_GOLDEN {
 		dataOnly := false
-		if actor.GetStatus().GetLocalSnapshot() != nil {
+		if actor.GetStatus().GetLatestSnapshotStatus().GetLocal() != nil {
 			dataOnly = actorTemplate.GetSnapshotConfig().GetOnPause() == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
-		} else if actor.GetStatus().GetExternalSnapshot().GetSnapshotUri() != "" {
+		} else if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() != "" {
 			dataOnly = src.Scope == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 		}
 		if dataOnly {
@@ -605,7 +605,7 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 	c := scheduling.Constraints{
 		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
-		RequiredNodes: actor.GetStatus().GetLocalSnapshot().GetNodeVmsWithLocalSnapshots(),
+		RequiredNodes: actor.GetStatus().GetLatestSnapshotStatus().GetLocal().GetNodeVmsWithLocalSnapshots(),
 		Limits:        limits.Proto(),
 	}
 	if sel := tmpl.GetWorkerSelector(); sel != nil {
@@ -672,7 +672,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		return tele, err
 	}
 
-	if local := actor.GetStatus().GetLocalSnapshot(); local != nil {
+	if actor.GetStatus().GetLatestSnapshotStatus().GetLocal() != nil {
 		slog.InfoContext(ctx, "Actor has snapshot; Restoring from snapshot")
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 
@@ -690,7 +690,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
 		req.Config = &ateletpb.RestoreRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: local.GetSnapshotName()},
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: actor.GetStatus().GetLatestSnapshotStatus().GetSnapshotId()},
 		}
 		// The wire scope describes the restore OPERATION: DATA_ON_GOLDEN when
 		// loadActorForResume resolved a golden URI per the template's onResume
@@ -718,7 +718,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		// Mirrors loadActorForResume's source resolution: the durable URI is
 		// the actor's own snapshot when one exists, the golden otherwise.
 		tele.SnapshotKind = ateattr.SnapshotKindGolden
-		if actor.GetStatus().GetExternalSnapshot().GetSnapshotUri() != "" {
+		if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() != "" {
 			tele.SnapshotKind = ateattr.SnapshotKindLatest
 		}
 		var scope ateletpb.SnapshotScope

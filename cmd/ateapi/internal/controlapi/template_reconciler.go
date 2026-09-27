@@ -284,7 +284,7 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 			ateapipb.ActorState_ACTOR_STATE_SUSPENDED:
 			// The golden actor was never resumed, or a previous resume didn't
 			// finish; ResumeActor is reentrant from both.
-			if actor.GetStatus().GetExternalSnapshot().GetSnapshotUri() != "" {
+			if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() != "" {
 				// Golden actors never start from a source snapshot, so an
 				// existing snapshot means an earlier suspend completed
 				// without being recorded.
@@ -319,7 +319,7 @@ func (r *ActorTemplateReconciler) suspendActor(ctx context.Context, goldenRef *a
 		// A crash during suspend is observed as CRASHED on the retry.
 		return fmt.Errorf("while suspending golden actor: %w", err)
 	}
-	suspended := resp.GetActor().GetStatus().GetExternalSnapshot()
+	suspended := resp.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject()
 	if suspended.GetSnapshotUri() == "" {
 		return fmt.Errorf("suspending golden actor produced no external snapshot")
 	}

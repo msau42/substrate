@@ -70,8 +70,11 @@ func TestCreateActor_Success(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Name: "id1", Atespace: testAtespace, Version: 1},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
 		},
 		WorkerSelector: &ateapipb.Selector{MatchLabels: map[string]string{"tier": "free"}},
 	}
@@ -381,7 +384,7 @@ func TestCreateActor_PendingTag(t *testing.T) {
 	if _, err := tc.persistence.UpdateTag(ctx,
 		resources.TagRefFromTag(pending), store.PreconditionFrom(pending),
 		func(toUpdate *ateapipb.Tag) error {
-			toUpdate.Status.Snapshot = &ateapipb.ExternalSnapshot{
+			toUpdate.Status.Snapshot = &ateapipb.ObjectSnapshot{
 				SnapshotUri:  snapshotURI.String(),
 				ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			}
@@ -401,7 +404,7 @@ func TestCreateActor_PendingTag(t *testing.T) {
 	}
 	// The clone points at the tag's snapshot, under the tag's own prefix: the
 	// tag still owns those objects.
-	if got := clone.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != snapshotURI.String() {
+	if got := clone.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != snapshotURI.String() {
 		t.Errorf("clone external snapshot = %q, want the tag's %q", got, snapshotURI)
 	}
 }
@@ -691,8 +694,11 @@ func TestUpdateActor_Success(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Name: "id1", Atespace: testAtespace, Version: 2},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
 		},
 		WorkerSelector: &ateapipb.Selector{
 			MatchLabels: map[string]string{"tier": "paid"},
@@ -837,8 +843,11 @@ func TestUpdateActor(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Name: "id1", Atespace: testAtespace, Version: 2},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
 		},
 		WorkerSelector: &ateapipb.Selector{
 			MatchLabels: map[string]string{"tier": "paid"},
@@ -2801,8 +2810,11 @@ func TestResumeActor(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Name: name, Atespace: testAtespace},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
-			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
 			WorkerAssignment: &ateapipb.WorkerAssignment{
 				Worker:          &ateapipb.ObjectRef{Name: podUID},
 				WorkerNamespace: ns,
@@ -3163,7 +3175,7 @@ func TestSuspendActor(t *testing.T) {
 	}
 
 	sourceActor := suspended.GetActor()
-	snapshotURI := sourceActor.GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	snapshotURI := sourceActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if snapshotURI == "" {
 		t.Fatalf("SuspendActor wrote no external snapshot: %v", suspended)
 	}
@@ -3199,7 +3211,7 @@ func TestSuspendActor(t *testing.T) {
 		Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		SourceActor: &ateapipb.ObjectRef{Atespace: testAtespace, Name: name},
 		Status: &ateapipb.TagStatus{
-			Snapshot:         &ateapipb.ExternalSnapshot{SnapshotUri: tagSnapshotURI, ContentScope: sourceActor.GetStatus().GetExternalSnapshot().GetContentScope()},
+			Snapshot:         &ateapipb.ObjectSnapshot{SnapshotUri: tagSnapshotURI, ContentScope: sourceActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope()},
 			ActorTemplateUid: tmpl.GetMetadata().GetUid(),
 			StorageLocation:  tmpl.GetSnapshotConfig().GetStorageLocation(),
 		},
@@ -3256,7 +3268,7 @@ func TestSuspendActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateActor from tag failed: %v", err)
 	}
-	if got := clone.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != tagSnapshotURI {
+	if got := clone.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != tagSnapshotURI {
 		t.Errorf("clone snapshot uri = %q, want the tag's %q", got, tagSnapshotURI)
 	}
 	if snapshotOwnedByActor(t, clone, tagSnapshotURI) {
@@ -3278,7 +3290,7 @@ func TestSuspendActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SuspendActor clone failed: %v", err)
 	}
-	cloneSnapshotURI := cloneSuspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	cloneSnapshotURI := cloneSuspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if cloneSnapshotURI == tagSnapshotURI || cloneSnapshotURI == "" {
 		t.Errorf("clone snapshot uri after suspension = %q, want an external snapshot of its own", cloneSnapshotURI)
 	}
@@ -3303,10 +3315,14 @@ func TestSuspendActor(t *testing.T) {
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{
-				SnapshotUri:      snapshotURI,
-				ContentScope:     sourceActor.GetStatus().GetExternalSnapshot().GetContentScope(),
-				ActorTemplateUid: tmpl.GetMetadata().GetUid(),
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				SnapshotId: sourceActor.GetStatus().GetDurableSnapshotStatus().GetSnapshotId(),
+				Object: &ateapipb.ObjectSnapshot{
+					SnapshotUri:      snapshotURI,
+					ContentScope:     sourceActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
+					ActorTemplateUid: tmpl.GetMetadata().GetUid(),
+				},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
 			},
 		},
 	}
@@ -3457,8 +3473,8 @@ func TestResumeActor_RepointTemplateBeforeResume(t *testing.T) {
 			}
 			// Either way the restore reads the snapshot the clone borrowed
 			// from the tag, not the template's golden image.
-			if got := restoreReq.GetExternalConfig().GetSnapshotUri(); got != cloneActor.GetStatus().GetExternalSnapshot().GetSnapshotUri() {
-				t.Errorf("restore request to atelet had snapshot uri = %q, want the clone's borrowed %q", got, cloneActor.GetStatus().GetExternalSnapshot().GetSnapshotUri())
+			if got := restoreReq.GetExternalConfig().GetSnapshotUri(); got != cloneActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() {
+				t.Errorf("restore request to atelet had snapshot uri = %q, want the clone's borrowed %q", got, cloneActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri())
 			}
 			if got := restoreReq.GetGoldenSnapshotUri(); got != "" {
 				t.Errorf("restore request to atelet had golden snapshot uri = %q, want empty", got)
@@ -3598,11 +3614,17 @@ func TestPauseActor(t *testing.T) {
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: testAtespace, Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_PAUSED,
-			LocalSnapshot: &ateapipb.LocalSnapshot{
-				NodeVmsWithLocalSnapshots: []string{"node1"},
-				ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			DurableSnapshotStatus: &ateapipb.Snapshot{
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
 			},
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+			LatestSnapshotStatus: &ateapipb.Snapshot{
+				Local: &ateapipb.LocalSnapshot{
+					NodeVmsWithLocalSnapshots: []string{"node1"},
+					ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+				},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+			},
 		},
 	}
 
@@ -3611,12 +3633,12 @@ func TestPauseActor(t *testing.T) {
 		ignoreUID,
 		ignoreVersion,
 		ignoreTimestamps,
-		protocmp.IgnoreFields(&ateapipb.LocalSnapshot{}, "snapshot_name"),
+		protocmp.IgnoreFields(&ateapipb.Snapshot{}, "snapshot_id"),
 	); diff != "" {
 		t.Errorf("GetActor response mismatch (-want +got):\n%s", diff)
 	}
-	if getResp.GetStatus().GetLocalSnapshot().GetSnapshotName() == "" {
-		t.Error("LocalSnapshot.SnapshotName is empty, want the name the pause checkpointed under")
+	if getResp.GetStatus().GetLatestSnapshotStatus().GetSnapshotId() == "" {
+		t.Error("LatestSnapshotStatus.SnapshotId is empty, want the name the pause checkpointed under")
 	}
 }
 
@@ -3664,7 +3686,7 @@ func TestResumeActor_PausedLocalSnapshotMissing_Crashes(t *testing.T) {
 	if getResp.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
 		t.Fatalf("actor state = %v, want ACTOR_STATE_PAUSED", getResp.GetStatus().GetState())
 	}
-	if getResp.GetStatus().GetLocalSnapshot() == nil {
+	if getResp.GetStatus().GetLatestSnapshotStatus().GetLocal() == nil {
 		t.Fatal("expected LocalSnapshot to be present on paused actor")
 	}
 	waitForWorkerAvailable(t, tc, workerName)
@@ -4287,7 +4309,7 @@ func TestSuspendActor_FromPaused(t *testing.T) {
 		t.Error("atelet Checkpoint called for a paused actor; there is no workload to checkpoint")
 	}
 	upload := tc.fakeAtelet.UploadRequest
-	if got, want := upload.GetLocalSnapshotName(), paused.GetStatus().GetLocalSnapshot().GetSnapshotName(); got != want {
+	if got, want := upload.GetLocalSnapshotName(), paused.GetStatus().GetLatestSnapshotStatus().GetSnapshotId(); got != want {
 		t.Errorf("upload local_snapshot_name = %q, want the pause snapshot %q", got, want)
 	}
 	if got, want := upload.GetAtespace(), testAtespace; got != want {
@@ -4301,13 +4323,13 @@ func TestSuspendActor_FromPaused(t *testing.T) {
 	if actor.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", actor.GetStatus().GetState())
 	}
-	if actor.GetStatus().GetLocalSnapshot() != nil {
-		t.Errorf("LocalSnapshot = %v, want cleared (node pinning must not survive suspend)", actor.GetStatus().GetLocalSnapshot())
+	if actor.GetStatus().GetLatestSnapshotStatus().GetLocal() != nil {
+		t.Errorf("LocalSnapshot = %v, want cleared (node pinning must not survive suspend)", actor.GetStatus().GetLatestSnapshotStatus().GetLocal())
 	}
-	if got, want := actor.GetStatus().GetExternalSnapshot().GetSnapshotUri(), upload.GetDestinationSnapshotUri(); got != want {
+	if got, want := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(), upload.GetDestinationSnapshotUri(); got != want {
 		t.Errorf("snapshot URI = %q, want the upload destination %q", got, want)
 	}
-	if got := actor.GetStatus().GetExternalSnapshot().GetContentScope(); got != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
+	if got := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(); got != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
 		t.Errorf("snapshot ContentScope = %v, want FULL", got)
 	}
 }
@@ -4429,7 +4451,7 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetActor(%s) failed: %v", pinned, err)
 	}
-	if got := paused.GetStatus().GetLocalSnapshot().GetNodeVmsWithLocalSnapshots(); len(got) != 1 || got[0] != "node1" {
+	if got := paused.GetStatus().GetLatestSnapshotStatus().GetLocal().GetNodeVmsWithLocalSnapshots(); len(got) != 1 || got[0] != "node1" {
 		t.Fatalf("paused actor pinned to %v, want [node1]", got)
 	}
 	waitForWorkerAvailable(t, tc, workerName)
@@ -4459,7 +4481,7 @@ func TestResumeActor_RelocatesAfterSuspendFromPaused(t *testing.T) {
 	if got := suspended.GetActor().GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Fatalf("state after suspend = %v, want SUSPENDED", got)
 	}
-	if got := suspended.GetActor().GetStatus().GetLocalSnapshot(); got != nil {
+	if got := suspended.GetActor().GetStatus().GetLatestSnapshotStatus().GetLocal(); got != nil {
 		t.Fatalf("LocalSnapshot = %v, want cleared so the actor can be scheduled anywhere", got)
 	}
 
@@ -4723,7 +4745,7 @@ func TestRevertActor(t *testing.T) {
 		t.Fatalf("SuspendActor failed: %v", err)
 	}
 	waitForWorkerAvailable(t, tc, workerName)
-	snapshotURI := suspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if snapshotURI == "" {
 		t.Fatalf("SuspendActor wrote no external snapshot: %v", suspended)
 	}
@@ -4746,7 +4768,7 @@ func TestRevertActor(t *testing.T) {
 	if got.GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", got.GetState())
 	}
-	if uri := got.GetExternalSnapshot().GetSnapshotUri(); uri != snapshotURI {
+	if uri := got.GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); uri != snapshotURI {
 		t.Errorf("external snapshot = %q, want it untouched at %q", uri, snapshotURI)
 	}
 	assertSnapshotPresent(t, tc, snapshotURI)
@@ -4791,7 +4813,7 @@ func TestRevertActor_FromPaused(t *testing.T) {
 		t.Fatalf("SuspendActor failed: %v", err)
 	}
 	waitForWorkerAvailable(t, tc, workerName)
-	snapshotURI := suspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if snapshotURI == "" {
 		t.Fatalf("SuspendActor wrote no external snapshot: %v", suspended)
 	}
@@ -4817,12 +4839,12 @@ func TestRevertActor_FromPaused(t *testing.T) {
 	if got.GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", got.GetState())
 	}
-	if uri := got.GetExternalSnapshot().GetSnapshotUri(); uri != snapshotURI {
+	if uri := got.GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); uri != snapshotURI {
 		t.Errorf("external snapshot = %q, want it untouched at %q", uri, snapshotURI)
 	}
 	assertSnapshotPresent(t, tc, snapshotURI)
-	if got.GetLocalSnapshot() != nil {
-		t.Errorf("local snapshot info = %v, want nil", got.GetLocalSnapshot())
+	if got.GetLatestSnapshotStatus().GetLocal() != nil {
+		t.Errorf("local snapshot info = %v, want nil", got.GetLatestSnapshotStatus().GetLocal())
 	}
 	if got.GetWorkerAssignment() != nil {
 		t.Errorf("worker assignment = %v, want nil", got.GetWorkerAssignment())
@@ -4864,7 +4886,7 @@ func TestRevertActor_FromCrashed(t *testing.T) {
 		t.Fatalf("SuspendActor failed: %v", err)
 	}
 	waitForWorkerAvailable(t, tc, workerName)
-	snapshotURI := suspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if snapshotURI == "" {
 		t.Fatalf("SuspendActor wrote no external snapshot: %v", suspended)
 	}
@@ -4896,7 +4918,7 @@ func TestRevertActor_FromCrashed(t *testing.T) {
 	if got.GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", got.GetState())
 	}
-	if uri := got.GetExternalSnapshot().GetSnapshotUri(); uri != snapshotURI {
+	if uri := got.GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); uri != snapshotURI {
 		t.Errorf("external snapshot = %q, want it untouched at %q", uri, snapshotURI)
 	}
 	assertSnapshotPresent(t, tc, snapshotURI)
