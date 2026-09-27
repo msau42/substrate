@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/agent-substrate/substrate/internal/ateompath"
 )
 
 func writeSnapshotDir(t *testing.T, dir, prefix string) {
@@ -34,13 +36,16 @@ func writeSnapshotDir(t *testing.T, dir, prefix string) {
 }
 
 func TestPruneRemovesEverySnapshot(t *testing.T) {
-	dir := t.TempDir()
+	useTempNodeDirs(t)
+	actorUID := "actor-prune"
+	dir := ateompath.LocalCheckpointsDir(actorUID)
 	writeSnapshotDir(t, dir, "pause-1")
 	writeSnapshotDir(t, dir, "pause-2")
 	writeSnapshotDir(t, dir, "pause-3")
 
-	if err := pruneLocalCheckpointDir(context.Background(), dir); err != nil {
-		t.Fatalf("pruneLocalCheckpointDir() = %v, want nil", err)
+	plugin := (&AteomHerder{}).getSnapshotPlugin()
+	if err := plugin.DetachCheckpointDir(context.Background(), actorUID, ""); err != nil {
+		t.Fatalf("DetachCheckpointDir() = %v, want nil", err)
 	}
 
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -49,8 +54,10 @@ func TestPruneRemovesEverySnapshot(t *testing.T) {
 }
 
 func TestPruneMissingDirIsNoop(t *testing.T) {
-	if err := pruneLocalCheckpointDir(context.Background(), filepath.Join(t.TempDir(), "absent")); err != nil {
-		t.Fatalf("pruneLocalCheckpointDir() = %v, want nil", err)
+	useTempNodeDirs(t)
+	plugin := (&AteomHerder{}).getSnapshotPlugin()
+	if err := plugin.DetachCheckpointDir(context.Background(), "absent", ""); err != nil {
+		t.Fatalf("DetachCheckpointDir() = %v, want nil", err)
 	}
 }
 
@@ -61,7 +68,9 @@ func TestPruneReportsFailureAndStillRemovesTheRest(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions, so no snapshot can be made undeletable")
 	}
-	dir := t.TempDir()
+	useTempNodeDirs(t)
+	actorUID := "actor-stuck"
+	dir := ateompath.LocalCheckpointsDir(actorUID)
 	writeSnapshotDir(t, dir, "pause-1")
 	writeSnapshotDir(t, dir, "pause-2")
 
@@ -73,12 +82,13 @@ func TestPruneReportsFailureAndStillRemovesTheRest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(stuck, 0o700) })
 
-	err := pruneLocalCheckpointDir(context.Background(), dir)
+	plugin := (&AteomHerder{}).getSnapshotPlugin()
+	err := plugin.DetachCheckpointDir(context.Background(), actorUID, "")
 	if err == nil {
-		t.Fatal("pruneLocalCheckpointDir() = nil, want an error naming the undeletable snapshot")
+		t.Fatal("DetachCheckpointDir() = nil, want an error naming the undeletable snapshot")
 	}
 	if !strings.Contains(err.Error(), "pause-stuck") {
-		t.Errorf("pruneLocalCheckpointDir() = %v, want it to name pause-stuck", err)
+		t.Errorf("DetachCheckpointDir() = %v, want it to name pause-stuck", err)
 	}
 	for _, name := range []string{"pause-1", "pause-2"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
