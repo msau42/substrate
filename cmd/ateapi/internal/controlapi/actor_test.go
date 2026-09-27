@@ -1573,8 +1573,13 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 				SourceActor: ref,
 				Scope:       ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
 				Status: &ateapipb.TagStatus{
+					State:            ateapipb.TagState_TAG_STATE_READY,
 					ActorTemplateUid: tmpl.GetMetadata().GetUid(),
-					Snapshot:         &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+					Snapshot: &ateapipb.Snapshot{
+						SnapshotId:    someActorUID,
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+					},
 				},
 			}
 			wantCode := codes.OK
@@ -1582,13 +1587,13 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 			case "missing":
 				wantCode = codes.NotFound
 			case "pending":
-				tag.Status.Snapshot = nil
+				tag.Status.State = ateapipb.TagState_TAG_STATE_CREATING
 				wantCode = codes.FailedPrecondition
 			case "wrong template":
 				tag.Status.ActorTemplateUid = "other"
 				wantCode = codes.FailedPrecondition
 			case "data scope":
-				tag.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+				tag.Status.Snapshot.GetObject().ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 				wantCode = codes.FailedPrecondition
 			}
 			if scenario != "missing" {
@@ -1605,7 +1610,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 			actor := &ateapipb.Actor{Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor"}, ActorTemplate: resources.ActorTemplateRefFromActorTemplate(tmpl).ToObjectRef()}
 			if scenario == "explicit tag" {
 				tag.Metadata.Name = "explicit"
-				tag.Status.Snapshot.SnapshotUri = "gs://bucket/atespaces/ate-golden/tags/explicit"
+				tag.Status.Snapshot.GetObject().SnapshotUri = "gs://bucket/atespaces/ate-golden/tags/explicit"
 				if _, err := persistence.CreateTag(ctx, tag); err != nil {
 					t.Fatal(err)
 				}
@@ -1619,7 +1624,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if got := created.GetStatus().GetDurableSnapshotStatus().GetObject(); got.GetSnapshotUri() != tag.GetStatus().GetSnapshot().GetSnapshotUri() || got.GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
+			if got := created.GetStatus().GetDurableSnapshotStatus().GetObject(); got.GetSnapshotUri() != tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() || got.GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
 				t.Fatalf("incorrect initial status: %v", created.GetStatus())
 			}
 			if scenario == "own snapshot" {

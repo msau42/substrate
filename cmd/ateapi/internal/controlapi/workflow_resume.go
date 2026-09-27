@@ -215,8 +215,8 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 			if err != nil {
 				return nil, nil, src, fmt.Errorf("while getting golden tag: %w", err)
 			}
-			golden := tag.GetStatus().GetSnapshot()
-			if golden.GetSnapshotUri() == "" || tag.GetStatus().GetActorTemplateUid() != actorTemplate.GetMetadata().GetUid() {
+			golden := tag.GetStatus().GetSnapshot().GetObject()
+			if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || golden.GetSnapshotUri() == "" || tag.GetStatus().GetActorTemplateUid() != actorTemplate.GetMetadata().GetUid() {
 				return nil, nil, src, status.Error(codes.FailedPrecondition, "ActorTemplate golden tag is incomplete or belongs to another template")
 			}
 			if err := validateGoldenSnapshotScope(golden); err != nil {

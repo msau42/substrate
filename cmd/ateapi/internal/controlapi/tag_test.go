@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/testing/protocmp"
@@ -62,9 +63,12 @@ func TestValidateCreateTagRequest(t *testing.T) {
 			req: &ateapipb.CreateTagRequest{
 				Tag: validTag(func(tag *ateapipb.Tag) {
 					tag.Status = &ateapipb.TagStatus{
-						Snapshot:         validExternalSnapshot(),
+						Snapshot: &ateapipb.Snapshot{
+							Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+							Object:        validObjectSnapshot(),
+						},
 						ActorTemplateUid: someActorUID,
-						StorageLocation:  testStorageLocation,
+						State:            ateapipb.TagState_TAG_STATE_READY,
 					}
 				}),
 			},
@@ -668,7 +672,10 @@ func TestUpdateTag(t *testing.T) {
 			req: &ateapipb.Tag{
 				Scope: ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
 				Status: &ateapipb.TagStatus{
-					Snapshot:         &ateapipb.ExternalSnapshot{SnapshotUri: "gs://attacker/elsewhere", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA},
+					Snapshot: &ateapipb.Snapshot{
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://attacker/elsewhere", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA},
+					},
 					ActorTemplateUid: "other-template-uid",
 				},
 			},
@@ -782,7 +789,9 @@ func newTestSuspendedActor(t *testing.T, ctx context.Context, st store.Interface
 		t.Fatalf("NewActorSnapshotURI: %v", err)
 	}
 	return mustUpdateActorStatus(t, ctx, st, actor, func(status *ateapipb.ActorStatus) {
-		status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: uri.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL}
+		status.DurableSnapshotStatus = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: uri.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+		}
 	})
 }
 
@@ -792,31 +801,35 @@ func newTestSuspendedActor(t *testing.T, ctx context.Context, st store.Interface
 func newTestTag(t *testing.T, name string, actor *ateapipb.Actor) *ateapipb.Tag {
 	t.Helper()
 	atespace := actor.GetMetadata().GetAtespace()
-	uri, err := resources.NewTagSnapshotURI(testStorageLocation, atespace, name)
+	uid := uuid.NewString()
+	uri, err := resources.NewTagSnapshotURI(testStorageLocation, atespace, uid)
 	if err != nil {
 		t.Fatalf("NewTagSnapshotURI: %v", err)
 	}
 	return &ateapipb.Tag{
-		Metadata:    &ateapipb.ResourceMetadata{Atespace: atespace, Name: name},
+		Metadata:    &ateapipb.ResourceMetadata{Atespace: atespace, Name: name, Uid: uid},
 		Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		SourceActor: resources.ActorRefFromActor(actor).ToObjectRef(),
 		Status: &ateapipb.TagStatus{
-			Snapshot: &ateapipb.ExternalSnapshot{
-				SnapshotUri:  uri.String(),
-				ContentScope: actor.GetStatus().GetExternalSnapshot().GetContentScope(),
+			Snapshot: &ateapipb.Snapshot{
+				SnapshotId:    uri.Name(),
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				Object: &ateapipb.ObjectSnapshot{
+					SnapshotUri:  uri.String(),
+					ContentScope: actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
+				},
 			},
+			State: ateapipb.TagState_TAG_STATE_READY,
 		},
 	}
 }
 
 // newPendingTestTag builds the tag a create leaves behind when it dies between
-// reserving the name and finishing the copy: the row names the prefix it was
-// writing into, and nothing else.
+// reserving the name and finishing the copy.
 func newPendingTestTag(t *testing.T, name string, actor *ateapipb.Actor) *ateapipb.Tag {
 	t.Helper()
 	tag := newTestTag(t, name, actor)
-	tag.Status.StorageLocation = testStorageLocation
-	tag.Status.Snapshot = nil
+	tag.Status.State = ateapipb.TagState_TAG_STATE_CREATING
 	return tag
 }
 

@@ -1157,16 +1157,24 @@ func newTestSuspendedActor(atespace, name string) *ateapipb.Actor {
 }
 
 // newTestInProgressTag builds the row CreateTag reserves for a
-// tag of actor: ATESPACE-scoped, with no snapshot yet and the destination of
-// the copy still to come derived from status.storage_location and its UID.
+// tag of actor: ATESPACE-scoped, in TAG_STATE_CREATING with the destination
+// snapshot recorded in status.snapshot.
 func newTestInProgressTag(name string, actor *ateapipb.Actor) *ateapipb.Tag {
 	atespace := actor.GetMetadata().GetAtespace()
 	return &ateapipb.Tag{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: atespace, Name: name},
 		Scope:    ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		Status: &ateapipb.TagStatus{
+			State:            ateapipb.TagState_TAG_STATE_CREATING,
 			ActorTemplateUid: "template-uid",
-			StorageLocation:  "gs://private",
+			Snapshot: &ateapipb.Snapshot{
+				SnapshotId:    name,
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				Object: &ateapipb.ObjectSnapshot{
+					SnapshotUri:  testTagSnapshotURI("gs://private", atespace, name),
+					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+				},
+			},
 		},
 	}
 }
@@ -1207,10 +1215,8 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 		if err != nil {
 			t.Fatalf("GetTag failed: %v", err)
 		}
-		// A reserved tag names where its copy is going and nothing else: it is
-		// not usable until the copy lands and finalize names it.
-		if tag.GetStatus().GetSnapshot() != nil {
-			t.Errorf("reserved tag snapshot = %v, want unset", tag.GetStatus().GetSnapshot())
+		if got, want := tag.GetStatus().GetState(), ateapipb.TagState_TAG_STATE_CREATING; got != want {
+			t.Errorf("reserved tag state = %v, want %v", got, want)
 		}
 		if diff := cmp.Diff(inProgressTag, tag, protocmp.Transform(), ignoreUID, ignoreVersion, ignoreTimestamps); diff != "" {
 			t.Errorf("stored tag mismatch (-want +got):\n%s", diff)
@@ -1221,17 +1227,16 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 			t.Errorf("missing GetTag = %v, want ErrNotFound", err)
 		}
 
-		// Finalize: publishing the copy is the one transition status.snapshot allows.
+		// Finalize: transition state to READY once the copy lands.
 		ready, err := s.UpdateTag(ctx, resources.TagRef{Atespace: "team-a", Name: "production"}, store.PreconditionFrom(tag), finalizeTag)
 		if err != nil {
 			t.Fatalf("finalizing tag failed: %v", err)
 		}
-		wantURI := testTagSnapshotURI(tag.GetStatus().GetStorageLocation(), "team-a", tag.GetMetadata().GetUid())
-		if got := ready.GetStatus().GetSnapshot().GetSnapshotUri(); got != wantURI {
-			t.Errorf("finalized tag snapshot uri = %q, want %q", got, wantURI)
+		if got, want := ready.GetStatus().GetState(), ateapipb.TagState_TAG_STATE_READY; got != want {
+			t.Errorf("finalized tag state = %v, want %v", got, want)
 		}
-		if got := ready.GetStatus().GetStorageLocation(); got != tag.GetStatus().GetStorageLocation() {
-			t.Errorf("finalized tag storage location = %q, want unchanged", got)
+		if diff := cmp.Diff(tag.GetStatus().GetSnapshot(), ready.GetStatus().GetSnapshot(), protocmp.Transform()); diff != "" {
+			t.Errorf("finalized tag snapshot mismatch (-want +got):\n%s", diff)
 		}
 
 		updated, err := s.UpdateTag(ctx, resources.TagRef{Atespace: "team-a", Name: "production"}, store.PreconditionFrom(ready), func(toUpdate *ateapipb.Tag) error {
@@ -1335,13 +1340,13 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 			{
 				name: "snapshot uri",
 				mutate: func(toUpdate *ateapipb.Tag) {
-					toUpdate.Status.Snapshot.SnapshotUri = "gs://private/elsewhere"
+					toUpdate.Status.Snapshot.GetObject().SnapshotUri = "gs://private/elsewhere"
 				},
 			},
 			{
 				name: "snapshot content scope",
 				mutate: func(toUpdate *ateapipb.Tag) {
-					toUpdate.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+					toUpdate.Status.Snapshot.GetObject().ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 				},
 			},
 			{
@@ -1349,16 +1354,6 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 				mutate: func(toUpdate *ateapipb.Tag) {
 					toUpdate.Status.Snapshot = nil
 				},
-			},
-			{
-				name: "storage location",
-				mutate: func(toUpdate *ateapipb.Tag) {
-					toUpdate.Status.StorageLocation = "gs://elsewhere"
-				},
-			},
-			{
-				name:   "clearing the storage location",
-				mutate: func(toUpdate *ateapipb.Tag) { toUpdate.Status.StorageLocation = "" },
 			},
 			{
 				name:   "actor template uid",
@@ -1497,12 +1492,9 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 }
 
 // finalizeTag mutates a reserved tag the way the tag workflow's second
-// transaction does: it names the copy that landed under the tag UID.
+// transaction does: it transitions status.state to TAG_STATE_READY.
 func finalizeTag(toUpdate *ateapipb.Tag) error {
-	toUpdate.Status.Snapshot = &ateapipb.ObjectSnapshot{
-		SnapshotUri:  testTagSnapshotURI(toUpdate.GetStatus().GetStorageLocation(), toUpdate.GetMetadata().GetAtespace(), toUpdate.GetMetadata().GetUid()),
-		ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-	}
+	toUpdate.Status.State = ateapipb.TagState_TAG_STATE_READY
 	return nil
 }
 

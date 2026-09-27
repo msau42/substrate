@@ -108,7 +108,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 			return nil, err
 		}
 		if inActor.GetSourceTag() == nil {
-			if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot()); err != nil {
+			if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot().GetObject()); err != nil {
 				return nil, err
 			}
 		}
@@ -135,7 +135,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		// is what keeps the Actor from collecting those objects. Its first
 		// suspend writes a snapshot under its own prefix and takes over from
 		// there.
-		objSnapshot := proto.CloneOf(sourceTag.GetStatus().GetSnapshot())
+		snapshot := proto.CloneOf(sourceTag.GetStatus().GetSnapshot())
 		// The Actor is born with guest state, so stamp the template that state
 		// was built on now rather than at the first resume. The Tag records it
 		// beside its snapshot rather than on it, so the clone above does not
@@ -143,11 +143,11 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		// guest state" instead of "replaced template", and the resume restores
 		// the old template's memory and rootfs in full instead of the volume
 		// data alone.
-		objSnapshot.ActorTemplateUid = sourceTag.GetStatus().GetActorTemplateUid()
-		outActor.Status.DurableSnapshotStatus = &ateapipb.Snapshot{
-			Object:        objSnapshot,
-			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+		if snapshot.GetObject() != nil {
+			snapshot.GetObject().ActorTemplateUid = sourceTag.GetStatus().GetActorTemplateUid()
 		}
+		snapshot.Survivability = ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE
+		outActor.Status.DurableSnapshotStatus = snapshot
 	}
 	if errs := validateActorUpdate(ctx, field.NewPath("actor"), outActor, inActor, true); len(errs) > 0 {
 		return nil, toGRPCInternalError(errs)
@@ -192,8 +192,7 @@ func (s *ServiceImpl) resolveTagSource(ctx context.Context, actorAtespace string
 	default:
 		return nil, status.Error(codes.FailedPrecondition, "source Tag has an invalid scope")
 	}
-	// A tag might have an empty Snapshot URI if the tag creation failed or is ongoing.
-	if tag.GetStatus().GetSnapshot().GetSnapshotUri() == "" {
+	if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() == "" {
 		return nil, status.Error(codes.FailedPrecondition, "source Tag is still being created or failed creation")
 	}
 	// TODO: Permit compatible DATA snapshots when runtimes can extract portable data.

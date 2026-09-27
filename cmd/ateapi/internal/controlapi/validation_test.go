@@ -1353,12 +1353,16 @@ func TestValidateNestedObjectSnapshot(t *testing.T) {
 			},
 		},
 		{
-			name: "tag.status.snapshot",
-			path: field.NewPath("status", "snapshot"),
+			name: "tag.status.snapshot.object",
+			path: field.NewPath("status", "snapshot", "object"),
 			validate: func(ctx context.Context) field.ErrorList {
 				op := operation.Operation{Type: operation.Create}
 				obj := validTag(func(tag *ateapipb.Tag) {
-					tag.Status.Snapshot = badObjectSnapshot()
+					tag.Status.Snapshot = &ateapipb.Snapshot{
+						SnapshotId:    "snap-1",
+						Object:        badObjectSnapshot(),
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+					}
 				})
 				return Validate_Tag(ctx, op, nil, obj, nil)
 			},
@@ -1505,9 +1509,12 @@ func validTag(mutate ...func(*ateapipb.Tag)) *ateapipb.Tag {
 	tag := &ateapipb.Tag{
 		Metadata: validResourceMetadata(),
 		Status: &ateapipb.TagStatus{
-			Snapshot:         validObjectSnapshot(),
+			Snapshot: &ateapipb.Snapshot{
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				Object:        validObjectSnapshot(),
+			},
 			ActorTemplateUid: someActorUID,
-			StorageLocation:  testStorageLocation,
+			State:            ateapipb.TagState_TAG_STATE_READY,
 		},
 		Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		SourceActor: &ateapipb.ObjectRef{Atespace: "as", Name: "nm"},
@@ -1599,16 +1606,19 @@ func TestValidateTag(t *testing.T) {
 			want: field.ErrorList{field.Invalid(statusPath.Child("actor_template_uid"), nil, "").WithOrigin("format=k8s-uuid")},
 		},
 		{
-			name: "missing status.storage_location",
-			obj:  valid(func(tag *ateapipb.Tag) { tag.Status.StorageLocation = "" }),
-			want: field.ErrorList{field.Required(statusPath.Child("storage_location"), "")},
+			name: "unspecified status.state",
+			obj:  valid(func(tag *ateapipb.Tag) { tag.Status.State = ateapipb.TagState_TAG_STATE_UNSPECIFIED }),
+			want: field.ErrorList{field.Required(statusPath.Child("state"), "")},
 		},
 		{
-			name: "status.storage_location too long",
-			obj: valid(func(tag *ateapipb.Tag) {
-				tag.Status.StorageLocation = "gs://" + strings.Repeat("x", 1020)
-			}),
-			want: field.ErrorList{field.TooLong(statusPath.Child("storage_location"), nil, 1024).WithOrigin("maxLength")},
+			name: "status.state above the enum",
+			obj:  valid(func(tag *ateapipb.Tag) { tag.Status.State = ateapipb.TagState(4) }),
+			want: field.ErrorList{field.Invalid(statusPath.Child("state"), nil, "").WithOrigin("maximum")},
+		},
+		{
+			name: "negative status.state",
+			obj:  valid(func(tag *ateapipb.Tag) { tag.Status.State = ateapipb.TagState(-1) }),
+			want: field.ErrorList{field.Invalid(statusPath.Child("state"), nil, "").WithOrigin("minimum")},
 		},
 	}
 	for _, tt := range tests {
@@ -1696,13 +1706,13 @@ func TestValidateTagRequestPayloads(t *testing.T) {
 			name: "create: invalid nested snapshot",
 			validate: func(ctx context.Context, op operation.Operation) field.ErrorList {
 				tag := validTag()
-				tag.Status.Snapshot = badObjectSnapshot()
+				tag.Status.Snapshot.Object = badObjectSnapshot()
 				req := &ateapipb.CreateTagRequest{Tag: tag}
 				return Validate_CreateTagRequest(ctx, op, nil, req, nil)
 			},
 			want: field.ErrorList{
-				field.Required(tagPath.Child("status", "snapshot", "snapshot_uri"), ""),
-				field.Invalid(tagPath.Child("status", "snapshot", "content_scope"), nil, "").WithOrigin("maximum"),
+				field.Required(tagPath.Child("status", "snapshot", "object", "snapshot_uri"), ""),
+				field.Invalid(tagPath.Child("status", "snapshot", "object", "content_scope"), nil, "").WithOrigin("maximum"),
 			},
 		},
 		{
@@ -1726,7 +1736,7 @@ func TestValidateTagRequestPayloads(t *testing.T) {
 			name: "update: nested snapshot is not descended into",
 			validate: func(ctx context.Context, op operation.Operation) field.ErrorList {
 				tag := validTag()
-				tag.Status.Snapshot = badObjectSnapshot()
+				tag.Status.Snapshot.Object = badObjectSnapshot()
 				req := &ateapipb.UpdateTagRequest{Tag: tag}
 				return Validate_UpdateTagRequest(ctx, op, nil, req, nil)
 			},

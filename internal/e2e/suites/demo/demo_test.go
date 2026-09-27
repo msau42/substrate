@@ -154,14 +154,17 @@ func TestActorSnapshotLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create the Tag: %v", err)
 	}
-	if got := tagToUpdate.GetStatus().GetSnapshot().GetSnapshotUri(); got == "" || got == snapshotURI {
+	if got, want := tagToUpdate.GetStatus().GetState(), ateapipb.TagState_TAG_STATE_READY; got != want {
+		t.Fatalf("Tag %s state = %v, want %v", tagRef.GetName(), got, want)
+	}
+	if got := tagToUpdate.GetStatus().GetSnapshot().GetObject().GetSnapshotUri(); got == "" || got == snapshotURI {
 		t.Fatalf("Tag %s snapshot uri = %q, want a copy of its own", tagRef.GetName(), got)
 	}
-	wantTagURI, err := resources.NewTagSnapshotURI(tagToUpdate.GetStatus().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
+	wantTagURI, err := resources.NewTagSnapshotURI(at.GetSnapshotConfig().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
 	if err != nil {
 		t.Fatalf("NewTagSnapshotURI: %v", err)
 	}
-	if got := tagToUpdate.GetStatus().GetSnapshot().GetSnapshotUri(); got != wantTagURI.String() {
+	if got := tagToUpdate.GetStatus().GetSnapshot().GetObject().GetSnapshotUri(); got != wantTagURI.String() {
 		t.Errorf("tag snapshot URI = %q, want UID-based URI %q", got, wantTagURI)
 	}
 	listed, err := clients.SubstrateAPI.ListTags(ctx, &ateapipb.ListTagsRequest{Atespace: demoAtespace})

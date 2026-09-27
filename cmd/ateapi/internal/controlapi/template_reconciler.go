@@ -224,7 +224,7 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 			if tag.GetStatus().GetActorTemplateUid() != tmpl.GetMetadata().GetUid() || resources.ActorRefFromObjectRef(tag.GetSourceActor()) != resources.ActorRefFromObjectRef(goldenActorRef) {
 				return 0, r.fail(ctx, tmpl, reasonGoldenTagConflict, "golden tag belongs to another actor or template")
 			}
-			if tag.GetStatus().GetSnapshot().GetSnapshotUri() != "" {
+			if tag.GetStatus().GetState() == ateapipb.TagState_TAG_STATE_READY && tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() != "" {
 				return 0, r.saveGoldenTag(ctx, tmpl, goldenActorRef)
 			}
 			// CreateTag cannot resume an incomplete copy. Delete it before retrying.

@@ -24,6 +24,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/testing/protocmp"
 )
@@ -47,43 +48,39 @@ func seedTag(t *testing.T, tc *testContext, actorName, tagName string, opts ...f
 		t.Fatalf("NewActorSnapshotURI: %v", err)
 	}
 	actor, err = tc.persistence.UpdateActor(ctx, resources.ActorRefFromActor(actor), store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
-		toUpdate.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: actorSnapshotURI.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL}
+		toUpdate.Status.DurableSnapshotStatus = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: actorSnapshotURI.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("recording the actor's external snapshot: %v", err)
 	}
+	uid := uuid.NewString()
+	uri, err := resources.NewTagSnapshotURI(testStorageLocation, testAtespace, uid)
+	if err != nil {
+		t.Fatalf("NewTagSnapshotURI: %v", err)
+	}
 	tag := &ateapipb.Tag{
-		Metadata:    &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: tagName},
+		Metadata:    &ateapipb.ResourceMetadata{Atespace: testAtespace, Name: tagName, Uid: uid},
 		Scope:       ateapipb.TagScope_TAG_SCOPE_ATESPACE,
 		SourceActor: resources.ActorRefFromActor(actor).ToObjectRef(),
 		Status: &ateapipb.TagStatus{
-			Snapshot:        &ateapipb.ExternalSnapshot{ContentScope: actor.GetStatus().GetExternalSnapshot().GetContentScope()},
-			StorageLocation: testStorageLocation,
+			Snapshot: &ateapipb.Snapshot{
+				SnapshotId:    uri.Name(),
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				Object: &ateapipb.ObjectSnapshot{
+					SnapshotUri:  uri.String(),
+					ContentScope: actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
+				},
+			},
+			State: ateapipb.TagState_TAG_STATE_READY,
 		},
 	}
 	for _, opt := range opts {
 		opt(tag)
 	}
-	snapshot := tag.Status.Snapshot
-	tag.Status.Snapshot = nil
-	tag = storetest.MustCreateTag(t, ctx, tc.persistence, tag)
-	if snapshot == nil {
-		return tag
-	}
-	uri, err := resources.NewTagSnapshotURI(testStorageLocation, testAtespace, tag.GetMetadata().GetUid())
-	if err != nil {
-		t.Fatalf("NewTagSnapshotURI: %v", err)
-	}
-	snapshot.SnapshotUri = uri.String()
-	tag, err = tc.persistence.UpdateTag(ctx, resources.TagRefFromTag(tag), store.PreconditionFrom(tag), func(toUpdate *ateapipb.Tag) error {
-		toUpdate.Status.Snapshot = snapshot
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("finalizing tag: %v", err)
-	}
-	return tag
+	return storetest.MustCreateTag(t, ctx, tc.persistence, tag)
 }
 
 // TestCreateTag_ReusedTagName tests that a tag does not move
@@ -111,7 +108,7 @@ func TestCreateTag_ReusedTagName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTag(actor-a) failed: %v", err)
 	}
-	tagSnapshotURI := first.GetStatus().GetSnapshot().GetSnapshotUri()
+	tagSnapshotURI := first.GetStatus().GetSnapshot().GetObject().GetSnapshotUri()
 	// Tag owns a snapshot. So it must not be empty.
 	wantObjects := snapshotObjectNames(t, tc, tagSnapshotURI)
 	if len(wantObjects) == 0 {
@@ -189,7 +186,7 @@ func suspendActorForTest(t *testing.T, tc *testContext, workerName, name string)
 	if err != nil {
 		t.Fatalf("SuspendActor(%s) failed: %v", name, err)
 	}
-	uri := suspended.GetActor().GetStatus().GetExternalSnapshot().GetSnapshotUri()
+	uri := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
 	if uri == "" {
 		t.Fatalf("SuspendActor(%s) wrote no external snapshot: %v", name, suspended)
 	}
