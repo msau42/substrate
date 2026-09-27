@@ -136,7 +136,7 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
 // taken before that rule existed — surface a clear error instead of shipping
 // a restore request atelet would reject (or that would boot an empty guest).
-func validateGoldenSnapshotScope(snapshot *ateapipb.ExternalSnapshot) error {
+func validateGoldenSnapshotScope(snapshot *ateapipb.ObjectSnapshot) error {
 	scope := snapshot.GetContentScope()
 	switch scope {
 	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED,
@@ -175,12 +175,12 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	if err != nil {
 		return nil, nil, src, err
 	}
-	if uri := actor.GetStatus().GetExternalSnapshot().GetSnapshotUri(); uri != "" {
+	if uri := actor.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri(); uri != "" {
 		if src.SnapshotURI, err = resources.ParseSnapshotURI(uri); err != nil {
 			return nil, nil, src, status.Errorf(codes.DataLoss, "Actor %s external snapshot: %v", actorRef, err)
 		}
-		src.Scope = actor.GetStatus().GetExternalSnapshot().GetContentScope()
-		capturedUnder := actor.GetStatus().GetExternalSnapshot().GetActorTemplateUid()
+		src.Scope = actor.GetStatus().GetLatestDurableSnapshot().GetObject().GetContentScope()
+		capturedUnder := actor.GetStatus().GetLatestDurableSnapshot().GetObject().GetActorTemplateUid()
 		src.TemplateReplaced = capturedUnder != "" && capturedUnder != actorTemplate.GetMetadata().GetUid()
 	}
 
@@ -563,7 +563,7 @@ func schedulingConstraints(actor *ateapipb.Actor, tmpl *ateapipb.ActorTemplate) 
 	c := scheduling.Constraints{
 		SandboxClass:  sandboxClassString(tmpl.GetSandboxConfig().GetSandboxClass()),
 		ActorSelector: labels.SelectorFromSet(labels.Set(actor.GetWorkerSelector().GetMatchLabels())),
-		RequiredNodes: actor.GetStatus().GetLocalSnapshot().GetNodeVmsWithLocalSnapshots(),
+		RequiredNodes: actor.GetStatus().GetLatestNondurableSnapshot().GetLocal().GetNodeVmsWithLocalSnapshots(),
 		Limits:        limits.Proto(),
 	}
 	if sel := tmpl.GetWorkerSelector(); sel != nil {
@@ -637,7 +637,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
 	}
 
-	if local := actor.GetStatus().GetLocalSnapshot(); local != nil {
+	if actor.GetStatus().GetLatestNondurableSnapshot().GetLocal() != nil {
 		slog.InfoContext(ctx, "Actor has snapshot; Restoring from snapshot")
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 
@@ -656,7 +656,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		}
 		req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
 		req.Config = &ateletpb.RestoreRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: local.GetSnapshotName()},
+			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: actor.GetStatus().GetLatestNondurableSnapshot().GetSnapshotId()},
 		}
 		req.Scope = actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause())
 		tele.WireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)

@@ -134,7 +134,11 @@ func (w *ActorWorkflow) ensureMarkedPausing(ctx context.Context, actorRef resour
 	snapshotName := resources.NewSnapshotName()
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_PAUSING
-		toUpdate.Status.InProgressLocalSnapshotName = snapshotName
+		toUpdate.Status.InProgressSnapshot = &ateapipb.Snapshot{
+			SnapshotId:    snapshotName,
+			Local:         &ateapipb.LocalSnapshot{},
+			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+		}
 		return nil
 	})
 	if err != nil {
@@ -190,7 +194,7 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
 		Config: &ateletpb.CheckpointRequest_LocalConfig{
 			LocalConfig: &ateletpb.LocalCheckpointConfiguration{
-				SnapshotName: actor.GetStatus().GetInProgressLocalSnapshotName(),
+				SnapshotName: actor.GetStatus().GetInProgressSnapshot().GetSnapshotId(),
 			},
 		},
 		Scope:    actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause()),
@@ -279,17 +283,20 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			if newState == ateapipb.ActorState_ACTOR_STATE_CRASHED && !wasAlreadyCrashed {
 				toUpdate.Status.Crash = crashStatus
 			}
-			// TODO(dberkov) - what if InProgressLocalSnapshotName is empty? That shouldn't be possible.
-			if toUpdate.GetStatus().GetInProgressLocalSnapshotName() != "" {
+			// TODO(dberkov) - what if InProgressSnapshot.SnapshotId is empty? That shouldn't be possible.
+			if inProgressName := toUpdate.GetStatus().GetInProgressSnapshot().GetSnapshotId(); inProgressName != "" {
 				localSnapshot := &ateapipb.LocalSnapshot{
-					SnapshotName: toUpdate.GetStatus().GetInProgressLocalSnapshotName(),
 					ContentScope: contentScope,
 				}
 				if newState != ateapipb.ActorState_ACTOR_STATE_CRASHED {
 					localSnapshot.NodeVmsWithLocalSnapshots = []string{nodeName}
 				}
-				toUpdate.Status.LocalSnapshot = localSnapshot
-				toUpdate.Status.InProgressLocalSnapshotName = ""
+				toUpdate.Status.LatestNondurableSnapshot = &ateapipb.Snapshot{
+					SnapshotId:    inProgressName,
+					Local:         localSnapshot,
+					Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+				}
+				toUpdate.Status.InProgressSnapshot = nil
 			}
 			toUpdate.Status.WorkerAssignment = nil
 			return nil

@@ -98,9 +98,17 @@ func TestRevertActor_ReturnsActorToItsSnapshot(t *testing.T) {
 			// pruning the bytes it names is still a TODO (#641).
 			const keptURI = "gs://snapshots/team-a/actors/keep/snapshot"
 			mustUpdateActorStatus(t, ctx, st, actor, func(s *ateapipb.ActorStatus) {
-				s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: keptURI}
-				s.LocalSnapshot = &ateapipb.LocalSnapshot{SnapshotName: "local-1"}
-				s.InProgressLocalSnapshotName = "local-in-progress"
+				s.LatestDurableSnapshot = &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: keptURI},
+				}
+				s.LatestNondurableSnapshot = &ateapipb.Snapshot{
+					SnapshotId: "local-1",
+					Local:      &ateapipb.LocalSnapshot{},
+				}
+				s.InProgressSnapshot = &ateapipb.Snapshot{
+					SnapshotId: "local-in-progress",
+					Local:      &ateapipb.LocalSnapshot{},
+				}
 			})
 
 			reverted, err := w.RevertActor(ctx, actorRef)
@@ -112,20 +120,20 @@ func TestRevertActor_ReturnsActorToItsSnapshot(t *testing.T) {
 			if got := gotStatus.GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 				t.Errorf("state = %v, want SUSPENDED", got)
 			}
-			if got := gotStatus.GetExternalSnapshot().GetSnapshotUri(); got != keptURI {
+			if got := gotStatus.GetLatestDurableSnapshot().GetObject().GetSnapshotUri(); got != keptURI {
 				t.Errorf("external snapshot = %q, want it untouched at %q", got, keptURI)
 			}
 			// Resume prefers a local snapshot over the external one, so a
 			// surviving LocalSnapshot would restore the execution this
 			// revert just discarded.
-			if got := gotStatus.GetLocalSnapshot(); got != nil {
+			if got := gotStatus.GetLatestNondurableSnapshot().GetLocal(); got != nil {
 				t.Errorf("local snapshot info = %v, want nil", got)
 			}
-			if got := gotStatus.GetInProgressSnapshotUri(); got != "" {
+			if got := gotStatus.GetInProgressSnapshot().GetObject().GetSnapshotUri(); got != "" {
 				t.Errorf("in-progress snapshot uri = %q, want empty", got)
 			}
-			if got := gotStatus.GetInProgressLocalSnapshotName(); got != "" {
-				t.Errorf("in-progress local snapshot name = %q, want empty", got)
+			if got := gotStatus.GetInProgressSnapshot().GetLocal(); got != nil {
+				t.Errorf("in-progress local snapshot = %v, want nil", got)
 			}
 			if got := gotStatus.GetWorkerAssignment(); got != nil {
 				t.Errorf("worker assignment = %v, want nil", got)
@@ -217,7 +225,7 @@ func TestRevertActor_NoSnapshotToRevertTo(t *testing.T) {
 	if got := reverted.GetStatus().GetCrash(); got != nil {
 		t.Errorf("Crash = %v, want cleared by the revert", got)
 	}
-	if got := reverted.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != "" {
+	if got := reverted.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri(); got != "" {
 		t.Errorf("external snapshot = %q, want none", got)
 	}
 }
@@ -293,9 +301,14 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 				objects.PutSnapshot(t, inFlight, "manifest.json")
 			}
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-				s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: current.String()}
+				s.LatestDurableSnapshot = &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: current.String()},
+				}
 				if tt.inFlight != "" {
-					s.InProgressSnapshotUri = inFlight.String()
+					s.InProgressSnapshot = &ateapipb.Snapshot{
+						SnapshotId: tt.inFlight,
+						Object:     &ateapipb.ObjectSnapshot{SnapshotUri: inFlight.String()},
+					}
 				}
 			})
 
@@ -340,8 +353,11 @@ func TestEnsureRevertedFinalized_NoObjectStore(t *testing.T) {
 		Metadata:      &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: "team-a", Name: "sub-tmpl"},
 		Status: &ateapipb.ActorStatus{
-			State:                 ateapipb.ActorState_ACTOR_STATE_REVERTING,
-			InProgressSnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "abandoned"),
+			State: ateapipb.ActorState_ACTOR_STATE_REVERTING,
+			InProgressSnapshot: &ateapipb.Snapshot{
+				SnapshotId: "abandoned",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "abandoned")},
+			},
 		},
 	})
 
@@ -357,7 +373,7 @@ func TestEnsureRevertedFinalized_NoObjectStore(t *testing.T) {
 	if got := finalized.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Errorf("state = %v, want SUSPENDED", got)
 	}
-	if got := finalized.GetStatus().GetInProgressSnapshotUri(); got != "" {
+	if got := finalized.GetStatus().GetInProgressSnapshot().GetObject().GetSnapshotUri(); got != "" {
 		t.Errorf("in-progress snapshot uri = %q, want empty", got)
 	}
 }

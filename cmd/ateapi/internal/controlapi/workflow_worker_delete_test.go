@@ -103,49 +103,91 @@ func TestDeleteWorkerWorkflow_DrainsBeforeSweeping(t *testing.T) {
 }
 
 func TestDeleteWorkerWorkflow_ReleasesBoundActor(t *testing.T) {
-	ctx := context.Background()
-	wf, persistence := newWorkerDeleteWorkflow(t)
-	seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
-	actor := seedAPIActor(t, ctx, persistence, ateapipb.ActorState_ACTOR_STATE_RUNNING, func(a *ateapipb.Actor) {
-		// Both in-progress checkpoints are set so the assertion covers the
-		// shared crash path, which cannot know which workflow was in flight.
-		a.Status.InProgressSnapshotUri = someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot")
-		a.Status.InProgressLocalSnapshotName = "partial-local-snapshot"
-		a.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last")}
+	t.Run("clears in-progress local checkpoint", func(t *testing.T) {
+		ctx := context.Background()
+		wf, persistence := newWorkerDeleteWorkflow(t)
+		seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+		actor := seedAPIActor(t, ctx, persistence, ateapipb.ActorState_ACTOR_STATE_PAUSING, func(a *ateapipb.Actor) {
+			a.Status.InProgressSnapshot = &ateapipb.Snapshot{
+				SnapshotId: "partial-local-snapshot",
+				Local:      &ateapipb.LocalSnapshot{},
+			}
+			a.Status.LatestDurableSnapshot = &ateapipb.Snapshot{
+				Object: &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last")},
+			}
+		})
+		assignAPIWorker(t, ctx, persistence, apiWorkerName, actor.GetMetadata().GetUid())
+
+		if _, err := wf.DeleteWorker(ctx, apiWorkerName, store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteWorker() failed: %v", err)
+		}
+
+		got, err := persistence.GetActor(ctx, apiActorRef)
+		if err != nil {
+			t.Fatalf("GetActor() failed: %v", err)
+		}
+		if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
+			t.Errorf("actor state = %v, want CRASHED: it never suspended cleanly", got.GetStatus().GetState())
+		}
+		if msg := got.GetStatus().GetCrash().GetMessage(); msg != crashMessageWorkerPodGone {
+			t.Errorf("crash message = %q, want %q", msg, crashMessageWorkerPodGone)
+		}
+		if got.GetStatus().GetWorkerAssignment() != nil {
+			t.Errorf("actor worker assignment = %v, want it cleared", got.GetStatus().GetWorkerAssignment())
+		}
+		// The local checkpoint lived on the node that went away, so it dies with
+		// the worker.
+		if got.GetStatus().GetInProgressSnapshot() != nil {
+			t.Errorf("in-progress local checkpoint not cleared: %v", got.GetStatus())
+		}
+		// The last completed snapshot is what makes the actor resumable, so it stays.
+		if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"); got.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri() != want {
+			t.Errorf("external snapshot = %q, want it preserved as %q", got.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri(), want)
+		}
 	})
-	assignAPIWorker(t, ctx, persistence, apiWorkerName, actor.GetMetadata().GetUid())
 
-	if _, err := wf.DeleteWorker(ctx, apiWorkerName, store.DeletePreconditions{}); err != nil {
-		t.Fatalf("DeleteWorker() failed: %v", err)
-	}
+	t.Run("preserves in-progress external checkpoint", func(t *testing.T) {
+		ctx := context.Background()
+		wf, persistence := newWorkerDeleteWorkflow(t)
+		seedAPIWorker(t, ctx, persistence, validWorker(apiWorkerName))
+		actor := seedAPIActor(t, ctx, persistence, ateapipb.ActorState_ACTOR_STATE_SUSPENDING, func(a *ateapipb.Actor) {
+			a.Status.InProgressSnapshot = &ateapipb.Snapshot{
+				SnapshotId: "partial-snapshot",
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot")},
+			}
+			a.Status.LatestDurableSnapshot = &ateapipb.Snapshot{
+				Object: &ateapipb.ObjectSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last")},
+			}
+		})
+		assignAPIWorker(t, ctx, persistence, apiWorkerName, actor.GetMetadata().GetUid())
 
-	got, err := persistence.GetActor(ctx, apiActorRef)
-	if err != nil {
-		t.Fatalf("GetActor() failed: %v", err)
-	}
-	if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
-		t.Errorf("actor state = %v, want CRASHED: it never suspended cleanly", got.GetStatus().GetState())
-	}
-	if msg := got.GetStatus().GetCrash().GetMessage(); msg != crashMessageWorkerPodGone {
-		t.Errorf("crash message = %q, want %q", msg, crashMessageWorkerPodGone)
-	}
-	if got.GetStatus().GetWorkerAssignment() != nil {
-		t.Errorf("actor worker assignment = %v, want it cleared", got.GetStatus().GetWorkerAssignment())
-	}
-	// The local checkpoint lived on the node that went away, so it dies with
-	// the worker.
-	if got.GetStatus().GetInProgressLocalSnapshotName() != "" {
-		t.Errorf("in-progress local checkpoint not cleared: %v", got.GetStatus())
-	}
-	// The durable one is kept: it names the prefix whatever atelet already
-	// uploaded lives under, which delete or revert needs to collect it.
-	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot"); got.GetStatus().GetInProgressSnapshotUri() != want {
-		t.Errorf("in-progress external checkpoint not preserved: %v", got.GetStatus())
-	}
-	// The last completed snapshot is what makes the actor resumable, so it stays.
-	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"); got.GetStatus().GetExternalSnapshot().GetSnapshotUri() != want {
-		t.Errorf("external snapshot = %q, want it preserved as %q", got.GetStatus().GetExternalSnapshot().GetSnapshotUri(), want)
-	}
+		if _, err := wf.DeleteWorker(ctx, apiWorkerName, store.DeletePreconditions{}); err != nil {
+			t.Fatalf("DeleteWorker() failed: %v", err)
+		}
+
+		got, err := persistence.GetActor(ctx, apiActorRef)
+		if err != nil {
+			t.Fatalf("GetActor() failed: %v", err)
+		}
+		if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_CRASHED {
+			t.Errorf("actor state = %v, want CRASHED: it never suspended cleanly", got.GetStatus().GetState())
+		}
+		if msg := got.GetStatus().GetCrash().GetMessage(); msg != crashMessageWorkerPodGone {
+			t.Errorf("crash message = %q, want %q", msg, crashMessageWorkerPodGone)
+		}
+		if got.GetStatus().GetWorkerAssignment() != nil {
+			t.Errorf("actor worker assignment = %v, want it cleared", got.GetStatus().GetWorkerAssignment())
+		}
+		// The durable one is kept: it names the prefix whatever atelet already
+		// uploaded lives under, which delete or revert needs to collect it.
+		if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot"); got.GetStatus().GetInProgressSnapshot().GetObject().GetSnapshotUri() != want {
+			t.Errorf("in-progress external checkpoint not preserved: %v", got.GetStatus())
+		}
+		// The last completed snapshot is what makes the actor resumable, so it stays.
+		if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"); got.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri() != want {
+			t.Errorf("external snapshot = %q, want it preserved as %q", got.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri(), want)
+		}
+	})
 }
 
 // The Actor's state when its pod vanished decides what the release does: one

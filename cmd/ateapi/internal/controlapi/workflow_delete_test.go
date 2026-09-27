@@ -270,8 +270,13 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 				objects.PutSnapshot(t, inFlight, "manifest.json")
 			}
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-				s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: current.String()}
-				s.InProgressSnapshotUri = inFlight.String()
+				s.LatestDurableSnapshot = &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: current.String()},
+				}
+				s.InProgressSnapshot = &ateapipb.Snapshot{
+					SnapshotId: inFlight.Name(),
+					Object:     &ateapipb.ObjectSnapshot{SnapshotUri: inFlight.String()},
+				}
 			})
 
 			if err := w.ensureExternalSnapshotsReleased(ctx, actor); err != nil {
@@ -316,7 +321,9 @@ func TestEnsureExternalSnapshotsReleased_CollectsStrandedSnapshots(t *testing.T)
 		objects.PutSnapshot(t, uri, "manifest.json")
 	}
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: currentSnapshot.String()}
+		s.LatestDurableSnapshot = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: currentSnapshot.String()},
+		}
 	})
 
 	if err := w.ensureExternalSnapshotsReleased(ctx, actor); err != nil {
@@ -353,7 +360,10 @@ func TestDeleteActor_CollectsInFlightSnapshotWithoutTemplate(t *testing.T) {
 	}, actor, "abandoned")
 	objects.PutSnapshot(t, inFlight, "manifest.json")
 	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.InProgressSnapshotUri = inFlight.String()
+		s.InProgressSnapshot = &ateapipb.Snapshot{
+			SnapshotId: "abandoned",
+			Object:     &ateapipb.ObjectSnapshot{SnapshotUri: inFlight.String()},
+		}
 	})
 
 	if _, err := w.DeleteActor(ctx, actorRef, true, store.DeletePreconditions{}); err != nil {
@@ -383,7 +393,9 @@ func TestEnsureExternalSnapshotsReleased_DeletePrefixFailure(t *testing.T) {
 	current := mustActorSnapshotURI(t, template, actor, "current")
 	objects.PutSnapshot(t, current, "manifest.json", "memory.zst")
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: current.String()}
+		s.LatestDurableSnapshot = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{SnapshotUri: current.String()},
+		}
 	})
 
 	errTransient := errors.New("simulated transient delete failure")
@@ -415,7 +427,7 @@ func TestEnsureExternalSnapshotsReleased_DeletePrefixFailure(t *testing.T) {
 // deleting an actor whose suspend a worker delete crashed mid-finalize deletes
 // every object that suspend wrote. When an actor crashes mid-suspend, only
 // DeleteActor or RevertActor can delete the in-progress snapshot
-// (in_progress_snapshot_uri): whatever they cannot name is leaked for good.
+// (in_progress_snapshot): whatever they cannot name is leaked for good.
 func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 	tests := []struct {
 		name string
@@ -477,7 +489,9 @@ func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 				previous := mustActorSnapshotURI(t, template, actor, "old")
 				objects.PutSnapshot(t, previous, "manifest.json")
 				actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-					s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: previous.String()}
+					s.LatestDurableSnapshot = &ateapipb.Snapshot{
+						Object: &ateapipb.ObjectSnapshot{SnapshotUri: previous.String()},
+					}
 				})
 			}
 
@@ -488,7 +502,7 @@ func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ensureMarkedSuspending: %v", err)
 			}
-			fresh := mustParseSnapshotURI(t, actor.GetStatus().GetInProgressSnapshotUri())
+			fresh := mustParseSnapshotURI(t, actor.GetStatus().GetInProgressSnapshot().GetObject().GetSnapshotUri())
 			objects.PutSnapshot(t, fresh, "manifest.json")
 
 			// The worker's pod goes away with the commit still outstanding, so

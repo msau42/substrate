@@ -177,7 +177,10 @@ func TestReconcileAssignments_CrashesEarlierActors(t *testing.T) {
 	svc, persistence := newWorkerAPIService(t)
 	seedEpochWorker(t, ctx, persistence, 1, 1)
 	actor := seedAPIActor(t, ctx, persistence, ateapipb.ActorState_ACTOR_STATE_RUNNING, func(a *ateapipb.Actor) {
-		a.Status.InProgressLocalSnapshotName = "partial-local-snapshot"
+		a.Status.InProgressSnapshot = &ateapipb.Snapshot{
+			SnapshotId: "partial-local-snapshot",
+			Local:      &ateapipb.LocalSnapshot{},
+		}
 	})
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, actor.GetMetadata().GetUid())
 	mustRaiseEpoch(t, ctx, svc, persistence, 2)
@@ -204,7 +207,7 @@ func TestReconcileAssignments_CrashesEarlierActors(t *testing.T) {
 	if got.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("actor worker assignment = %v, want it cleared", got.GetStatus().GetWorkerAssignment())
 	}
-	if got.GetStatus().GetInProgressLocalSnapshotName() != "" {
+	if got.GetStatus().GetInProgressSnapshot() != nil {
 		t.Errorf("in-progress local checkpoint not cleared: %v", got.GetStatus())
 	}
 	if a := firstAssignment(t, persistence, apiWorkerName); a != nil {

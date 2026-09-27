@@ -509,7 +509,10 @@ func TestUpdateActor_RepointTemplateStorageLocation(t *testing.T) {
 			if tt.snapshot != nil {
 				uri := tt.snapshot(t, actor)
 				actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-					s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: uri}
+					s.LatestDurableSnapshot = &ateapipb.Snapshot{
+						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: uri},
+					}
 				})
 			}
 
@@ -814,7 +817,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 				Scope:       ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
 				Status: &ateapipb.TagStatus{
 					ActorTemplateUid: tmpl.GetMetadata().GetUid(),
-					Snapshot:         &ateapipb.ExternalSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+					Snapshot:         &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
 				},
 			}
 			wantCode := codes.OK
@@ -859,8 +862,8 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if got := created.GetStatus(); got.GetExternalSnapshot().GetSnapshotUri() != tag.GetStatus().GetSnapshot().GetSnapshotUri() || got.GetExternalSnapshot().GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
-				t.Fatalf("incorrect initial status: %v", got)
+			if got := created.GetStatus().GetLatestDurableSnapshot().GetObject(); got.GetSnapshotUri() != tag.GetStatus().GetSnapshot().GetSnapshotUri() || got.GetActorTemplateUid() != tmpl.GetMetadata().GetUid() {
+				t.Fatalf("incorrect initial status: %v", created.GetStatus())
 			}
 			if scenario == "own snapshot" {
 				uri, err := resources.NewActorSnapshotURI(tmpl.GetSnapshotConfig().GetStorageLocation(), "team-a", created.GetMetadata().GetUid(), "snapshot")
@@ -868,7 +871,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 					t.Fatal(err)
 				}
 				if _, err := persistence.UpdateActor(ctx, resources.ActorRefFromActor(created), store.PreconditionFrom(created), func(db *ateapipb.Actor) error {
-					db.Status.ExternalSnapshot.SnapshotUri = uri.String()
+					db.Status.LatestDurableSnapshot.Object.SnapshotUri = uri.String()
 					return nil
 				}); err != nil {
 					t.Fatal(err)

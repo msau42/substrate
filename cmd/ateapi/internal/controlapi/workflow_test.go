@@ -268,7 +268,11 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 
 	// Bump the stored version so the workflow's precondition is stale.
 	if _, err := persistence.UpdateActor(ctx, actorRef, store.PreconditionFrom(stale), func(toUpdate *ateapipb.Actor) error {
-		toUpdate.Status.InProgressSnapshotUri = someActorSnapshotURI(t, testStorageLocation, "team-a", "someone-else")
+		toUpdate.Status.InProgressSnapshot = &ateapipb.Snapshot{
+			Object: &ateapipb.ObjectSnapshot{
+				SnapshotUri: someActorSnapshotURI(t, testStorageLocation, "team-a", "someone-else"),
+			},
+		}
 		return nil
 	}); err != nil {
 		t.Fatalf("bump version: %v", err)

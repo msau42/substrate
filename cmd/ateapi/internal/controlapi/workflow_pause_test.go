@@ -54,7 +54,10 @@ func TestEnsurePausedFinalized_WorkerGone(t *testing.T) {
 				WorkerPool:      "pool1",
 				WorkerPod:       "worker-pod-1",
 			},
-			InProgressLocalSnapshotName: "local-snap-1",
+			InProgressSnapshot: &ateapipb.Snapshot{
+				SnapshotId: "local-snap-1",
+				Local:      &ateapipb.LocalSnapshot{},
+			},
 		},
 	}
 	storetest.MustCreateActor(t, ctx, st, actor)
@@ -77,7 +80,7 @@ func TestEnsurePausedFinalized_WorkerGone(t *testing.T) {
 	if msg, want := got.GetStatus().GetCrash().GetMessage(), "pause failed: "+crashMessageLocalSnapshotNodeUnknown; msg != want {
 		t.Errorf("crash message = %q, want %q", msg, want)
 	}
-	for _, n := range got.GetStatus().GetLocalSnapshot().GetNodeVmsWithLocalSnapshots() {
+	for _, n := range got.GetStatus().GetLatestNondurableSnapshot().GetLocal().GetNodeVmsWithLocalSnapshots() {
 		if n == "" {
 			t.Errorf("BUG: empty string in NodeVmsWithLocalSnapshots, the scheduler's node restriction would never match a real worker")
 		}
@@ -133,7 +136,10 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 						WorkerPod:       "worker-pod-1",
 						WorkerPodUid:    workerName,
 					},
-					InProgressLocalSnapshotName: "snap-prefix",
+					InProgressSnapshot: &ateapipb.Snapshot{
+						SnapshotId: "snap-prefix",
+						Local:      &ateapipb.LocalSnapshot{},
+					},
 				},
 			})
 			if _, err := st.CreateWorker(ctx, &ateapipb.Worker{
@@ -164,8 +170,11 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 			if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
 				t.Fatalf("state = %v, want PAUSED", got.GetStatus().GetState())
 			}
-			if scope := got.GetStatus().GetLocalSnapshot().GetContentScope(); scope != tc.want {
+			if scope := got.GetStatus().GetLatestNondurableSnapshot().GetLocal().GetContentScope(); scope != tc.want {
 				t.Errorf("LocalSnapshot.ContentScope = %v, want %v", scope, tc.want)
+			}
+			if surv := got.GetStatus().GetLatestNondurableSnapshot().GetSurvivability(); surv != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT {
+				t.Errorf("LatestNondurableSnapshot.Survivability = %v, want RESIDENT", surv)
 			}
 		})
 	}
@@ -294,8 +303,13 @@ func TestEnsureAteletPaused_DialFailureLeavesActorRetryable(t *testing.T) {
 						WorkerPod:       "pod-gone",
 						NodeName:        "node-gone",
 					},
-					InProgressLocalSnapshotName: "actor-1-never-written",
-					ExternalSnapshot:            &ateapipb.ExternalSnapshot{SnapshotUri: tt.prevSnapshot},
+					InProgressSnapshot: &ateapipb.Snapshot{
+						SnapshotId: "actor-1-never-written",
+						Local:      &ateapipb.LocalSnapshot{},
+					},
+					LatestDurableSnapshot: &ateapipb.Snapshot{
+						Object: &ateapipb.ObjectSnapshot{SnapshotUri: tt.prevSnapshot},
+					},
 				},
 			}
 			created := storetest.MustCreateActor(t, ctx, persistence, actor)
@@ -312,10 +326,10 @@ func TestEnsureAteletPaused_DialFailureLeavesActorRetryable(t *testing.T) {
 			if stored.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSING {
 				t.Errorf("state = %v, want unchanged PAUSING", stored.GetStatus().GetState())
 			}
-			if got := stored.GetStatus().GetInProgressLocalSnapshotName(); got != "actor-1-never-written" {
-				t.Errorf("InProgressLocalSnapshotName = %q, want preserved for debugging", got)
+			if got := stored.GetStatus().GetInProgressSnapshot().GetSnapshotId(); got != "actor-1-never-written" {
+				t.Errorf("InProgressSnapshot.SnapshotId = %q, want preserved for debugging", got)
 			}
-			if got := stored.GetStatus().GetExternalSnapshot().GetSnapshotUri(); got != tt.prevSnapshot {
+			if got := stored.GetStatus().GetLatestDurableSnapshot().GetObject().GetSnapshotUri(); got != tt.prevSnapshot {
 				t.Errorf("SnapshotUri = %q, want %q", got, tt.prevSnapshot)
 			}
 		})
