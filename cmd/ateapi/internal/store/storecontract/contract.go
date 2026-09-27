@@ -865,16 +865,20 @@ func runActorContractTests(t *testing.T, setup func(t *testing.T) store.Interfac
 			Metadata:      &ateapipb.ResourceMetadata{Name: "id1", Atespace: testAtespace},
 			ActorTemplate: &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl1"},
 			Status: &ateapipb.ActorStatus{
-				State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-				ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: testActorSnapshotURI("gs://bucket", testAtespace, "snapshot-1")},
+				State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+				LatestDurableSnapshot: &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: testActorSnapshotURI("gs://bucket", testAtespace, "snapshot-1")},
+				},
 			},
 		}
 		actor2 := &ateapipb.Actor{
 			Metadata:      &ateapipb.ResourceMetadata{Name: "id2", Atespace: testAtespace},
 			ActorTemplate: &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl1"},
 			Status: &ateapipb.ActorStatus{
-				State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-				ExternalSnapshot: &ateapipb.ExternalSnapshot{SnapshotUri: testActorSnapshotURI("gs://bucket", testAtespace, "snapshot-2")},
+				State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+				LatestDurableSnapshot: &ateapipb.Snapshot{
+					Object: &ateapipb.ObjectSnapshot{SnapshotUri: testActorSnapshotURI("gs://bucket", testAtespace, "snapshot-2")},
+				},
 			},
 		}
 		if _, err := s.CreateActor(ctx, actor1); err != nil {
@@ -1145,9 +1149,11 @@ func newTestSuspendedActor(atespace, name string) *ateapipb.Actor {
 		ActorTemplate: &ateapipb.ObjectRef{Atespace: "ns1", Name: "tmpl1"},
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
-			ExternalSnapshot: &ateapipb.ExternalSnapshot{
-				SnapshotUri:  testActorSnapshotURI("gs://private", atespace, name),
-				ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			LatestDurableSnapshot: &ateapipb.Snapshot{
+				Object: &ateapipb.ObjectSnapshot{
+					SnapshotUri:  testActorSnapshotURI("gs://private", atespace, name),
+					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+				},
 			},
 		},
 	}
@@ -1496,7 +1502,7 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 // finalizeTag mutates a reserved tag the way the tag workflow's second
 // transaction does: it names the copy that landed under the tag UID.
 func finalizeTag(toUpdate *ateapipb.Tag) error {
-	toUpdate.Status.Snapshot = &ateapipb.ExternalSnapshot{
+	toUpdate.Status.Snapshot = &ateapipb.ObjectSnapshot{
 		SnapshotUri:  testTagSnapshotURI(toUpdate.GetStatus().GetStorageLocation(), toUpdate.GetMetadata().GetAtespace(), toUpdate.GetMetadata().GetUid()),
 		ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 	}

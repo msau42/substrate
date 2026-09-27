@@ -85,3 +85,26 @@ func validateDualStackIPs(fldPath *field.Path, ips []string) field.ErrorList {
 	}
 	return errs
 }
+
+// ValidateCustom_Snapshot requires survivability to match the snapshot storage
+// type: DURABLE for object snapshots, and RESIDENT or LOCAL for local snapshots.
+func ValidateCustom_Snapshot(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.Snapshot) field.ErrorList {
+	if value.GetLocal() != nil && value.GetObject() != nil {
+		// Covered by +k8s:unionMember on local and object.
+		return nil
+	}
+	s := value.GetSurvivability()
+	if s < ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT || s > ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE {
+		// Covered by +k8s:required, +k8s:minimum, and +k8s:maximum on survivability.
+		return nil
+	}
+	if value.GetObject() != nil && s != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE {
+		return field.ErrorList{field.Invalid(fldPath.Child("survivability"), s.String(), "must be SURVIVABILITY_RUNG_DURABLE for object snapshots")}
+	}
+	if value.GetLocal() != nil &&
+		s != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT &&
+		s != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_LOCAL {
+		return field.ErrorList{field.Invalid(fldPath.Child("survivability"), s.String(), "must be SURVIVABILITY_RUNG_RESIDENT or SURVIVABILITY_RUNG_LOCAL for local snapshots")}
+	}
+	return nil
+}
