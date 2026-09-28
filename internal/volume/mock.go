@@ -86,6 +86,19 @@ func (p *MockVolumePlugin) DetachVolume(ctx context.Context, volumeID string, no
 	return nil
 }
 
+// CreateSnapshot simulates volume snapshot creation.
+func (p *MockVolumePlugin) CreateSnapshot(ctx context.Context, name string, sourceVolumeID string, parameters map[string]string) (string, error) {
+	snapshotID := "mock-snap-" + name
+	slog.InfoContext(ctx, "MockVolumePlugin.CreateSnapshot", slog.String("name", name), slog.String("sourceVolumeID", sourceVolumeID), slog.String("snapshotID", snapshotID))
+	return snapshotID, nil
+}
+
+// DeleteSnapshot simulates volume snapshot deletion.
+func (p *MockVolumePlugin) DeleteSnapshot(ctx context.Context, snapshotID string) error {
+	slog.InfoContext(ctx, "MockVolumePlugin.DeleteSnapshot", slog.String("snapshotID", snapshotID))
+	return nil
+}
+
 // MountVolume simulates mounting volume on the host.
 func (p *MockVolumePlugin) MountVolume(ctx context.Context, volumeID string, targetPath string, volumeContext map[string]string) error {
 	slog.InfoContext(ctx, "MockVolumePlugin.MountVolume", slog.String("volumeID", volumeID), slog.String("targetPath", targetPath))

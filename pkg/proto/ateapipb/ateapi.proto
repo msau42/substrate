@@ -209,7 +209,7 @@ message LocalSnapshot {
 }
 
 // Snapshot describes a snapshot of an Actor.
-// Exactly one of local or object must be set.
+// Exactly one of local, object, or external_volume must be set.
 // +k8s:customValidation # survivability must match the snapshot storage type
 message Snapshot {
   // Unique identifier for this snapshot incarnation.
@@ -236,6 +236,12 @@ message Snapshot {
   // +k8s:minimum=1
   // +k8s:maximum=3 # keep this in sync with the SurvivabilityRung enum
   SurvivabilityRung survivability = 4;
+
+  // The backing external block volume information for the snapshot.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  ExternalVolume external_volume = 5;
 }
 
 enum SnapshotContentScope {

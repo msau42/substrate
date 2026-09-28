@@ -142,8 +142,18 @@ func ValidateCustom_ExternalVolume_StorageVolumeId(_ context.Context, _ operatio
 // ValidateCustom_Snapshot requires survivability to match the snapshot storage
 // type: DURABLE for object snapshots, and RESIDENT or LOCAL for local snapshots.
 func ValidateCustom_Snapshot(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateapipb.Snapshot) field.ErrorList {
-	if value.GetLocal() != nil && value.GetObject() != nil {
-		// Covered by +k8s:unionMember on local and object.
+	setCount := 0
+	if value.GetLocal() != nil {
+		setCount++
+	}
+	if value.GetObject() != nil {
+		setCount++
+	}
+	if value.GetExternalVolume() != nil {
+		setCount++
+	}
+	if setCount > 1 {
+		// Covered by +k8s:unionMember on local, object, and external_volume.
 		return nil
 	}
 	s := value.GetSurvivability()

@@ -6110,7 +6110,7 @@ func Validate_SetWorkerCapacityRequest(
 	return errs
 }
 
-var unionMembershipFor_github_com_agent_substrate_substrate_pkg_proto_ateapipb_Snapshot_ = validate.NewUnionMembership(validate.NewUnionMember("local"), validate.NewUnionMember("object"))
+var unionMembershipFor_github_com_agent_substrate_substrate_pkg_proto_ateapipb_Snapshot_ = validate.NewUnionMembership(validate.NewUnionMember("local"), validate.NewUnionMember("object"), validate.NewUnionMember("external_volume"))
 
 // Validate_Snapshot validates an instance of Snapshot according
 // to declarative validation rules in the API schema.
@@ -6130,6 +6130,12 @@ func Validate_Snapshot(
 				return false
 			}
 			return obj.Object != nil
+		},
+		func(obj *ateapipb.Snapshot) bool {
+			if obj == nil {
+				return false
+			}
+			return obj.ExternalVolume != nil
 		}); len(e) != 0 {
 		errs = append(errs, e...)
 	}
@@ -6262,6 +6268,36 @@ func Validate_Snapshot(
 				return &oldObj.Survivability
 			})
 		errs = append(errs, fn(fldPath.Child("survivability"), &obj.Survivability, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.Snapshot.ExternalVolume
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.ExternalVolume,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.OptionalPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_ExternalVolume(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.Snapshot) *ateapipb.ExternalVolume {
+				return oldObj.ExternalVolume
+			})
+		errs = append(errs, fn(fldPath.Child("external_volume"), obj.ExternalVolume, oldVal, oldObj != nil)...)
 	}
 
 	return errs

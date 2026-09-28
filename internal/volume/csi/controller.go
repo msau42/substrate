@@ -39,3 +39,13 @@ func (c *Client) ControllerPublishVolume(ctx context.Context, req *csi.Controlle
 func (c *Client) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
 	return c.controller.ControllerUnpublishVolume(ctx, req)
 }
+
+// CreateSnapshot creates a snapshot of a source volume.
+func (c *Client) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	return c.controller.CreateSnapshot(ctx, req)
+}
+
+// DeleteSnapshot deletes a volume snapshot.
+func (c *Client) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
+	return c.controller.DeleteSnapshot(ctx, req)
+}

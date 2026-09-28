@@ -18,6 +18,10 @@ import (
 	"context"
 )
 
+// SourceSnapshotIDParameterKey is an optional parameter key passed to
+// CreateVolume to clone a new volume from an existing CSI volume snapshot.
+const SourceSnapshotIDParameterKey = "substrate.io/source-snapshot-id"
+
 // VolumePluginControlPlane abstracts storage operations performed on the control plane.
 type VolumePluginControlPlane interface {
 	DriverName(ctx context.Context) (string, error)
@@ -25,6 +29,8 @@ type VolumePluginControlPlane interface {
 	DeleteVolume(ctx context.Context, volumeID string) error
 	AttachVolume(ctx context.Context, volumeID string, node string) error
 	DetachVolume(ctx context.Context, volumeID string, node string) error
+	CreateSnapshot(ctx context.Context, name string, sourceVolumeID string, parameters map[string]string) (snapshotID string, err error)
+	DeleteSnapshot(ctx context.Context, snapshotID string) error
 }
 
 // VolumePluginWorkerPlane abstracts storage operations performed on worker nodes.

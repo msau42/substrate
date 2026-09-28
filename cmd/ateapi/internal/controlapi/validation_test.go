@@ -1426,6 +1426,19 @@ func TestValidateSnapshot(t *testing.T) {
 			obj:  validObject(),
 		},
 		{
+			name: "valid external_volume snapshot (DURABLE)",
+			obj: &ateapipb.Snapshot{
+				SnapshotId: "snap-1",
+				ExternalVolume: &ateapipb.ExternalVolume{
+					VolumeName:      "snapshot",
+					StorageVolumeId: "vol-1",
+					VolumeType:      "pd.csi.storage.gke.io",
+					Status:          ateapipb.ExternalVolume_STATUS_CREATED,
+				},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
+		},
+		{
 			name: "neither union member set",
 			obj: &ateapipb.Snapshot{
 				SnapshotId:    "snap-1",

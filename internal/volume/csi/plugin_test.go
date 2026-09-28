@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/agent-substrate/substrate/internal/volume"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -34,6 +35,8 @@ type mockCSIDriver struct {
 
 	createVolumeFunc              func(context.Context, *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error)
 	deleteVolumeFunc              func(context.Context, *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error)
+	createSnapshotFunc            func(context.Context, *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error)
+	deleteSnapshotFunc            func(context.Context, *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error)
 	controllerPublishVolumeFunc   func(context.Context, *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error)
 	controllerUnpublishVolumeFunc func(context.Context, *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error)
 	nodeStageVolumeFunc           func(context.Context, *csi.NodeStageVolumeRequest) (*csi.NodeStageVolumeResponse, error)
@@ -93,6 +96,26 @@ func (m *mockCSIDriver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeR
 		return m.deleteVolumeFunc(ctx, req)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
+}
+
+func (m *mockCSIDriver) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
+	if m.createSnapshotFunc != nil {
+		return m.createSnapshotFunc(ctx, req)
+	}
+	return &csi.CreateSnapshotResponse{
+		Snapshot: &csi.Snapshot{
+			SnapshotId:     req.GetName(),
+			SourceVolumeId: req.GetSourceVolumeId(),
+			ReadyToUse:     true,
+		},
+	}, nil
+}
+
+func (m *mockCSIDriver) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
+	if m.deleteSnapshotFunc != nil {
+		return m.deleteSnapshotFunc(ctx, req)
+	}
+	return &csi.DeleteSnapshotResponse{}, nil
 }
 
 func (m *mockCSIDriver) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
@@ -171,7 +194,18 @@ func startMockCSIDriver(t *testing.T, driver *mockCSIDriver) (string, func()) {
 }
 
 func TestPlugin_CreateVolume(t *testing.T) {
-	driver := &mockCSIDriver{}
+	var capturedReq *csi.CreateVolumeRequest
+	driver := &mockCSIDriver{
+		createVolumeFunc: func(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+			capturedReq = req
+			return &csi.CreateVolumeResponse{
+				Volume: &csi.Volume{
+					VolumeId:      req.GetName(),
+					CapacityBytes: req.GetCapacityRange().GetRequiredBytes(),
+				},
+			}, nil
+		},
+	}
 	endpoint, cleanup := startMockCSIDriver(t, driver)
 	defer cleanup()
 
@@ -191,6 +225,58 @@ func TestPlugin_CreateVolume(t *testing.T) {
 
 	if volID != "test-vol" {
 		t.Errorf("expected volume ID %q, got %q", "test-vol", volID)
+	}
+	if capturedReq.GetVolumeContentSource() != nil {
+		t.Errorf("expected nil VolumeContentSource, got %v", capturedReq.GetVolumeContentSource())
+	}
+
+	// Test CreateVolume with snapshot content source
+	params := map[string]string{
+		"type":                              "hyperdisk-direct",
+		volume.SourceSnapshotIDParameterKey: "snap-123",
+	}
+	volID, _, err = plugin.CreateVolume(ctx, "cloned-vol", "2Gi", "standard", params)
+	if err != nil {
+		t.Fatalf("CreateVolume from snapshot failed: %v", err)
+	}
+	if volID != "cloned-vol" {
+		t.Errorf("expected volume ID %q, got %q", "cloned-vol", volID)
+	}
+	if gotSnapID := capturedReq.GetVolumeContentSource().GetSnapshot().GetSnapshotId(); gotSnapID != "snap-123" {
+		t.Errorf("expected VolumeContentSource snapshot ID %q, got %q", "snap-123", gotSnapID)
+	}
+	if _, leaked := capturedReq.GetParameters()[volume.SourceSnapshotIDParameterKey]; leaked {
+		t.Errorf("expected %q to be stripped from CSI CreateVolume parameters", volume.SourceSnapshotIDParameterKey)
+	}
+	if capturedReq.GetParameters()["type"] != "hyperdisk-direct" {
+		t.Errorf("expected parameter type=hyperdisk-direct, got %q", capturedReq.GetParameters()["type"])
+	}
+}
+
+func TestPlugin_CreateAndDeleteSnapshot(t *testing.T) {
+	driver := &mockCSIDriver{}
+	endpoint, cleanup := startMockCSIDriver(t, driver)
+	defer cleanup()
+
+	client, err := NewCSIClient(endpoint, nil)
+	if err != nil {
+		t.Fatalf("failed to create CSI client: %v", err)
+	}
+	defer client.Close()
+
+	plugin := NewPlugin(client)
+
+	ctx := context.Background()
+	snapID, err := plugin.CreateSnapshot(ctx, "tag-snap-1", "vol-1", map[string]string{"storage-locations": "us-central1"})
+	if err != nil {
+		t.Fatalf("CreateSnapshot failed: %v", err)
+	}
+	if snapID != "tag-snap-1" {
+		t.Errorf("expected snapshot ID %q, got %q", "tag-snap-1", snapID)
+	}
+
+	if err := plugin.DeleteSnapshot(ctx, snapID); err != nil {
+		t.Fatalf("DeleteSnapshot failed: %v", err)
 	}
 }
 

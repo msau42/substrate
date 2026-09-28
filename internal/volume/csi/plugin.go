@@ -22,7 +22,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/agent-substrate/substrate/internal/ateompath"
 	"github.com/agent-substrate/substrate/internal/credbundle"
@@ -87,13 +89,37 @@ func (p *Plugin) CreateVolume(ctx context.Context, name string, capacity string,
 	}
 	capBytes := qty.Value()
 
+	var csiParams map[string]string
+	var contentSource *csi.VolumeContentSource
+	if len(parameters) > 0 {
+		if snapID := parameters[volume.SourceSnapshotIDParameterKey]; snapID != "" {
+			contentSource = &csi.VolumeContentSource{
+				Type: &csi.VolumeContentSource_Snapshot{
+					Snapshot: &csi.VolumeContentSource_SnapshotSource{
+						SnapshotId: snapID,
+					},
+				},
+			}
+		}
+		for k, v := range parameters {
+			if k == volume.SourceSnapshotIDParameterKey {
+				continue
+			}
+			if csiParams == nil {
+				csiParams = make(map[string]string, len(parameters))
+			}
+			csiParams[k] = v
+		}
+	}
+
 	req := &csi.CreateVolumeRequest{
 		Name: name,
 		CapacityRange: &csi.CapacityRange{
 			RequiredBytes: capBytes,
 		},
-		VolumeCapabilities: getStandardCapabilities(),
-		Parameters:         parameters,
+		VolumeCapabilities:  getStandardCapabilities(),
+		Parameters:          csiParams,
+		VolumeContentSource: contentSource,
 	}
 
 	resp, err := p.client.CreateVolume(ctx, req)
@@ -117,6 +143,39 @@ func (p *Plugin) DeleteVolume(ctx context.Context, volumeID string) error {
 	_, err := p.client.DeleteVolume(ctx, req)
 	if err != nil {
 		return fmt.Errorf("CSI DeleteVolume failed: %w", err)
+	}
+	return nil
+}
+
+// CreateSnapshot maps to CSI Controller CreateSnapshot.
+func (p *Plugin) CreateSnapshot(ctx context.Context, name string, sourceVolumeID string, parameters map[string]string) (string, error) {
+	req := &csi.CreateSnapshotRequest{
+		Name:           name,
+		SourceVolumeId: sourceVolumeID,
+		Parameters:     parameters,
+	}
+
+	resp, err := p.client.CreateSnapshot(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("CSI CreateSnapshot failed: %w", err)
+	}
+
+	if resp.GetSnapshot() == nil {
+		return "", fmt.Errorf("CSI CreateSnapshot response returned nil snapshot")
+	}
+
+	return resp.GetSnapshot().GetSnapshotId(), nil
+}
+
+// DeleteSnapshot maps to CSI Controller DeleteSnapshot.
+func (p *Plugin) DeleteSnapshot(ctx context.Context, snapshotID string) error {
+	req := &csi.DeleteSnapshotRequest{
+		SnapshotId: snapshotID,
+	}
+
+	_, err := p.client.DeleteSnapshot(ctx, req)
+	if err != nil {
+		return fmt.Errorf("CSI DeleteSnapshot failed: %w", err)
 	}
 	return nil
 }
@@ -225,8 +284,10 @@ func (p *Plugin) UnmountVolume(ctx context.Context, volumeID string, targetPath 
 		TargetPath: targetPath,
 	}
 
-	_, err := p.client.NodeUnpublishVolume(ctx, req)
-	if err != nil {
+	if err := retryOnTransientMountBusy(ctx, func() error {
+		_, uerr := p.client.NodeUnpublishVolume(ctx, req)
+		return uerr
+	}); err != nil {
 		return fmt.Errorf("CSI NodeUnpublishVolume failed: %w", err)
 	}
 
@@ -237,7 +298,10 @@ func (p *Plugin) UnmountVolume(ctx context.Context, volumeID string, targetPath 
 		StagingTargetPath: stagingPath,
 	}
 
-	_, err = p.client.NodeUnstageVolume(ctx, unstageReq)
+	err := retryOnTransientMountBusy(ctx, func() error {
+		_, uerr := p.client.NodeUnstageVolume(ctx, unstageReq)
+		return uerr
+	})
 	if err != nil {
 		if status.Code(err) == codes.Unimplemented {
 			slog.WarnContext(ctx, "CSI NodeUnstageVolume is unimplemented by driver; skipping unstaging", slog.String("volume_id", volumeID))
@@ -252,6 +316,33 @@ func (p *Plugin) UnmountVolume(ctx context.Context, volumeID string, targetPath 
 	}
 
 	return nil
+}
+
+func retryOnTransientMountBusy(ctx context.Context, fn func() error) error {
+	const (
+		maxAttempts = 30
+		backoff     = 100 * time.Millisecond
+	)
+	var err error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "target is busy") && !strings.Contains(lower, "resource busy") {
+			return err
+		}
+		if attempt == maxAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(backoff):
+		}
+	}
+	return err
 }
 
 // Helper to provide standard capabilities for general volume operations.
