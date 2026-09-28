@@ -192,7 +192,7 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 			if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
 				return err
 			}
-			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, actor, actor.GetStatus().GetLatestSnapshotStatus(), assignment.GetNodeName()); err != nil {
+			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, actor, activeActorSnapshot(actor), assignment.GetNodeName()); err != nil {
 				return err
 			}
 			if _, _, err := releaseWorker(ctx, w.store, actor); err != nil {

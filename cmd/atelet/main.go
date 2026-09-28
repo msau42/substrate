@@ -50,6 +50,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/serverboot"
 	"github.com/agent-substrate/substrate/internal/snapshot"
+	"github.com/agent-substrate/substrate/internal/snapshot/block"
 	"github.com/agent-substrate/substrate/internal/snapshot/object"
 	"github.com/agent-substrate/substrate/internal/substratex509"
 	"github.com/agent-substrate/substrate/internal/version"
@@ -437,6 +438,7 @@ type AteomHerder struct {
 	anonGCSClient         ategcs.ObjectStorage
 	gcsClient             ategcs.ObjectStorage
 	snapshotPlugin        snapshot.SnapshotPluginWorkerPlane
+	blockSnapshotPlugin   snapshot.SnapshotPluginWorkerPlane
 	instruments           *Instruments
 	mu                    sync.RWMutex
 	volumePlugins         map[string]volume.VolumePluginWorkerPlane
@@ -446,11 +448,38 @@ type AteomHerder struct {
 
 var _ ateletpb.AteomHerderServer = (*AteomHerder)(nil)
 
+type herderVolumePluginRegistry struct {
+	herder *AteomHerder
+}
+
+func (r herderVolumePluginRegistry) GetPlugin(ctx context.Context, driverName string) (volume.VolumePluginWorkerPlane, error) {
+	return r.herder.getPlugin(ctx, driverName)
+}
+
 func (s *AteomHerder) getSnapshotPlugin() snapshot.SnapshotPluginWorkerPlane {
 	if s.snapshotPlugin != nil {
 		return s.snapshotPlugin
 	}
 	return object.NewObjectSnapshotPluginWorkerPlane(s.gcsClient)
+}
+
+func (s *AteomHerder) getBlockSnapshotPlugin() snapshot.SnapshotPluginWorkerPlane {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blockSnapshotPlugin == nil {
+		s.blockSnapshotPlugin = block.NewBlockSnapshotPluginWorkerPlane(
+			nil,
+			block.WithWorkerVolumePluginRegistry(herderVolumePluginRegistry{herder: s}),
+		)
+	}
+	return s.blockSnapshotPlugin
+}
+
+func (s *AteomHerder) getSnapshotPluginFor(snap *ateapipb.Snapshot) snapshot.SnapshotPluginWorkerPlane {
+	if snap.GetBlock().GetExternalVolume() != nil {
+		return s.getBlockSnapshotPlugin()
+	}
+	return s.getSnapshotPlugin()
 }
 
 // NewService creates a new WorkersManagerService.
@@ -476,6 +505,10 @@ func NewService(
 		csiDriverConfigLister: csiDriverConfigLister,
 		systemInfoVolumes:     systemInfoVolumes,
 	}
+	wms.blockSnapshotPlugin = block.NewBlockSnapshotPluginWorkerPlane(
+		nil,
+		block.WithWorkerVolumePluginRegistry(herderVolumePluginRegistry{herder: wms}),
+	)
 	return wms
 }
 
@@ -506,8 +539,8 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, err
 	}
 
-	if err := s.getSnapshotPlugin().PrepareRunDir(ctx, actorUID, req); err != nil {
-		return nil, fmt.Errorf("while preparing run dir: %w", err)
+	if err := s.getSnapshotPluginFor(req.GetSnapshot()).PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshot()); err != nil {
+		return nil, fmt.Errorf("while preparing snapshot storage: %w", err)
 	}
 
 	// Record the sandbox binaries this actor is running so a later Checkpoint
@@ -697,9 +730,11 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// checkpoint either overwrites (pause) or clears (suspend).
 	//
 	// Best-effort: if this fail, the actor's terminate prunes again.
-	plugin := s.getSnapshotPlugin()
-	if err := plugin.DetachCheckpointDir(ctx, actorUID, ""); err != nil {
-		slog.WarnContext(ctx, "failed to prune superseded local checkpoints", slog.Any("actor", actorRef), slog.Any("err", err))
+	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
+	if req.GetSnapshot().GetBlock() == nil {
+		if err := plugin.DetachCheckpointDir(ctx, actorUID, ""); err != nil {
+			slog.WarnContext(ctx, "failed to prune superseded local checkpoints", slog.Any("actor", actorRef), slog.Any("err", err))
+		}
 	}
 
 	// Pruning stays outside the persist window: it collects superseded
@@ -720,6 +755,17 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		return nil, fmt.Errorf("while committing checkpoint: %w", err)
 	}
 	dPersist = time.Since(tPersist)
+
+	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil && req.GetType() == ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL {
+		detachCtx := block.WithVolumeMetadata(ctx, block.VolumeMetadata{
+			StorageVolumeID: extVol.GetStorageVolumeId(),
+			VolumeType:      extVol.GetVolumeType(),
+			VolumeContext:   extVol.GetVolumeContext(),
+		})
+		if err := plugin.DetachCheckpointDir(detachCtx, actorUID, extVol.GetStorageVolumeId()); err != nil {
+			return nil, fmt.Errorf("while detaching block checkpoint directory: %w", err)
+		}
+	}
 
 	if err := s.unmountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes()); err != nil {
 		return nil, fmt.Errorf("while unmounting external volumes: %w", err)
@@ -752,7 +798,16 @@ func stageCheckpointFiles(ctx context.Context, req *ateletpb.CheckpointRequest, 
 		recordSnapshotSize(ctx, fileName, src, req.GetActorTemplateAtespace(), req.GetActorTemplateName())
 
 		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+			if errors.Is(err, syscall.EXDEV) {
+				if _, copyErr := sparsefile.CopyFile(src, dst); copyErr != nil {
+					return fmt.Errorf("failed to copy %s to %s across mount boundary: %w", src, dst, copyErr)
+				}
+				if rmErr := os.Remove(src); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+					return fmt.Errorf("failed to remove source %s after cross-mount copy: %w", src, rmErr)
+				}
+			} else {
+				return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+			}
 		}
 	}
 
@@ -807,17 +862,22 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 	}()
 
 	localDir := ateompath.LocalSnapshotDir(req.GetActorUid(), req.GetLocalSnapshotName())
-	if manifest, err := os.ReadFile(filepath.Join(localDir, sandboxManifestName)); err == nil {
-		if rec, err := unmarshalSandboxRecord(manifest); err == nil {
-			op.sandboxClass = rec.SandboxClass
-			for _, fileName := range rec.SnapshotFiles {
-				recordSnapshotSize(ctx, fileName, filepath.Join(localDir, fileName), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
-			}
+	rec, recErr := reconcileLocalCheckpointScope(localDir, req.GetLocalSnapshotName(), req.GetDesiredScope())
+	if rec != nil {
+		op.sandboxClass = rec.SandboxClass
+	}
+	if recErr != nil && !errors.Is(recErr, os.ErrNotExist) {
+		return nil, recErr
+	}
+	if rec != nil {
+		for _, fileName := range rec.SnapshotFiles {
+			recordSnapshotSize(ctx, fileName, filepath.Join(localDir, fileName), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
 		}
 	}
 
-	plugin := s.getSnapshotPlugin()
+	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
 	escalateCtx := object.WithLocalSnapshotName(ctx, req.GetLocalSnapshotName())
+	escalateCtx = block.WithLocalSnapshotName(escalateCtx, req.GetLocalSnapshotName())
 	ckptReq := &ateletpb.CheckpointRequest{
 		Atespace:              req.GetAtespace(),
 		ActorName:             req.GetActorName(),
@@ -831,6 +891,7 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 				SnapshotUri: req.GetDestinationSnapshotUri(),
 			},
 		},
+		Snapshot: req.GetSnapshot(),
 	}
 
 	tPersist := time.Now()
@@ -842,11 +903,75 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 
 	// The uploaded snapshot supersedes every local pause snapshot of this
 	// actor; free the node's disk (best-effort, like Checkpoint).
-	if err := plugin.DetachCheckpointDir(ctx, req.GetActorUid(), req.GetLocalSnapshotName()); err != nil {
+	detachCtx := ctx
+	detachVolumeID := req.GetLocalSnapshotName()
+	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil {
+		detachCtx = block.WithVolumeMetadata(ctx, block.VolumeMetadata{
+			VolumeType:      extVol.GetVolumeType(),
+			StorageVolumeID: extVol.GetStorageVolumeId(),
+			VolumeContext:   extVol.GetVolumeContext(),
+		})
+		detachVolumeID = extVol.GetStorageVolumeId()
+	}
+	if err := plugin.DetachCheckpointDir(detachCtx, req.GetActorUid(), detachVolumeID); err != nil {
 		slog.WarnContext(ctx, "failed to prune uploaded local checkpoints", slog.String("actorUID", req.GetActorUid()), slog.Any("err", err))
 	}
 
 	return &ateletpb.UploadPausedCheckpointResponse{}, nil
+}
+
+func reconcileLocalCheckpointScope(localDir, localSnapshotName string, desired ateletpb.SnapshotScope) (*sandboxAssetsRecord, error) {
+	manifestPath := filepath.Join(localDir, sandboxManifestName)
+	manifest, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := unmarshalSandboxRecord(manifest)
+	if err != nil {
+		return nil, err
+	}
+	capturedScope := rec.Scope
+	if capturedScope == "" {
+		return rec, status.Errorf(codes.FailedPrecondition, "local snapshot %q has no scope recorded in its manifest (written by an older atelet); resume and pause the actor again before suspending it", localSnapshotName)
+	}
+	desiredScope := ateattr.SnapshotScopeValue(desired)
+	if desired == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED {
+		desiredScope = capturedScope
+	}
+	switch {
+	case capturedScope == desiredScope:
+		return rec, nil
+	case capturedScope == ateattr.SnapshotScopeData && desiredScope == ateattr.SnapshotScopeFull:
+		return rec, status.Errorf(codes.FailedPrecondition, "pause snapshot captured %s; cannot upload it as %s (memory was never captured)", capturedScope, desiredScope)
+	default:
+		switch rec.SandboxClass {
+		case "microvm", "gvisor":
+			if !slices.Contains(rec.SnapshotFiles, ateompath.DurableDirTarFile) {
+				return rec, status.Errorf(codes.FailedPrecondition, "full %s capture has no %s; the actor has no durable data to upload as %s", rec.SandboxClass, ateompath.DurableDirTarFile, ateattr.SnapshotScopeData)
+			}
+		default:
+			return rec, status.Errorf(codes.FailedPrecondition, "unknown sandbox class %q in snapshot manifest", rec.SandboxClass)
+		}
+		rec.SnapshotFiles = []string{ateompath.DurableDirTarFile}
+		rec.Scope = ateattr.SnapshotScopeData
+		updated, err := json.Marshal(rec)
+		if err != nil {
+			return rec, fmt.Errorf("while marshaling narrowed snapshot manifest: %w", err)
+		}
+		if err := os.WriteFile(manifestPath, updated, 0o600); err != nil {
+			return rec, fmt.Errorf("while writing narrowed snapshot manifest: %w", err)
+		}
+		if entries, err := os.ReadDir(localDir); err == nil {
+			for _, entry := range entries {
+				name := entry.Name()
+				if name == sandboxManifestName || name == ateompath.DurableDirTarFile {
+					continue
+				}
+				_ = os.RemoveAll(filepath.Join(localDir, name))
+			}
+		}
+		return rec, nil
+	}
 }
 
 func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (resp *ateletpb.RestoreResponse, err error) {
@@ -897,8 +1022,12 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 
+	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
 	tMount := time.Now()
 	mountErr := s.mountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
+	if mountErr == nil {
+		mountErr = plugin.PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshot())
+	}
 	dMount = time.Since(tMount)
 	if mountErr != nil {
 		return nil, mountErr
@@ -917,7 +1046,6 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 			dManifest = time.Since(tManifest)
 		}
 	}()
-	plugin := s.getSnapshotPlugin()
 	manifest, goldenManifest, err := plugin.FetchRestoreManifests(ctx, req)
 	if err != nil {
 		return nil, err
@@ -1140,7 +1268,17 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	// up the copies on any other NodeVmsWithLocalSnapshots. This is fine *as of
 	// the day this was written* because today NodeVmsWithLocalSnapshots has at
 	// most one item.
-	if err := s.getSnapshotPlugin().DetachCheckpointDir(ctx, actorUID, ""); err != nil {
+	detachCtx := ctx
+	storageVolID := ""
+	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil {
+		storageVolID = extVol.GetStorageVolumeId()
+		detachCtx = block.WithVolumeMetadata(ctx, block.VolumeMetadata{
+			StorageVolumeID: extVol.GetStorageVolumeId(),
+			VolumeType:      extVol.GetVolumeType(),
+			VolumeContext:   extVol.GetVolumeContext(),
+		})
+	}
+	if err := s.getSnapshotPluginFor(req.GetSnapshot()).DetachCheckpointDir(detachCtx, actorUID, storageVolID); err != nil {
 		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
@@ -1465,7 +1603,15 @@ func validateCheckpointRequest(req *ateletpb.CheckpointRequest) error {
 
 	switch req.GetType() {
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
-		if _, err := resources.ParseSnapshotURI(req.GetExternalConfig().GetSnapshotUri()); err != nil {
+		if req.GetSnapshot().GetBlock() != nil {
+			snapID := req.GetSnapshot().GetSnapshotId()
+			if snapID == "" {
+				snapID = req.GetLocalConfig().GetSnapshotName()
+			}
+			if !resources.IsValidResourceName(snapID) {
+				return fmt.Errorf("invalid snapshot id %q", snapID)
+			}
+		} else if _, err := resources.ParseSnapshotURI(req.GetExternalConfig().GetSnapshotUri()); err != nil {
 			return err
 		}
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
@@ -1511,7 +1657,15 @@ func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 
 	switch req.GetType() {
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL:
-		if _, err := resources.ParseSnapshotURI(req.GetExternalConfig().GetSnapshotUri()); err != nil {
+		if req.GetSnapshot().GetBlock() != nil {
+			snapID := req.GetSnapshot().GetSnapshotId()
+			if snapID == "" {
+				snapID = req.GetLocalConfig().GetSnapshotName()
+			}
+			if !resources.IsValidResourceName(snapID) {
+				return fmt.Errorf("invalid snapshot id %q", snapID)
+			}
+		} else if _, err := resources.ParseSnapshotURI(req.GetExternalConfig().GetSnapshotUri()); err != nil {
 			return err
 		}
 	case ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL:
@@ -1526,8 +1680,10 @@ func validateRestoreRequest(req *ateletpb.RestoreRequest) error {
 	// (local pause checkpoint or external commit) and the golden snapshot,
 	// which is always external.
 	if req.GetScope() == ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN {
-		if _, err := resources.ParseSnapshotURI(req.GetGoldenSnapshotUri()); err != nil {
-			return fmt.Errorf("invalid golden_snapshot_uri: %w", err)
+		if req.GetSnapshot().GetBlock() == nil {
+			if _, err := resources.ParseSnapshotURI(req.GetGoldenSnapshotUri()); err != nil {
+				return fmt.Errorf("invalid golden_snapshot_uri: %w", err)
+			}
 		}
 	} else if req.GetGoldenSnapshotUri() != "" {
 		return fmt.Errorf("golden_snapshot_uri is only valid with snapshot scope %s", ateletpb.SnapshotScope_SNAPSHOT_SCOPE_DATA_ON_GOLDEN)
@@ -1577,8 +1733,10 @@ func validateUploadPausedCheckpointRequest(req *ateletpb.UploadPausedCheckpointR
 	if req.GetAtespace() == resources.GoldenActorAtespace {
 		errs = append(errs, field.Forbidden(field.NewPath("atespace"), fmt.Sprintf("atespace %q holds golden actors, which are never paused", req.GetAtespace())))
 	}
-	if _, err := resources.ParseSnapshotURI(req.GetDestinationSnapshotUri()); err != nil {
-		errs = append(errs, field.Invalid(field.NewPath("destination_snapshot_uri"), req.GetDestinationSnapshotUri(), err.Error()))
+	if req.GetSnapshot().GetBlock() == nil {
+		if _, err := resources.ParseSnapshotURI(req.GetDestinationSnapshotUri()); err != nil {
+			errs = append(errs, field.Invalid(field.NewPath("destination_snapshot_uri"), req.GetDestinationSnapshotUri(), err.Error()))
+		}
 	}
 	// Uploads only ever produce FULL or DATA snapshots; DATA_ON_GOLDEN is a
 	// restore-time combination.

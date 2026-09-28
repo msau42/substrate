@@ -189,6 +189,28 @@ func (p *Persistence) CreateTag(ctx context.Context, tag *ateapipb.Tag) (*ateapi
 	return dbTag, nil
 }
 
+func isAllowedPendingExternalVolumeFinalization(storedTag, mutatedTag *ateapipb.Tag) bool {
+	if storedTag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_CREATING ||
+		mutatedTag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY {
+		return false
+	}
+	storedSnap := storedTag.GetStatus().GetSnapshot()
+	mutatedSnap := mutatedTag.GetStatus().GetSnapshot()
+	storedBlock := storedSnap.GetBlock()
+	mutatedBlock := mutatedSnap.GetBlock()
+	if storedBlock == nil || mutatedBlock == nil {
+		return false
+	}
+	if storedBlock.GetVolumeSnapshotId() != "" || mutatedBlock.GetVolumeSnapshotId() == "" {
+		return false
+	}
+	return storedSnap.GetSnapshotId() == mutatedSnap.GetSnapshotId() &&
+		storedSnap.GetSurvivability() == mutatedSnap.GetSurvivability() &&
+		storedBlock.GetContentScope() == mutatedBlock.GetContentScope() &&
+		storedBlock.GetActorTemplateUid() == mutatedBlock.GetActorTemplateUid() &&
+		proto.Equal(storedBlock.GetExternalVolume(), mutatedBlock.GetExternalVolume())
+}
+
 func validateUpdateTagMutation(storedTag, mutatedTag *ateapipb.Tag) error {
 	if stored, mutated := storedTag.GetMetadata().GetAtespace(), mutatedTag.GetMetadata().GetAtespace(); stored != mutated {
 		return fmt.Errorf("metadata.atespace is immutable: mutation changed it from %q to %q", stored, mutated)
@@ -196,7 +218,7 @@ func validateUpdateTagMutation(storedTag, mutatedTag *ateapipb.Tag) error {
 	if stored, mutated := storedTag.GetMetadata().GetName(), mutatedTag.GetMetadata().GetName(); stored != mutated {
 		return fmt.Errorf("metadata.name is immutable: mutation changed it from %q to %q", stored, mutated)
 	}
-	if stored, mutated := storedTag.GetStatus().GetSnapshot(), mutatedTag.GetStatus().GetSnapshot(); !proto.Equal(stored, mutated) {
+	if stored, mutated := storedTag.GetStatus().GetSnapshot(), mutatedTag.GetStatus().GetSnapshot(); !proto.Equal(stored, mutated) && !isAllowedPendingExternalVolumeFinalization(storedTag, mutatedTag) {
 		return fmt.Errorf("status.snapshot is immutable: mutation changed it from %s to %s", stored, mutated)
 	}
 	if stored, mutated := storedTag.GetStatus().GetActorTemplateUid(), mutatedTag.GetStatus().GetActorTemplateUid(); stored != mutated {

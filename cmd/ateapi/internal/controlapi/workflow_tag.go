@@ -25,6 +25,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // TagActorSnapshot tags the external snapshot held by the suspended actor the
@@ -221,8 +222,8 @@ func (w *ActorWorkflow) loadActorForTag(ctx context.Context, actorRef resources.
 	if got := actor.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "Actor %s must be %s to be tagged (got: %v)", actorRef, ateapipb.ActorState_ACTOR_STATE_SUSPENDED, got)
 	}
-	snapshotURI := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
-	if snapshotURI == "" {
+	durableSnap := actor.GetStatus().GetDurableSnapshotStatus()
+	if !hasDurableSnapshot(durableSnap) {
 		return nil, nil, status.Errorf(codes.FailedPrecondition, "Actor %s holds no external snapshot to tag", actorRef)
 	}
 	// Every way an Actor comes to hold an external snapshot records the
@@ -230,7 +231,7 @@ func (w *ActorWorkflow) loadActorForTag(ctx context.Context, actorRef resources.
 	// ensureSuspendedFinalized, a create from a tag through the tag's own UID.
 	// A snapshot without one is a broken row, and tagging it would mint a tag
 	// that names no template.
-	if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid() == "" {
+	if snapshotActorTemplateUID(durableSnap) == "" {
 		return nil, nil, status.Errorf(codes.Internal, "Actor %s holds an external snapshot but records no template it was built under", actorRef)
 	}
 	actorTemplate, err := resolveActorTemplate(ctx, w.store, actor)
@@ -238,6 +239,13 @@ func (w *ActorWorkflow) loadActorForTag(ctx context.Context, actorRef resources.
 		return nil, nil, err
 	}
 	return actor, actorTemplate, nil
+}
+
+func snapshotActorTemplateUID(snap *ateapipb.Snapshot) string {
+	if uid := snap.GetObject().GetActorTemplateUid(); uid != "" {
+		return uid
+	}
+	return snap.GetBlock().GetActorTemplateUid()
 }
 
 // ensureTagReserved takes the tag's name in TAG_STATE_CREATING and records the
@@ -262,7 +270,6 @@ func (w *ActorWorkflow) ensureTagReserved(ctx context.Context, tagRef resources.
 	if err != nil {
 		return nil, err
 	}
-	snapshot := actor.GetStatus().GetDurableSnapshotStatus().GetObject()
 	tagToCreate.Status = &ateapipb.TagStatus{
 		State: ateapipb.TagState_TAG_STATE_CREATING,
 		// The tag records the template the snapshot's guest state was built under, not
@@ -270,7 +277,7 @@ func (w *ActorWorkflow) ensureTagReserved(ctx context.Context, tagRef resources.
 		// and a tag that claimed the new template would hand clones the old template's
 		// memory under the new one's identity, past the data-only downgrade a resume of
 		// the actor itself would take.
-		ActorTemplateUid: snapshot.GetActorTemplateUid(),
+		ActorTemplateUid: snapshotActorTemplateUID(actor.GetStatus().GetDurableSnapshotStatus()),
 		Snapshot:         reservedSnap,
 	}
 
@@ -305,6 +312,9 @@ func (w *ActorWorkflow) ensureTagFinalized(ctx context.Context, tag *ateapipb.Ta
 
 	tagRef := resources.TagRefFromTag(tag)
 	stored, err := w.store.UpdateTag(ctx, tagRef, store.PreconditionFrom(tag), func(toUpdate *ateapipb.Tag) error {
+		if tag.GetStatus().GetSnapshot() != nil {
+			toUpdate.Status.Snapshot = proto.CloneOf(tag.GetStatus().GetSnapshot())
+		}
 		toUpdate.Status.State = ateapipb.TagState_TAG_STATE_READY
 		return nil
 	})

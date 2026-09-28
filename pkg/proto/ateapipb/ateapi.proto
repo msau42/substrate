@@ -208,8 +208,40 @@ message LocalSnapshot {
   SnapshotContentScope content_scope = 2;
 }
 
+// BlockSnapshot describes a snapshot backed by block storage.
+message BlockSnapshot {
+  // external_volume is the backing block volume for all of Actor's snapshot.
+  // It persists for the lifetime of the Actor.
+  // In the context of a Tag, this is the source volume to take a snapshot from.
+  //
+  // +k8s:optional
+  ExternalVolume external_volume = 1;
+
+  // volume_snapshot_id is the identifier for a Tag snapshot.
+  // It persists for the lifetime of the Tag.
+  // It is unset when this snapshot is not associated with a Tag.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=256
+  string volume_snapshot_id = 2;
+
+  // content_scope is what the snapshot captured.
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
+  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  SnapshotContentScope content_scope = 3;
+
+  // UID of the ActorTemplate whose sandbox this snapshot's guest state was
+  // captured from.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-uuid
+  string actor_template_uid = 4;
+}
+
 // Snapshot describes a snapshot of an Actor.
-// Exactly one of local, object, or external_volume must be set.
+// Exactly one of local, object, or block must be set.
 // +k8s:customValidation # survivability must match the snapshot storage type
 message Snapshot {
   // Unique identifier for this snapshot incarnation.
@@ -237,11 +269,11 @@ message Snapshot {
   // +k8s:maximum=3 # keep this in sync with the SurvivabilityRung enum
   SurvivabilityRung survivability = 4;
 
-  // The backing external block volume information for the snapshot.
+  // The backing block storage information for the snapshot.
   //
   // +k8s:optional
   // +k8s:unionMember
-  ExternalVolume external_volume = 5;
+  BlockSnapshot block = 5;
 }
 
 enum SnapshotContentScope {

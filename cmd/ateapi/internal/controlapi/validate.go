@@ -149,11 +149,11 @@ func ValidateCustom_Snapshot(_ context.Context, _ operation.Operation, fldPath *
 	if value.GetObject() != nil {
 		setCount++
 	}
-	if value.GetExternalVolume() != nil {
+	if value.GetBlock() != nil {
 		setCount++
 	}
 	if setCount > 1 {
-		// Covered by +k8s:unionMember on local, object, and external_volume.
+		// Covered by +k8s:unionMember on local, object, and block.
 		return nil
 	}
 	s := value.GetSurvivability()

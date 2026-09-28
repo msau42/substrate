@@ -146,7 +146,7 @@ func (s *ServiceImpl) resolveTagForNewActor(ctx context.Context, actor *ateapipb
 	if err != nil {
 		return nil, err
 	}
-	if actor.GetSourceTag() == nil {
+	if actor.GetSourceTag() == nil && sourceTag.GetStatus().GetSnapshot().GetBlock() == nil {
 		if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot().GetObject()); err != nil {
 			return nil, err
 		}
@@ -174,7 +174,7 @@ func (s *ServiceImpl) resolveTagSource(ctx context.Context, actorAtespace string
 	default:
 		return nil, status.Error(codes.FailedPrecondition, "source Tag has an invalid scope")
 	}
-	if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() == "" {
+	if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || !hasDurableSnapshot(tag.GetStatus().GetSnapshot()) {
 		return nil, status.Error(codes.FailedPrecondition, "source Tag is still being created or failed creation")
 	}
 	// TODO: Permit compatible DATA snapshots when runtimes can extract portable data.

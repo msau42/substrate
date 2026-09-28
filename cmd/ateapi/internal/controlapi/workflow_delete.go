@@ -194,6 +194,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 		ActorTemplateAtespace: actor.GetActorTemplate().GetAtespace(),
 		ActorTemplateName:     actor.GetActorTemplate().GetName(),
 		Spec:                  workloadSpec,
+		Snapshot:              activeActorSnapshot(actor),
 	}
 
 	if _, err := client.Terminate(ctx, req); err != nil {
@@ -215,7 +216,7 @@ func (w *ActorWorkflow) ensureVolumesDetachedForDelete(ctx context.Context, acto
 	return detachActorVolumes(ctx, w.store, w.pluginRegistry, actor, actorTemplate, "delete")
 }
 
-// ensureWorkerReleased releases the worker assigned to the actor.
+// ensureWorkerReleased releases the actor's worker.
 // releaseAssignmentWithoutBacklink releases an assignment the Actor does not
 // reference, found by Actor UID. Absent is the ordinary case and not an error:
 // most Actors reaching here really were released already.
@@ -272,7 +273,7 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetLatestSnapshotStatus(), assignment.GetNodeName()); err != nil {
+		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, activeActorSnapshot(latestActor), assignment.GetNodeName()); err != nil {
 			return nil, err
 		}
 		_, _, err := releaseWorker(ctx, w.store, latestActor)

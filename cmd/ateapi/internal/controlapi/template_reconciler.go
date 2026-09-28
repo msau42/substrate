@@ -224,7 +224,7 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 			if tag.GetStatus().GetActorTemplateUid() != tmpl.GetMetadata().GetUid() || resources.ActorRefFromObjectRef(tag.GetSourceActor()) != resources.ActorRefFromObjectRef(goldenActorRef) {
 				return 0, r.fail(ctx, tmpl, reasonGoldenTagConflict, "golden tag belongs to another actor or template")
 			}
-			if tag.GetStatus().GetState() == ateapipb.TagState_TAG_STATE_READY && tag.GetStatus().GetSnapshot().GetObject().GetSnapshotUri() != "" {
+			if tag.GetStatus().GetState() == ateapipb.TagState_TAG_STATE_READY && hasDurableSnapshot(tag.GetStatus().GetSnapshot()) {
 				return 0, r.saveGoldenTag(ctx, tmpl, goldenActorRef)
 			}
 			// CreateTag cannot resume an incomplete copy. Delete it before retrying.
@@ -284,7 +284,7 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 			ateapipb.ActorState_ACTOR_STATE_SUSPENDED:
 			// The golden actor was never resumed, or a previous resume didn't
 			// finish; ResumeActor is reentrant from both.
-			if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() != "" {
+			if hasDurableSnapshot(actor.GetStatus().GetDurableSnapshotStatus()) {
 				// Golden actors never start from a source snapshot, so an
 				// existing snapshot means an earlier suspend completed
 				// without being recorded.
@@ -311,6 +311,17 @@ func (r *ActorTemplateReconciler) reconcileOne(ctx context.Context, ref resource
 	}
 }
 
+func hasDurableSnapshot(snap *ateapipb.Snapshot) bool {
+	if snap.GetObject().GetSnapshotUri() != "" {
+		return true
+	}
+	blockSnap := snap.GetBlock()
+	if blockSnap == nil || snap.GetSnapshotId() == "" {
+		return false
+	}
+	return blockSnap.GetVolumeSnapshotId() != "" || blockSnap.GetExternalVolume().GetStorageVolumeId() != ""
+}
+
 // suspendActor waits for the golden actor to produce an external snapshot.
 // SuspendActor completes an in-flight suspend and is a no-op if already suspended.
 func (r *ActorTemplateReconciler) suspendActor(ctx context.Context, goldenRef *ateapipb.ObjectRef) error {
@@ -319,8 +330,7 @@ func (r *ActorTemplateReconciler) suspendActor(ctx context.Context, goldenRef *a
 		// A crash during suspend is observed as CRASHED on the retry.
 		return fmt.Errorf("while suspending golden actor: %w", err)
 	}
-	suspended := resp.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject()
-	if suspended.GetSnapshotUri() == "" {
+	if !hasDurableSnapshot(resp.GetActor().GetStatus().GetDurableSnapshotStatus()) {
 		return fmt.Errorf("suspending golden actor produced no external snapshot")
 	}
 	return nil

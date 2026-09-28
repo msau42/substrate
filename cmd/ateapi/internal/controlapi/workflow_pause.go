@@ -131,7 +131,7 @@ func (w *ActorWorkflow) ensureMarkedPausing(ctx context.Context, actorRef resour
 		return nil, status.Errorf(codes.FailedPrecondition, "actors in atespace %q are golden actors, which cannot be paused", actorRef.Atespace)
 	}
 
-	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, nil, "", ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT)
+	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, nil, resources.NewSnapshotName(), ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +198,9 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 		},
 		Scope:    actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause()),
 		ActorUid: actor.GetMetadata().Uid,
+	}
+	if inProgress := actor.GetStatus().GetInProgressSnapshotStatus(); inProgress.GetBlock() != nil {
+		req.Snapshot = inProgress
 	}
 	wireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 

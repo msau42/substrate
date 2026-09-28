@@ -16,6 +16,7 @@ package controlapi
 
 import (
 	"context"
+	"os"
 	"sync"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -25,6 +26,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/snapshot"
+	"github.com/agent-substrate/substrate/internal/snapshot/block"
 	"github.com/agent-substrate/substrate/internal/snapshot/object"
 	"github.com/agent-substrate/substrate/internal/volume"
 	"github.com/agent-substrate/substrate/internal/volume/csi"
@@ -90,7 +92,6 @@ func NewRPCService(
 	actorIDCAPool localca.Pool,
 ) *RPCService {
 	impl := newServiceImpl(persistence, storageClassLister)
-	impl.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(objectStore, object.WithTagResolver(impl.resolveTagForNewActor))
 	s := &RPCService{
 		impl:                   impl,
 		persistence:            persistence,
@@ -101,12 +102,32 @@ func NewRPCService(
 		instruments:            instruments,
 		volumePlugins:          volumePlugins,
 		objectStore:            objectStore,
-		snapshotPlugin:         impl.snapshotPlugin,
 		actorIdentityJWTIssuer: actorIdentityJWTIssuer,
 		actorIDJWTPool:         actorIDJWTPool,
 		actorIDCAPool:          actorIDCAPool,
 	}
+	if os.Getenv("ATE_SNAPSHOT_PLUGIN") == "block" {
+		driverName := os.Getenv("ATE_SNAPSHOT_CSI_DRIVER")
+		if driverName == "" {
+			driverName = "hostpath.csi.k8s.io"
+		}
+		impl.snapshotPlugin = block.NewBlockSnapshotPluginControlPlane(
+			nil,
+			block.WithVolumePluginRegistry(s),
+			block.WithStorageClassLister(storageClassLister),
+			block.WithTagResolver(impl.resolveTagForNewActor),
+			block.WithDefaultVolumeClass(block.VolumeClassSpec{
+				VolumeName: block.DefaultSnapshotVolumeName,
+				DriverName: driverName,
+				Capacity:   block.DefaultSnapshotCapacity,
+			}),
+		)
+	} else {
+		impl.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(objectStore, object.WithTagResolver(impl.resolveTagForNewActor))
+	}
+	s.snapshotPlugin = impl.snapshotPlugin
 	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, objectStore)
+	s.actorWorkflow.snapshotPlugin = impl.snapshotPlugin
 	s.workerWorkflow = NewWorkerWorkflow(impl)
 	return s
 }

@@ -40,6 +40,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/proto/ateompb"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/serverboot"
+	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 	"github.com/google/go-cmp/cmp"
 	"github.com/klauspost/compress/zstd"
 	"github.com/spf13/pflag"
@@ -1487,6 +1488,18 @@ func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
 		}, false},
 		{"invalid snapshot name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.LocalSnapshotName = "../escape" }, true},
 		{"invalid snapshot uri", func(r *ateletpb.UploadPausedCheckpointRequest) { r.DestinationSnapshotUri = "not-a-uri" }, true},
+		{"valid block snapshot without destination uri", func(r *ateletpb.UploadPausedCheckpointRequest) {
+			r.DestinationSnapshotUri = ""
+			r.Snapshot = &ateapipb.Snapshot{
+				SnapshotId: "snap-block-1",
+				Block: &ateapipb.BlockSnapshot{
+					ExternalVolume: &ateapipb.ExternalVolume{
+						VolumeName:      "snapshot",
+						StorageVolumeId: "vol-1",
+					},
+				},
+			}
+		}, false},
 		{"unspecified scope", func(r *ateletpb.UploadPausedCheckpointRequest) {
 			r.DesiredScope = ateletpb.SnapshotScope_SNAPSHOT_SCOPE_UNSPECIFIED
 		}, true},

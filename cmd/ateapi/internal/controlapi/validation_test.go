@@ -1426,14 +1426,19 @@ func TestValidateSnapshot(t *testing.T) {
 			obj:  validObject(),
 		},
 		{
-			name: "valid external_volume snapshot (DURABLE)",
+			name: "valid block snapshot (DURABLE)",
 			obj: &ateapipb.Snapshot{
 				SnapshotId: "snap-1",
-				ExternalVolume: &ateapipb.ExternalVolume{
-					VolumeName:      "snapshot",
-					StorageVolumeId: "vol-1",
-					VolumeType:      "pd.csi.storage.gke.io",
-					Status:          ateapipb.ExternalVolume_STATUS_CREATED,
+				Block: &ateapipb.BlockSnapshot{
+					VolumeSnapshotId: "vol-snap-1",
+					ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					ActorTemplateUid: someActorUID,
+					ExternalVolume: &ateapipb.ExternalVolume{
+						VolumeName:      "snapshot",
+						StorageVolumeId: "vol-1",
+						VolumeType:      "pd.csi.storage.gke.io",
+						Status:          ateapipb.ExternalVolume_STATUS_CREATED,
+					},
 				},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
 			},
@@ -1508,6 +1513,17 @@ func TestValidateSnapshot(t *testing.T) {
 				s.Object.SnapshotUri = ""
 			}),
 			want: field.ErrorList{field.Required(field.NewPath("object", "snapshot_uri"), "")},
+		},
+		{
+			name: "invalid nested block snapshot",
+			obj: &ateapipb.Snapshot{
+				SnapshotId: "snap-1",
+				Block: &ateapipb.BlockSnapshot{
+					ActorTemplateUid: "not-a-uuid",
+				},
+				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			},
+			want: field.ErrorList{field.Invalid(field.NewPath("block", "actor_template_uid"), nil, "").WithOrigin("format=k8s-uuid")},
 		},
 	}
 	for _, tt := range tests {
