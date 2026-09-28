@@ -137,10 +137,10 @@ func runUpdateTemplateTestCase(t *testing.T, onCommit ateapipb.SnapshotContentSc
 	if err != nil {
 		t.Fatalf("failed to get suspended Actor: %v", err)
 	}
-	if got, want := suspended.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid(), createdA.GetMetadata().GetUid(); got != want {
-		t.Errorf("suspended Actor durable_snapshot_status.object.actor_template_uid = %q, want template A's %q", got, want)
+	if got, want := durableSnapshotTemplateUID(suspended.GetStatus().GetDurableSnapshotStatus()), createdA.GetMetadata().GetUid(); got != want {
+		t.Errorf("suspended Actor durable_snapshot_status actor_template_uid = %q, want template A's %q", got, want)
 	}
-	if suspended.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() == "" {
+	if durableSnapshotID(suspended.GetStatus().GetDurableSnapshotStatus()) == "" {
 		t.Error("suspended Actor has no external snapshot")
 	}
 	if wa := suspended.GetStatus().GetWorkerAssignment(); wa != nil {
@@ -206,8 +206,8 @@ func runUpdateTemplateTestCase(t *testing.T, onCommit ateapipb.SnapshotContentSc
 	if err != nil {
 		t.Fatalf("failed to get paused Actor: %v", err)
 	}
-	if got, want := paused.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid(), createdA.GetMetadata().GetUid(); got != want {
-		t.Errorf("paused Actor durable_snapshot_status.object.actor_template_uid = %q, want template A's %q", got, want)
+	if got, want := durableSnapshotTemplateUID(paused.GetStatus().GetDurableSnapshotStatus()), createdA.GetMetadata().GetUid(); got != want {
+		t.Errorf("paused Actor durable_snapshot_status actor_template_uid = %q, want template A's %q", got, want)
 	}
 
 	t.Logf("Resuming Actor %q from pause under template B...", actorID)
@@ -255,8 +255,8 @@ func runUpdateTemplateTestCase(t *testing.T, onCommit ateapipb.SnapshotContentSc
 	if got := reverted.GetActor().GetActorTemplate().GetName(); got != nameB {
 		t.Errorf("reverted Actor actor_template = %q, want %q", got, nameB)
 	}
-	if got, want := revertedStatus.GetDurableSnapshotStatus().GetObject().GetActorTemplateUid(), createdA.GetMetadata().GetUid(); got != want {
-		t.Errorf("reverted Actor durable_snapshot_status.object.actor_template_uid = %q, want template A's %q", got, want)
+	if got, want := durableSnapshotTemplateUID(revertedStatus.GetDurableSnapshotStatus()), createdA.GetMetadata().GetUid(); got != want {
+		t.Errorf("reverted Actor durable_snapshot_status actor_template_uid = %q, want template A's %q", got, want)
 	}
 
 	t.Logf("Resuming Actor %q after the revert...", actorID)
@@ -297,8 +297,8 @@ func runUpdateTemplateTestCase(t *testing.T, onCommit ateapipb.SnapshotContentSc
 	if err != nil {
 		t.Fatalf("failed to get re-suspended Actor: %v", err)
 	}
-	if got, want := suspended.GetStatus().GetDurableSnapshotStatus().GetObject().GetActorTemplateUid(), createdB.GetMetadata().GetUid(); got != want {
-		t.Errorf("re-suspended Actor durable_snapshot_status.object.actor_template_uid = %q, want template B's %q", got, want)
+	if got, want := durableSnapshotTemplateUID(suspended.GetStatus().GetDurableSnapshotStatus()), createdB.GetMetadata().GetUid(); got != want {
+		t.Errorf("re-suspended Actor durable_snapshot_status actor_template_uid = %q, want template B's %q", got, want)
 	}
 }
 

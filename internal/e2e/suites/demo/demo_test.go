@@ -138,8 +138,9 @@ func TestActorSnapshotLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to suspend source Actor: %v", err)
 	}
-	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
-	if snapshotURI == "" {
+	suspendedSnap := suspended.GetActor().GetStatus().GetDurableSnapshotStatus()
+	snapshotID := durableSnapshotID(suspendedSnap)
+	if snapshotID == "" {
 		t.Fatal("suspended Actor has no external snapshot")
 	}
 	// The tag is given its own copy of the snapshot the suspend just wrote, so
@@ -157,15 +158,18 @@ func TestActorSnapshotLifecycle(t *testing.T) {
 	if got, want := tagToUpdate.GetStatus().GetState(), ateapipb.TagState_TAG_STATE_READY; got != want {
 		t.Fatalf("Tag %s state = %v, want %v", tagRef.GetName(), got, want)
 	}
-	if got := tagToUpdate.GetStatus().GetSnapshot().GetObject().GetSnapshotUri(); got == "" || got == snapshotURI {
-		t.Fatalf("Tag %s snapshot uri = %q, want a copy of its own", tagRef.GetName(), got)
+	tagSnap := tagToUpdate.GetStatus().GetSnapshot()
+	if got := durableSnapshotID(tagSnap); got == "" || got == snapshotID {
+		t.Fatalf("Tag %s snapshot = %q, want a copy of its own", tagRef.GetName(), got)
 	}
-	wantTagURI, err := resources.NewTagSnapshotURI(at.GetSnapshotConfig().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
-	if err != nil {
-		t.Fatalf("NewTagSnapshotURI: %v", err)
-	}
-	if got := tagToUpdate.GetStatus().GetSnapshot().GetObject().GetSnapshotUri(); got != wantTagURI.String() {
-		t.Errorf("tag snapshot URI = %q, want UID-based URI %q", got, wantTagURI)
+	if uri := tagSnap.GetObject().GetSnapshotUri(); uri != "" {
+		wantTagURI, err := resources.NewTagSnapshotURI(at.GetSnapshotConfig().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
+		if err != nil {
+			t.Fatalf("NewTagSnapshotURI: %v", err)
+		}
+		if uri != wantTagURI.String() {
+			t.Errorf("tag snapshot URI = %q, want UID-based URI %q", uri, wantTagURI)
+		}
 	}
 	listed, err := clients.SubstrateAPI.ListTags(ctx, &ateapipb.ListTagsRequest{Atespace: demoAtespace})
 	if err != nil {
@@ -762,6 +766,40 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 	}
 }
 
+// durableSnapshotID returns a backend-neutral identifier for an external
+// snapshot (object URI for object snapshots, or volume/snapshot ID + checkpoint
+// ID for block snapshots).
+func durableSnapshotID(snap *ateapipb.Snapshot) string {
+	if uri := snap.GetObject().GetSnapshotUri(); uri != "" {
+		return uri
+	}
+	if blockSnap := snap.GetBlock(); blockSnap != nil && snap.GetSnapshotId() != "" {
+		if volSnapID := blockSnap.GetVolumeSnapshotId(); volSnapID != "" {
+			return volSnapID + "/" + snap.GetSnapshotId()
+		}
+		if srcVolID := blockSnap.GetSourceVolumeId(); srcVolID != "" {
+			return srcVolID + "/" + snap.GetSnapshotId()
+		}
+		return snap.GetSnapshotId()
+	}
+	return ""
+}
+
+// durableSnapshotTemplateUID returns the ActorTemplate UID recorded on an
+// external snapshot for either the object or block backend.
+func durableSnapshotTemplateUID(snap *ateapipb.Snapshot) string {
+	if uid := snap.GetObject().GetActorTemplateUid(); uid != "" {
+		return uid
+	}
+	return snap.GetBlock().GetActorTemplateUid()
+}
+
+// durableSnapshotContentScope returns the content scope recorded on an external
+// snapshot for either the object or block backend.
+func durableSnapshotContentScope(snap *ateapipb.Snapshot) ateapipb.SnapshotContentScope {
+	return snap.GetContentScope()
+}
+
 // validateSnapshotContentScope asserts the content scope recorded on the
 // suspended actor's external snapshot.
 func validateSnapshotContentScope(ctx context.Context, t *testing.T, clients *e2e.Clients, actorID string, want ateapipb.SnapshotContentScope) {
@@ -772,11 +810,13 @@ func validateSnapshotContentScope(ctx context.Context, t *testing.T, clients *e2
 	if err != nil {
 		t.Fatalf("failed to get suspended Actor: %v", err)
 	}
-	if actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri() == "" {
+	snap := actor.GetStatus().GetDurableSnapshotStatus()
+	snapID := durableSnapshotID(snap)
+	if snapID == "" {
 		t.Fatal("suspended Actor has no external snapshot")
 	}
-	if got := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(); got != want {
-		t.Errorf("snapshot %q content scope = %v, want %v", actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(), got, want)
+	if got := durableSnapshotContentScope(snap); got != want {
+		t.Errorf("snapshot %q content scope = %v, want %v", snapID, got, want)
 	}
 }
 
@@ -1044,8 +1084,8 @@ func revertActor(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj 
 	if err != nil {
 		t.Fatalf("failed to suspend Actor: %v", err)
 	}
-	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
-	if snapshotURI == "" {
+	snapshotID := durableSnapshotID(suspended.GetActor().GetStatus().GetDurableSnapshotStatus())
+	if snapshotID == "" {
 		t.Fatal("suspend wrote no external snapshot")
 	}
 
@@ -1069,8 +1109,8 @@ func revertActor(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj 
 	if got := reverted.GetActor().GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Fatalf("state after revert = %v, want SUSPENDED", got)
 	}
-	if got := reverted.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != snapshotURI {
-		t.Fatalf("snapshot URI after revert = %q, want %q", got, snapshotURI)
+	if got := durableSnapshotID(reverted.GetActor().GetStatus().GetDurableSnapshotStatus()); got != snapshotID {
+		t.Fatalf("snapshot after revert = %q, want %q", got, snapshotID)
 	}
 	if reverted.GetActor().GetStatus().GetWorkerAssignment() != nil {
 		t.Fatal("worker assignment survived revert")
@@ -1107,8 +1147,8 @@ func revertActor(ctx context.Context, t *testing.T, clients *e2e.Clients, nsObj 
 	if reverted.GetActor().GetStatus().GetLatestSnapshotStatus().GetLocal() != nil {
 		t.Fatal("local snapshot pointer survived revert from PAUSED")
 	}
-	if got := reverted.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != snapshotURI {
-		t.Fatalf("snapshot URI after revert from PAUSED = %q, want %q", got, snapshotURI)
+	if got := durableSnapshotID(reverted.GetActor().GetStatus().GetDurableSnapshotStatus()); got != snapshotID {
+		t.Fatalf("snapshot after revert from PAUSED = %q, want %q", got, snapshotID)
 	}
 
 	// SUSPENDED is rejected with FailedPrecondition rather than no-oping.
@@ -1677,8 +1717,8 @@ func TestRevertCrashedActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to suspend Actor: %v", err)
 	}
-	snapshotURI := suspended.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri()
-	if snapshotURI == "" {
+	snapshotID := durableSnapshotID(suspended.GetActor().GetStatus().GetDurableSnapshotStatus())
+	if snapshotID == "" {
 		t.Fatal("suspend wrote no external snapshot")
 	}
 
@@ -1718,8 +1758,8 @@ func TestRevertCrashedActor(t *testing.T) {
 	if got := reverted.GetActor().GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 		t.Fatalf("state after revert = %v, want SUSPENDED", got)
 	}
-	if got := reverted.GetActor().GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(); got != snapshotURI {
-		t.Fatalf("snapshot URI after revert = %q, want %q", got, snapshotURI)
+	if got := durableSnapshotID(reverted.GetActor().GetStatus().GetDurableSnapshotStatus()); got != snapshotID {
+		t.Fatalf("snapshot after revert = %q, want %q", got, snapshotID)
 	}
 	if reverted.GetActor().GetStatus().GetWorkerAssignment() != nil {
 		t.Fatal("worker assignment survived revert")
