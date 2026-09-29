@@ -33,7 +33,8 @@ containers:
 snapshotConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://${BUCKET_NAME}/benchmark-workloads/kernelmem/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/benchmark-workloads/kernelmem/
 sandboxConfig:
   sandboxClass: ${SANDBOX_CLASS_ENUM}
   configName: ${SANDBOX_CONFIG_NAME}

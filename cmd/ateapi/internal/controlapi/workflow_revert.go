@@ -192,7 +192,7 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 			if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
 				return err
 			}
-			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, actor, assignment.GetNodeName()); err != nil {
+			if err := w.getSnapshotPluginForActor(actor, actorTemplate).UnassignFromNode(ctx, actor, assignment.GetNodeName()); err != nil {
 				return err
 			}
 			if _, _, err := releaseWorker(ctx, w.store, actor); err != nil {
@@ -210,7 +210,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 	ctx, done := stepSpan(ctx, "DiscardInProgressSnapshot")
 	defer func() { err = done(err) }()
 
-	return w.getSnapshotPlugin().DeleteSnapshot(ctx, actor, actor.GetStatus().GetInProgressSnapshotStatus())
+	return w.getSnapshotPluginForActor(actor, nil).DeleteSnapshot(ctx, actor, actor.GetStatus().GetInProgressSnapshotStatus())
 }
 
 // ensureRevertedFinalized commits SUSPENDED and drops every pointer to the

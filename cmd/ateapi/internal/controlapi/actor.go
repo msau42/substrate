@@ -97,7 +97,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 			}
 		}
 	}
-	snapshotStorage, initialSnapshot, err := s.getSnapshotPlugin().PrepareNewActor(ctx, inActor, template)
+	snapshotStorage, initialSnapshot, err := s.getSnapshotPlugin(template).PrepareNewActor(ctx, inActor, template)
 	if err != nil {
 		return nil, err
 	}

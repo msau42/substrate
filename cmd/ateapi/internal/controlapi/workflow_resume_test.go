@@ -1738,9 +1738,9 @@ func TestResumeActor_AteletWireRequest(t *testing.T) {
 			tmpl := &ateapipb.ActorTemplate{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
 				SnapshotConfig: &ateapipb.SnapshotConfig{
-					StorageLocation: testStorageLocation,
-					OnPause:         tt.tmpl.onPause,
-					OnResume:        &ateapipb.OnResumeConfig{FromData: tt.tmpl.fromData},
+					Object:   &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation},
+					OnPause:  tt.tmpl.onPause,
+					OnResume: &ateapipb.OnResumeConfig{FromData: tt.tmpl.fromData},
 				},
 				SandboxConfig: &ateapipb.SandboxConfig{
 					SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,

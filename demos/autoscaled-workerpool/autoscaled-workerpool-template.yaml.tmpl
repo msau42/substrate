@@ -38,7 +38,8 @@ containers:
 snapshotConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_DATA
-  storageLocation: gs://${BUCKET_NAME}/ate-demo-autoscaled-workerpool/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-demo-autoscaled-workerpool/
 sandboxConfig:
   sandboxClass: SANDBOX_CLASS_GVISOR
   configName: gvisor-default

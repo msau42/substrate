@@ -48,4 +48,5 @@ containers:
 ${TEMPLATE_RESOURCES}
 ${TEMPLATE_SANDBOX_CONFIG}
 snapshotConfig:
-  storageLocation: gs://${BUCKET_NAME}/ate-e2e-grpcecho${FIXTURE_SUFFIX}/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-e2e-grpcecho${FIXTURE_SUFFIX}/

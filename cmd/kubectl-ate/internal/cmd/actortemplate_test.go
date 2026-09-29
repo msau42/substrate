@@ -59,7 +59,8 @@ resources:
 snapshotConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://ate-snapshots/ate-demo-counter/
+  object:
+    storageLocation: gs://ate-snapshots/ate-demo-counter/
 sandboxConfig:
   sandboxClass: SANDBOX_CLASS_GVISOR
   configName: gvisor-default
@@ -91,9 +92,11 @@ func TestActorTemplateFromManifest(t *testing.T) {
 			{Name: "memory", Quantity: "512Mi"},
 		}},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			StorageLocation: "gs://ate-snapshots/ate-demo-counter/",
+			OnPause:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnCommit: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			Object: &ateapipb.ObjectSnapshotStorage{
+				StorageLocation: "gs://ate-snapshots/ate-demo-counter/",
+			},
 		},
 		SandboxConfig: &ateapipb.SandboxConfig{
 			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
@@ -116,7 +119,8 @@ func TestActorTemplateFromManifest_SnakeCase(t *testing.T) {
   name: counter
 snapshot_config:
   on_pause: SNAPSHOT_CONTENT_SCOPE_FULL
-  storage_location: gs://ate-snapshots/ate-demo-counter/
+  object:
+    storage_location: gs://ate-snapshots/ate-demo-counter/
 sandbox_config:
   sandbox_class: SANDBOX_CLASS_MICROVM
   config_name: microvm
@@ -125,8 +129,8 @@ sandbox_config:
 	if err != nil {
 		t.Fatalf("actorTemplateFromManifest: %v", err)
 	}
-	if got.GetSnapshotConfig().GetStorageLocation() != "gs://ate-snapshots/ate-demo-counter/" {
-		t.Errorf("storage_location = %q", got.GetSnapshotConfig().GetStorageLocation())
+	if got.GetSnapshotConfig().GetObject().GetStorageLocation() != "gs://ate-snapshots/ate-demo-counter/" {
+		t.Errorf("storage_location = %q", got.GetSnapshotConfig().GetObject().GetStorageLocation())
 	}
 	if got.GetSandboxConfig().GetSandboxClass() != ateapipb.SandboxClass_SANDBOX_CLASS_MICROVM {
 		t.Errorf("sandbox_class = %v", got.GetSandboxConfig().GetSandboxClass())
@@ -204,7 +208,7 @@ func TestActorTemplateFromManifest_DemoManifests(t *testing.T) {
 			if got.GetSandboxConfig().GetSandboxClass() != test.class {
 				t.Errorf("sandbox class = %v, want %v", got.GetSandboxConfig().GetSandboxClass(), test.class)
 			}
-			if len(got.GetContainers()) == 0 || got.GetSnapshotConfig().GetStorageLocation() == "" {
+			if len(got.GetContainers()) == 0 || got.GetSnapshotConfig().GetObject().GetStorageLocation() == "" {
 				t.Errorf("missing required fields: %v", got)
 			}
 		})

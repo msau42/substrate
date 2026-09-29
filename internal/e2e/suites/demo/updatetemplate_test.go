@@ -314,9 +314,11 @@ func createUpdateTestTemplate(ctx context.Context, t *testing.T, clients *e2e.Cl
 		PoolReplicas: 2,
 		Labels:       map[string]string{"demo": nsObj.Name},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: "gs://" + bucket + "/ate-demo-" + name,
-			OnPause:         onCommit,
-			OnCommit:        onCommit,
+			Object: &ateapipb.ObjectSnapshotStorage{
+				StorageLocation: "gs://" + bucket + "/ate-demo-" + name,
+			},
+			OnPause:  onCommit,
+			OnCommit: onCommit,
 		},
 		Modify: modify,
 	})

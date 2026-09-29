@@ -37,7 +37,7 @@ func TestEnsureMarkedSuspending_SnapshotURI(t *testing.T) {
 		Status:   &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_RUNNING},
 	})
 	tmpl := &ateapipb.ActorTemplate{
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://bucket/root/"},
+		SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://bucket/root/"}},
 	}
 	w := &ActorWorkflow{store: persistence}
 	marked, err := w.ensureMarkedSuspending(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, actor, tmpl)
@@ -166,7 +166,7 @@ func TestEnsureMarkedSuspending_StateMatrix(t *testing.T) {
 		})
 
 		tmpl := &ateapipb.ActorTemplate{
-			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://snapshots"},
+			SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://snapshots"}},
 		}
 		marked, err := w.ensureMarkedSuspending(ctx, actorRef, actor, tmpl)
 		assertPrerequisiteResult(t, seedState, err, allowed[seedState])
@@ -315,7 +315,7 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	w := &ActorWorkflow{store: persistence}
 	tmpl := &ateapipb.ActorTemplate{
 		Metadata:       &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "tmpl", Uid: "tmpl-uid-1"},
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+		SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation}},
 	}
 	stored, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, tmpl)
 	if err != nil {
@@ -553,7 +553,7 @@ func TestEnsureSuspendedFinalized_ReleasesOnlyOwnWorker(t *testing.T) {
 			})
 
 			w := &ActorWorkflow{store: persistence}
-			tmpl := &ateapipb.ActorTemplate{SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://bucket/root"}}
+			tmpl := &ateapipb.ActorTemplate{SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://bucket/root"}}}
 			if _, err := w.ensureSuspendedFinalized(ctx, resources.ActorRef{Atespace: "team-a", Name: "shared"}, tmpl); err != nil {
 				t.Fatalf("ensureSuspendedFinalized: %v", err)
 			}
@@ -629,7 +629,7 @@ func TestIsPausedOriginSuspend(t *testing.T) {
 func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 	tmpl := func(onPause, onCommit ateapipb.SnapshotContentScope) *ateapipb.ActorTemplate {
 		return &ateapipb.ActorTemplate{
-			SnapshotConfig: &ateapipb.SnapshotConfig{OnPause: onPause, OnCommit: onCommit, StorageLocation: "gs://snapshots"},
+			SnapshotConfig: &ateapipb.SnapshotConfig{OnPause: onPause, OnCommit: onCommit, Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://snapshots"}},
 		}
 	}
 	fullScope := ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
@@ -734,7 +734,7 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 			},
 		})
 
-		tmpl := &ateapipb.ActorTemplate{SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://snapshots"}}
+		tmpl := &ateapipb.ActorTemplate{SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://snapshots"}}}
 		_, err := w.ensurePausedSnapshotUploaded(ctx, resources.ActorRef{Atespace: "team-a", Name: "actor-1"}, created, tmpl)
 		if !errors.Is(err, ErrNoAteletOnNode) {
 			t.Fatalf("ensurePausedSnapshotUploaded = %v, want ErrNoAteletOnNode", err)

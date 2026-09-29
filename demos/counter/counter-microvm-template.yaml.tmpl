@@ -68,7 +68,8 @@ snapshotConfig:
   # ever written here, so no onResume block is needed.
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://${BUCKET_NAME}/ate-demo-counter-microvm/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-demo-counter-microvm/
 sandboxConfig:
   sandboxClass: SANDBOX_CLASS_MICROVM
   configName: microvm

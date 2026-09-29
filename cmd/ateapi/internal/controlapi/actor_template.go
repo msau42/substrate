@@ -295,6 +295,10 @@ func ValidateCustom_ExternalVolumeTemplate_Capacity(_ context.Context, _ operati
 	return nil
 }
 
+func ValidateCustom_BlockSnapshotStorage_Capacity(ctx context.Context, op operation.Operation, fldPath *field.Path, value, oldValue *string) field.ErrorList {
+	return ValidateCustom_ExternalVolumeTemplate_Capacity(ctx, op, fldPath, value, oldValue)
+}
+
 // cpuLimitMax bounds cpu limits: they must be less than 1000 cores.
 var cpuLimitMax = resource.MustParse("1k")
 
@@ -330,10 +334,10 @@ func ValidateCustom_Resources_Limits(_ context.Context, _ operation.Operation, f
 	return errs
 }
 
-// ValidateCustom_SnapshotConfig_StorageLocation ensures an
-// ActorTemplate's snapshotConfig.location is a well-formed
+// ValidateCustom_ObjectSnapshotStorage_StorageLocation ensures an
+// ActorTemplate's snapshotConfig.object.storageLocation is a well-formed
 // URI with a bucket, so a bad location fails fast.
-func ValidateCustom_SnapshotConfig_StorageLocation(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+func ValidateCustom_ObjectSnapshotStorage_StorageLocation(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
 	if err := resources.ValidateSnapshotLocation(*value); err != nil {
 		return field.ErrorList{field.Invalid(fldPath, *value, err.Error())}
 	}

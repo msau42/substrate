@@ -48,7 +48,8 @@ snapshotConfig:
   onCommit: SNAPSHOT_CONTENT_SCOPE_DATA
   onResume:
     fromData: RESUME_SOURCE_COLD_BOOT
-  storageLocation: gs://${BUCKET_NAME}/benchmark-workloads/glutton-durdir-data/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/benchmark-workloads/glutton-durdir-data/
 sandboxConfig:
   sandboxClass: ${SANDBOX_CLASS_ENUM}
   configName: ${SANDBOX_CONFIG_NAME}

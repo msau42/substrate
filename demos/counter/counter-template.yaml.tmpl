@@ -61,7 +61,8 @@ snapshotConfig:
   # memory cold-boots) is exercised by the e2e demo suite's own
   # parameterized templates, not by this one.
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://${BUCKET_NAME}/ate-demo-counter/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-demo-counter/
 sandboxConfig:
   sandboxClass: SANDBOX_CLASS_GVISOR
   configName: gvisor-default

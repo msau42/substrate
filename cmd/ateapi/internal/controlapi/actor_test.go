@@ -985,7 +985,7 @@ func TestUpdateActor_RepointTemplate(t *testing.T) {
 				VolumeMounts: []*ateapipb.VolumeMount{{Name: "data", MountPath: tmpl.mountPath}},
 			}},
 			Volumes:        tmpl.volumes,
-			SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: "gs://my-bucket/snapshots"},
+			SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://my-bucket/snapshots"}},
 			SandboxConfig:  tmpl.sandboxConfig,
 		}); err != nil {
 			t.Fatalf("creating template %s: %v", name, err)
@@ -1632,7 +1632,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 				t.Fatalf("incorrect initial status: %v", created.GetStatus())
 			}
 			if scenario == "own snapshot" {
-				uri, err := resources.NewActorSnapshotURI(tmpl.GetSnapshotConfig().GetStorageLocation(), "team-a", created.GetMetadata().GetUid(), "snapshot")
+				uri, err := resources.NewActorSnapshotURI(tmpl.GetSnapshotConfig().GetObject().GetStorageLocation(), "team-a", created.GetMetadata().GetUid(), "snapshot")
 				if err != nil {
 					t.Fatal(err)
 				}

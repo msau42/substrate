@@ -45,10 +45,10 @@ func validActorTemplate(mutations ...func(*ateapipb.ActorTemplate)) *ateapipb.Ac
 		Metadata:   &ateapipb.ResourceMetadata{Atespace: "ns1", Name: "tmpl-a"},
 		Containers: []*ateapipb.Container{{Name: "main", Image: "example.com/app:v1@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: "gs://my-bucket/snapshots",
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			OnResume:        &ateapipb.OnResumeConfig{FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT},
+			Object:   &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://my-bucket/snapshots"},
+			OnPause:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnCommit: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnResume: &ateapipb.OnResumeConfig{FromData: ateapipb.ResumeSource_RESUME_SOURCE_COLD_BOOT},
 		},
 		SandboxConfig: &ateapipb.SandboxConfig{SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR, ConfigName: "gvisor-default"},
 	}
@@ -152,23 +152,23 @@ func TestValidateCreateActorTemplateRequest(t *testing.T) {
 		})},
 		field.ErrorList{field.Required(field.NewPath("actor_template", "snapshot_config"), "")},
 	}, {
-		"missing snapshot_config.storage_location",
+		"missing snapshot_config.object.storage_location",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SnapshotConfig.StorageLocation = ""
+			tmpl.SnapshotConfig.Object.StorageLocation = ""
 		})},
-		field.ErrorList{field.Required(field.NewPath("actor_template", "snapshot_config", "storage_location"), "")},
+		field.ErrorList{field.Required(field.NewPath("actor_template", "snapshot_config", "object", "storage_location"), "")},
 	}, {
 		"storage_location without a bucket",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SnapshotConfig.StorageLocation = "my-bucket/snapshots"
+			tmpl.SnapshotConfig.Object.StorageLocation = "my-bucket/snapshots"
 		})},
-		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshot_config", "storage_location"), "my-bucket/snapshots", "")},
+		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshot_config", "object", "storage_location"), "my-bucket/snapshots", "")},
 	}, {
 		"storage_location with a query",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SnapshotConfig.StorageLocation = "gs://my-bucket/snapshots?versions=true"
+			tmpl.SnapshotConfig.Object.StorageLocation = "gs://my-bucket/snapshots?versions=true"
 		})},
-		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshot_config", "storage_location"), "gs://my-bucket/snapshots?versions=true", "")},
+		field.ErrorList{field.Invalid(field.NewPath("actor_template", "snapshot_config", "object", "storage_location"), "gs://my-bucket/snapshots?versions=true", "")},
 	}, {
 		"on_commit broader than on_pause",
 		&ateapipb.CreateActorTemplateRequest{ActorTemplate: validActorTemplate(func(tmpl *ateapipb.ActorTemplate) {
@@ -646,15 +646,72 @@ func TestValidateActorTemplate(t *testing.T) {
 		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotConfig = nil },
 		want:   field.ErrorList{field.Required(field.NewPath("snapshot_config"), "")},
 	}, {
+		name:   "snapshot_config with no storage backend",
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotConfig.Object = nil },
+		want:   field.ErrorList{field.Invalid(field.NewPath("snapshot_config"), nil, "one of").WithOrigin("union")},
+	}, {
+		name: "snapshot_config with both object and block storage",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: "10Gi", StorageClassName: "fast-ssd"}
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot_config"), nil, "one of").WithOrigin("union")},
+	}, {
 		name: "storage_location too long",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
-			tmpl.SnapshotConfig.StorageLocation = "gs://" + strings.Repeat("x", 1020)
+			tmpl.SnapshotConfig.Object.StorageLocation = "gs://" + strings.Repeat("x", 1020)
 		},
-		want: field.ErrorList{field.TooLong(field.NewPath("snapshot_config", "storage_location"), nil, 1024).WithOrigin("maxLength")},
+		want: field.ErrorList{field.TooLong(field.NewPath("snapshot_config", "object", "storage_location"), nil, 1024).WithOrigin("maxLength")},
 	}, {
 		name:   "missing storage_location",
-		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotConfig.StorageLocation = "" },
-		want:   field.ErrorList{field.Required(field.NewPath("snapshot_config", "storage_location"), "")},
+		mutate: func(tmpl *ateapipb.ActorTemplate) { tmpl.SnapshotConfig.Object.StorageLocation = "" },
+		want:   field.ErrorList{field.Required(field.NewPath("snapshot_config", "object", "storage_location"), "")},
+	}, {
+		name: "valid block snapshot storage",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: "10Gi", StorageClassName: "fast-ssd"}
+		},
+	}, {
+		name: "block snapshot storage missing capacity",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{StorageClassName: "fast-ssd"}
+		},
+		want: field.ErrorList{field.Required(field.NewPath("snapshot_config", "block", "capacity"), "")},
+	}, {
+		name: "block snapshot storage malformed capacity",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: "ten gigs", StorageClassName: "fast-ssd"}
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot_config", "block", "capacity"), nil, "")},
+	}, {
+		name: "block snapshot storage capacity at the length bound",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: strings.Repeat("1", 30) + "Gi", StorageClassName: "fast-ssd"}
+		},
+	}, {
+		name: "block snapshot storage capacity too long",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: strings.Repeat("1", 31) + "Gi", StorageClassName: "fast-ssd"}
+		},
+		want: field.ErrorList{field.TooLong(field.NewPath("snapshot_config", "block", "capacity"), nil, 32).WithOrigin("maxLength")},
+	}, {
+		name: "block snapshot storage missing storage_class_name",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: "10Gi"}
+		},
+		want: field.ErrorList{field.Required(field.NewPath("snapshot_config", "block", "storage_class_name"), "")},
+	}, {
+		name: "block snapshot storage invalid storage_class_name",
+		mutate: func(tmpl *ateapipb.ActorTemplate) {
+			tmpl.SnapshotConfig.Object = nil
+			tmpl.SnapshotConfig.Block = &ateapipb.BlockSnapshotStorage{Capacity: "10Gi", StorageClassName: "Fast SSD"}
+		},
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot_config", "block", "storage_class_name"), nil, "").WithOrigin("format=k8s-long-name")},
 	}, {
 		name: "unspecified snapshot scopes",
 		mutate: func(tmpl *ateapipb.ActorTemplate) {
@@ -1334,7 +1391,7 @@ func seedSubstrateTemplate(t *testing.T, ctx context.Context, persistence store.
 	created, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: name},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: "gs://ate-snapshots/team-a/",
+			Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: "gs://ate-snapshots/team-a/"},
 		},
 		SandboxConfig: &ateapipb.SandboxConfig{
 			SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,

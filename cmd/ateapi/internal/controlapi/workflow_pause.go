@@ -131,7 +131,7 @@ func (w *ActorWorkflow) ensureMarkedPausing(ctx context.Context, actorRef resour
 		return nil, status.Errorf(codes.FailedPrecondition, "actors in atespace %q are golden actors, which cannot be paused", actorRef.Atespace)
 	}
 
-	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, nil, resources.NewSnapshotName(), ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT)
+	inProgressSnap, err := w.getSnapshotPluginForActor(actor, nil).PrepareNewSnapshot(ctx, actor, nil, resources.NewSnapshotName(), ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			slog.Warn("Worker already gone during finalize pause, skipping release", "worker", assignment.GetWorkerPod())
 		} else {
 			nodeName = worker.GetNodeName()
-			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, nodeName); err != nil {
+			if err := w.getSnapshotPluginForActor(latestActor, actorTemplate).UnassignFromNode(ctx, latestActor, nodeName); err != nil {
 				return nil, err
 			}
 			// Drop just this actor's assignment; any other actors the worker

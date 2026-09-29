@@ -144,7 +144,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 
 	// Fail here rather than at checkpoint time if the template's location
 	// cannot produce a usable URI: nothing has been written yet.
-	inProgressSnap, err := w.getSnapshotPlugin().PrepareNewSnapshot(ctx, actor, actorTemplate, resources.NewSnapshotName(), ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE)
+	inProgressSnap, err := w.getSnapshotPluginForActor(actor, actorTemplate).PrepareNewSnapshot(ctx, actor, actorTemplate, resources.NewSnapshotName(), ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +369,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 
 	// 1. Free the worker (if it hasn't been freed yet)
 	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
+		if err := w.getSnapshotPluginForActor(latestActor, actorTemplate).UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
 			return nil, err
 		}
 		t = time.Now()
@@ -468,5 +468,5 @@ func (w *ActorWorkflow) releaseReplacedSnapshot(ctx context.Context, actor *atea
 		markSkipped(ctx, "no replaced external snapshot to release")
 		return nil
 	}
-	return w.getSnapshotPlugin().DeleteSnapshot(ctx, actor, actor.GetStatus().GetDurableSnapshotStatus())
+	return w.getSnapshotPluginForActor(actor, nil).DeleteSnapshot(ctx, actor, actor.GetStatus().GetDurableSnapshotStatus())
 }

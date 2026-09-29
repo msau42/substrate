@@ -39,7 +39,8 @@ containers:
 ${TEMPLATE_RESOURCES}
 ${TEMPLATE_SANDBOX_CONFIG}
 snapshotConfig:
-  storageLocation: gs://${BUCKET_NAME}/ate-e2e-caps-default${FIXTURE_SUFFIX}/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-e2e-caps-default${FIXTURE_SUFFIX}/
 
 ---
 
@@ -71,4 +72,5 @@ containers:
 ${TEMPLATE_RESOURCES}
 ${TEMPLATE_SANDBOX_CONFIG}
 snapshotConfig:
-  storageLocation: gs://${BUCKET_NAME}/ate-e2e-caps-exact${FIXTURE_SUFFIX}/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-e2e-caps-exact${FIXTURE_SUFFIX}/

@@ -273,7 +273,7 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
+		if err := w.getSnapshotPluginForActor(latestActor, nil).UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
 			return nil, err
 		}
 		_, _, err := releaseWorker(ctx, w.store, latestActor)
@@ -373,7 +373,7 @@ func (w *ActorWorkflow) ensureExternalSnapshotsReleased(ctx context.Context, act
 	ctx, done := stepSpan(ctx, "ReleaseExternalSnapshots")
 	defer func() { err = done(err) }()
 
-	return w.getSnapshotPlugin().DeleteActor(ctx, actor)
+	return w.getSnapshotPluginForActor(actor, nil).DeleteActor(ctx, actor)
 }
 
 // finalizeDeleted removes the actor from the store and returns the deleted

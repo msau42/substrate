@@ -28,6 +28,7 @@ import (
 	"github.com/agent-substrate/substrate/internal/objectstore"
 	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/internal/snapshot"
+	"github.com/agent-substrate/substrate/internal/snapshot/block"
 	"github.com/agent-substrate/substrate/internal/snapshot/object"
 	listersv1alpha1 "github.com/agent-substrate/substrate/pkg/client/listers/api/v1alpha1"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
@@ -113,7 +114,8 @@ type ActorWorkflow struct {
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
 	objectStore          objectstore.Store
-	snapshotPlugin       snapshot.SnapshotPluginControlPlane
+	objectSnapshotPlugin snapshot.SnapshotPluginControlPlane
+	blockSnapshotPlugin  snapshot.SnapshotPluginControlPlane
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.
@@ -143,15 +145,48 @@ func NewActorWorkflow(
 		egressGatewayAddress: egressGatewayAddress,
 		pluginRegistry:       pluginRegistry,
 		objectStore:          objectStore,
-		snapshotPlugin:       object.NewObjectSnapshotPluginControlPlane(objectStore),
+		objectSnapshotPlugin: object.NewObjectSnapshotPluginControlPlane(objectStore),
+		blockSnapshotPlugin: block.NewBlockSnapshotPluginControlPlane(
+			nil,
+			block.WithVolumePluginRegistry(pluginRegistry),
+			block.WithStorageClassLister(storageClassLister),
+		),
 	}
 }
 
-func (w *ActorWorkflow) getSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
-	if w.snapshotPlugin != nil {
-		return w.snapshotPlugin
+func (w *ActorWorkflow) getObjectSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
+	if w.objectSnapshotPlugin != nil {
+		return w.objectSnapshotPlugin
 	}
 	return object.NewObjectSnapshotPluginControlPlane(w.objectStore)
+}
+
+func (w *ActorWorkflow) getBlockSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
+	if w.blockSnapshotPlugin != nil {
+		return w.blockSnapshotPlugin
+	}
+	return block.NewBlockSnapshotPluginControlPlane(
+		nil,
+		block.WithVolumePluginRegistry(w.pluginRegistry),
+		block.WithStorageClassLister(w.storageClassLister),
+	)
+}
+
+func (w *ActorWorkflow) getSnapshotPluginForActor(actor *ateapipb.Actor, template *ateapipb.ActorTemplate) snapshot.SnapshotPluginControlPlane {
+	if actor.GetStatus().GetSnapshotStorage().GetBlockVolume() != nil ||
+		actor.GetStatus().GetDurableSnapshotStatus().GetBlock() != nil ||
+		actor.GetStatus().GetInProgressSnapshotStatus().GetBlock() != nil ||
+		template.GetSnapshotConfig().GetBlock() != nil {
+		return w.getBlockSnapshotPlugin()
+	}
+	return w.getObjectSnapshotPlugin()
+}
+
+func (w *ActorWorkflow) getSnapshotPluginForTag(tag *ateapipb.Tag) snapshot.SnapshotPluginControlPlane {
+	if tag.GetStatus().GetSnapshot().GetBlock() != nil {
+		return w.getBlockSnapshotPlugin()
+	}
+	return w.getObjectSnapshotPlugin()
 }
 
 // actorWorkflowStore enumerates the exact storage methods needed by

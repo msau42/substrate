@@ -70,4 +70,5 @@ sandboxConfig:
 snapshotConfig:
   onPause: SNAPSHOT_CONTENT_SCOPE_FULL
   onCommit: SNAPSHOT_CONTENT_SCOPE_FULL
-  storageLocation: gs://${BUCKET_NAME}/ate-demo-egress-mitm/
+  object:
+    storageLocation: gs://${BUCKET_NAME}/ate-demo-egress-mitm/

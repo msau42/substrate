@@ -434,7 +434,9 @@ func createTemplateWithContainersAndVolumes(t *testing.T, tc *testContext, ns st
 				Name:     "tmpl1",
 			},
 			SnapshotConfig: &ateapipb.SnapshotConfig{
-				StorageLocation: testStorageLocation,
+				Object: &ateapipb.ObjectSnapshotStorage{
+					StorageLocation: testStorageLocation,
+				},
 			},
 			SandboxConfig: &ateapipb.SandboxConfig{
 				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,
@@ -579,7 +581,9 @@ func createTemplateWithSelector(t *testing.T, tc *testContext, name string, sele
 				Name:     name,
 			},
 			SnapshotConfig: &ateapipb.SnapshotConfig{
-				StorageLocation: testStorageLocation,
+				Object: &ateapipb.ObjectSnapshotStorage{
+					StorageLocation: testStorageLocation,
+				},
 			},
 			SandboxConfig: &ateapipb.SandboxConfig{
 				SandboxClass: ateapipb.SandboxClass_SANDBOX_CLASS_GVISOR,

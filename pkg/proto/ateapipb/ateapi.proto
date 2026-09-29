@@ -957,6 +957,9 @@ message SandboxConfig {
   string config_name = 2;
 }
 
+// SnapshotConfig configures snapshot behavior and backing storage for actors
+// of an ActorTemplate. Exactly one of object or block must be set.
+//
 // +k8s:customValidation # on_commit must be a subset of on_pause
 message SnapshotConfig {
   // on_pause defines the scope of the snapshot captured when an actor
@@ -984,13 +987,51 @@ message SnapshotConfig {
   // +k8s:required
   OnResumeConfig on_resume = 3;
 
+  reserved 4;
+
+  // object configures object-storage-backed snapshots.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  ObjectSnapshotStorage object = 5;
+
+  // block configures block-storage-backed snapshots.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  BlockSnapshotStorage block = 6;
+}
+
+// ObjectSnapshotStorage configures object storage for an ActorTemplate's
+// snapshots.
+message ObjectSnapshotStorage {
   // storage_location is the base object-storage URI snapshots of actors on
   // this version are stored under. Required.
   //
   // +k8s:required
   // +k8s:maxLength=1024
   // +k8s:customValidation # Validate URI
-  string storage_location = 4;
+  string storage_location = 1;
+}
+
+// BlockSnapshotStorage configures block storage for an ActorTemplate's
+// snapshots. A dedicated block volume is provisioned per actor from the
+// specified StorageClass.
+message BlockSnapshotStorage {
+  // capacity of the snapshot block volume to create per actor, in Kubernetes
+  // resource.Quantity string form (e.g. "10Gi"). Required.
+  //
+  // +k8s:required
+  // +k8s:maxLength=32 # matches ExternalVolumeTemplate.capacity's bound
+  // +k8s:customValidation # must parse as a resource.Quantity
+  string capacity = 1;
+
+  // storage_class_name names the cluster-scoped Kubernetes StorageClass to
+  // create the snapshot block volume from. Required.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-long-name
+  string storage_class_name = 2;
 }
 
 // ResumeSource selects what supplies the guest state when an actor is resumed

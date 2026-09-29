@@ -16,7 +16,6 @@ package controlapi
 
 import (
 	"context"
-	"os"
 	"sync"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -54,7 +53,6 @@ type RPCService struct {
 	mu                    sync.RWMutex
 	volumePlugins         map[string]volume.VolumePluginControlPlane
 	objectStore           objectstore.Store
-	snapshotPlugin        snapshot.SnapshotPluginControlPlane
 
 	actorIdentityJWTIssuer string
 	actorIDJWTPool         localjwtauthority.Pool
@@ -106,28 +104,16 @@ func NewRPCService(
 		actorIDJWTPool:         actorIDJWTPool,
 		actorIDCAPool:          actorIDCAPool,
 	}
-	if os.Getenv("ATE_SNAPSHOT_PLUGIN") == "block" {
-		driverName := os.Getenv("ATE_SNAPSHOT_CSI_DRIVER")
-		if driverName == "" {
-			driverName = "hostpath.csi.k8s.io"
-		}
-		impl.snapshotPlugin = block.NewBlockSnapshotPluginControlPlane(
-			nil,
-			block.WithVolumePluginRegistry(s),
-			block.WithStorageClassLister(storageClassLister),
-			block.WithTagResolver(impl.resolveTagForNewActor),
-			block.WithDefaultVolumeClass(block.VolumeClassSpec{
-				VolumeName: block.DefaultSnapshotVolumeName,
-				DriverName: driverName,
-				Capacity:   block.DefaultSnapshotCapacity,
-			}),
-		)
-	} else {
-		impl.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(objectStore, object.WithTagResolver(impl.resolveTagForNewActor))
-	}
-	s.snapshotPlugin = impl.snapshotPlugin
+	impl.objectSnapshotPlugin = object.NewObjectSnapshotPluginControlPlane(objectStore, object.WithTagResolver(impl.resolveTagForNewActor))
+	impl.blockSnapshotPlugin = block.NewBlockSnapshotPluginControlPlane(
+		nil,
+		block.WithVolumePluginRegistry(s),
+		block.WithStorageClassLister(storageClassLister),
+		block.WithTagResolver(impl.resolveTagForNewActor),
+	)
 	s.actorWorkflow = NewActorWorkflow(impl, workerCache, dialer, sandboxConfigLister, storageClassLister, instruments, egressGatewayAddress, s, objectStore)
-	s.actorWorkflow.snapshotPlugin = impl.snapshotPlugin
+	s.actorWorkflow.objectSnapshotPlugin = impl.objectSnapshotPlugin
+	s.actorWorkflow.blockSnapshotPlugin = impl.blockSnapshotPlugin
 	s.workerWorkflow = NewWorkerWorkflow(impl)
 	return s
 }
@@ -193,8 +179,9 @@ type ServiceImpl struct {
 	// methods we need to trap.
 	store store.Interface
 
-	storageClassLister storagev1listers.StorageClassLister
-	snapshotPlugin     snapshot.SnapshotPluginControlPlane
+	storageClassLister   storagev1listers.StorageClassLister
+	objectSnapshotPlugin snapshot.SnapshotPluginControlPlane
+	blockSnapshotPlugin  snapshot.SnapshotPluginControlPlane
 }
 
 var _ store.Interface = (*ServiceImpl)(nil)
@@ -209,13 +196,28 @@ func newServiceImpl(
 		store:              persistence,
 		storageClassLister: storageClassLister,
 	}
-	s.snapshotPlugin = object.NewObjectSnapshotPluginControlPlane(nil, object.WithTagResolver(s.resolveTagForNewActor))
+	s.objectSnapshotPlugin = object.NewObjectSnapshotPluginControlPlane(nil, object.WithTagResolver(s.resolveTagForNewActor))
+	s.blockSnapshotPlugin = block.NewBlockSnapshotPluginControlPlane(
+		nil,
+		block.WithStorageClassLister(storageClassLister),
+		block.WithTagResolver(s.resolveTagForNewActor),
+	)
 	return s
 }
 
-func (s *ServiceImpl) getSnapshotPlugin() snapshot.SnapshotPluginControlPlane {
-	if s.snapshotPlugin != nil {
-		return s.snapshotPlugin
+func (s *ServiceImpl) getSnapshotPlugin(template *ateapipb.ActorTemplate) snapshot.SnapshotPluginControlPlane {
+	if template.GetSnapshotConfig().GetBlock() != nil {
+		if s.blockSnapshotPlugin != nil {
+			return s.blockSnapshotPlugin
+		}
+		return block.NewBlockSnapshotPluginControlPlane(
+			nil,
+			block.WithStorageClassLister(s.storageClassLister),
+			block.WithTagResolver(s.resolveTagForNewActor),
+		)
+	}
+	if s.objectSnapshotPlugin != nil {
+		return s.objectSnapshotPlugin
 	}
 	return object.NewObjectSnapshotPluginControlPlane(nil, object.WithTagResolver(s.resolveTagForNewActor))
 }

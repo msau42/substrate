@@ -181,7 +181,8 @@ sandboxConfig:
   sandboxClass: SANDBOX_CLASS_GVISOR
   configName: gvisor-default
 snapshotConfig:
-  storageLocation: gs://my-snapshots-bucket/stateful-agent
+  object:
+    storageLocation: gs://my-snapshots-bucket/stateful-agent
 volumes:
 - name: shared-storage
   externalVolumeTemplate:

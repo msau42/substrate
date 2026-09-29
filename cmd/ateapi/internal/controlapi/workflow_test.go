@@ -94,8 +94,8 @@ func TestActorStateChangeRecords(t *testing.T) {
 			if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
 				Metadata: &ateapipb.ResourceMetadata{Atespace: tmplAtespace, Name: tmplName},
 				SnapshotConfig: &ateapipb.SnapshotConfig{
-					StorageLocation: testStorageLocation,
-					OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					Object:  &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation},
+					OnPause: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				},
 			}); err != nil {
 				t.Fatalf("create template: %v", err)
@@ -208,7 +208,7 @@ func TestActorDeletedRecord(t *testing.T) {
 	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
 	if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
 		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+		SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation}},
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 	storetest.MustCreateAtespace(t, ctx, persistence, "ns")
 	if _, err := persistence.CreateActorTemplate(ctx, &ateapipb.ActorTemplate{
 		Metadata:       &ateapipb.ResourceMetadata{Atespace: "ns", Name: "tmpl1"},
-		SnapshotConfig: &ateapipb.SnapshotConfig{StorageLocation: testStorageLocation},
+		SnapshotConfig: &ateapipb.SnapshotConfig{Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation}},
 	}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
@@ -284,5 +284,70 @@ func TestActorStateChangeRecordSkippedOnConflict(t *testing.T) {
 	}
 	if len(*records) != 0 {
 		t.Errorf("got %d state records from a losing writer, want 0: %v", len(*records), *records)
+	}
+}
+
+func TestSnapshotPluginSelection(t *testing.T) {
+	persistence := newTestPersistence(t)
+	svc := newServiceImpl(persistence, nil)
+	w := &ActorWorkflow{
+		objectSnapshotPlugin: svc.objectSnapshotPlugin,
+		blockSnapshotPlugin:  svc.blockSnapshotPlugin,
+	}
+
+	objectTmpl := &ateapipb.ActorTemplate{
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			Object: &ateapipb.ObjectSnapshotStorage{StorageLocation: testStorageLocation},
+		},
+	}
+	blockTmpl := &ateapipb.ActorTemplate{
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			Block: &ateapipb.BlockSnapshotStorage{Capacity: "10Gi", StorageClassName: "fast-ssd"},
+		},
+	}
+
+	if got := svc.getSnapshotPlugin(objectTmpl); got != svc.objectSnapshotPlugin {
+		t.Errorf("getSnapshotPlugin(objectTmpl) = %T, want objectSnapshotPlugin", got)
+	}
+	if got := svc.getSnapshotPlugin(blockTmpl); got != svc.blockSnapshotPlugin {
+		t.Errorf("getSnapshotPlugin(blockTmpl) = %T, want blockSnapshotPlugin", got)
+	}
+
+	if got := w.getSnapshotPluginForActor(&ateapipb.Actor{}, objectTmpl); got != w.objectSnapshotPlugin {
+		t.Errorf("getSnapshotPluginForActor(objectTmpl) = %T, want objectSnapshotPlugin", got)
+	}
+	if got := w.getSnapshotPluginForActor(&ateapipb.Actor{}, blockTmpl); got != w.blockSnapshotPlugin {
+		t.Errorf("getSnapshotPluginForActor(blockTmpl) = %T, want blockSnapshotPlugin", got)
+	}
+	blockActor := &ateapipb.Actor{
+		Status: &ateapipb.ActorStatus{
+			SnapshotStorage: &ateapipb.SnapshotStorage{
+				BlockVolume: &ateapipb.ExternalVolume{},
+			},
+		},
+	}
+	if got := w.getSnapshotPluginForActor(blockActor, nil); got != w.blockSnapshotPlugin {
+		t.Errorf("getSnapshotPluginForActor(blockActor, nil) = %T, want blockSnapshotPlugin", got)
+	}
+
+	objectTag := &ateapipb.Tag{
+		Status: &ateapipb.TagStatus{
+			Snapshot: &ateapipb.Snapshot{
+				Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap"},
+			},
+		},
+	}
+	blockTag := &ateapipb.Tag{
+		Status: &ateapipb.TagStatus{
+			Snapshot: &ateapipb.Snapshot{
+				Block: &ateapipb.BlockSnapshot{},
+			},
+		},
+	}
+	if got := w.getSnapshotPluginForTag(objectTag); got != w.objectSnapshotPlugin {
+		t.Errorf("getSnapshotPluginForTag(objectTag) = %T, want objectSnapshotPlugin", got)
+	}
+	if got := w.getSnapshotPluginForTag(blockTag); got != w.blockSnapshotPlugin {
+		t.Errorf("getSnapshotPluginForTag(blockTag) = %T, want blockSnapshotPlugin", got)
 	}
 }

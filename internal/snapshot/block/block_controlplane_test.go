@@ -141,13 +141,10 @@ func testControlTemplate() *ateapipb.ActorTemplate {
 			Name:     "tmpl-1",
 			Uid:      "tmpl-uid-1",
 		},
-		Volumes: []*ateapipb.Volume{
-			{
-				Name: "snapshot",
-				ExternalVolumeTemplate: &ateapipb.ExternalVolumeTemplate{
-					StorageClassName: "hyperdisk-direct-sc",
-					Capacity:         "20Gi",
-				},
+		SnapshotConfig: &ateapipb.SnapshotConfig{
+			Block: &ateapipb.BlockSnapshotStorage{
+				StorageClassName: "hyperdisk-direct-sc",
+				Capacity:         "20Gi",
 			},
 		},
 	}

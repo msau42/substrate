@@ -135,7 +135,7 @@ func (p *ObjectSnapshotPluginControlPlane) PrepareNewSnapshot(
 		}
 		atespace := actor.GetMetadata().GetAtespace()
 		actorUID := actor.GetMetadata().GetUid()
-		location := tmpl.GetSnapshotConfig().GetStorageLocation()
+		location := tmpl.GetSnapshotConfig().GetObject().GetStorageLocation()
 
 		uri, err := resources.NewActorSnapshotURI(location, atespace, actorUID, snapshotID)
 		if err != nil {
@@ -303,7 +303,7 @@ func (p *ObjectSnapshotPluginControlPlane) ReserveTagSnapshot(
 		return nil, fmt.Errorf("tag, sourceActor, and tmpl are required")
 	}
 
-	location := tmpl.GetSnapshotConfig().GetStorageLocation()
+	location := tmpl.GetSnapshotConfig().GetObject().GetStorageLocation()
 	if err := resources.ValidateSnapshotLocation(location); err != nil {
 		return nil, fmt.Errorf("invalid storage location for tag: %w", err)
 	}

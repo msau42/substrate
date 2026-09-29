@@ -32,9 +32,11 @@ func testActorTemplate() *ateapipb.ActorTemplate {
 			Uid:      "tmpl-uid-1",
 		},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: "gs://test-bucket/root",
-			OnPause:         ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			OnCommit:        ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
+			Object: &ateapipb.ObjectSnapshotStorage{
+				StorageLocation: "gs://test-bucket/root",
+			},
+			OnPause:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			OnCommit: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
 		},
 	}
 }

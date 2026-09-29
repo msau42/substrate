@@ -560,7 +560,6 @@ func (p *BlockSnapshotPluginControlPlane) getPlugin(ctx context.Context, driverN
 	return nil, fmt.Errorf("volume plugin is not configured")
 }
 
-// TODO: revisit this
 func (p *BlockSnapshotPluginControlPlane) defaultResolveVolumeClass(_ context.Context, tmpl *ateapipb.ActorTemplate) (VolumeClassSpec, error) {
 	spec := VolumeClassSpec{
 		VolumeName: p.defaultVolumeClass.VolumeName,
@@ -572,19 +571,12 @@ func (p *BlockSnapshotPluginControlPlane) defaultResolveVolumeClass(_ context.Co
 	}
 
 	var scName string
-	for _, v := range tmpl.GetVolumes() {
-		if v.GetName() != DefaultSnapshotVolumeName {
-			continue
+	if blockCfg := tmpl.GetSnapshotConfig().GetBlock(); blockCfg != nil {
+		if blockCfg.GetCapacity() != "" {
+			spec.Capacity = blockCfg.GetCapacity()
 		}
-		if extTmpl := v.GetExternalVolumeTemplate(); extTmpl != nil {
-			spec.VolumeName = v.GetName()
-			if extTmpl.GetCapacity() != "" {
-				spec.Capacity = extTmpl.GetCapacity()
-			}
-			if extTmpl.GetStorageClassName() != "" {
-				scName = extTmpl.GetStorageClassName()
-			}
-			break
+		if blockCfg.GetStorageClassName() != "" {
+			scName = blockCfg.GetStorageClassName()
 		}
 	}
 

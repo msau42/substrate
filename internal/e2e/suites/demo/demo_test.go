@@ -163,7 +163,7 @@ func TestActorSnapshotLifecycle(t *testing.T) {
 		t.Fatalf("Tag %s snapshot = %q, want a copy of its own", tagRef.GetName(), got)
 	}
 	if uri := tagSnap.GetObject().GetSnapshotUri(); uri != "" {
-		wantTagURI, err := resources.NewTagSnapshotURI(at.GetSnapshotConfig().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
+		wantTagURI, err := resources.NewTagSnapshotURI(at.GetSnapshotConfig().GetObject().GetStorageLocation(), tagToUpdate.GetMetadata().GetAtespace(), tagToUpdate.GetMetadata().GetUid())
 		if err != nil {
 			t.Fatalf("NewTagSnapshotURI: %v", err)
 		}
@@ -1332,10 +1332,12 @@ func createActorTemplateInternal(ctx context.Context, t *testing.T, clients *e2e
 		PoolReplicas: 2,
 		Labels:       map[string]string{"demo": nsObj.Name},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: "gs://" + env["BUCKET_NAME"] + "/ate-demo-" + name,
-			OnPause:         onPause,
-			OnCommit:        onCommit,
-			OnResume:        &ateapipb.OnResumeConfig{FromData: fromData},
+			Object: &ateapipb.ObjectSnapshotStorage{
+				StorageLocation: "gs://" + env["BUCKET_NAME"] + "/ate-demo-" + name,
+			},
+			OnPause:  onPause,
+			OnCommit: onCommit,
+			OnResume: &ateapipb.OnResumeConfig{FromData: fromData},
 		},
 		Modify: modifyTemplate,
 	})

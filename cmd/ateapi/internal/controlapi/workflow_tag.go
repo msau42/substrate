@@ -183,7 +183,7 @@ func (w *ActorWorkflow) ensureTagSnapshotReleased(ctx context.Context, tag *atea
 	ctx, done := stepSpan(ctx, "ReleaseTagSnapshot")
 	defer func() { err = done(err) }()
 
-	return w.getSnapshotPlugin().DeleteTagSnapshot(ctx, tag)
+	return w.getSnapshotPluginForTag(tag).DeleteTagSnapshot(ctx, tag)
 }
 
 // finalizeTagDeleted drops the row, once nothing it names is left behind.
@@ -266,7 +266,7 @@ func (w *ActorWorkflow) ensureTagReserved(ctx context.Context, tagRef resources.
 		Scope:       tag.GetScope(),
 		SourceActor: resources.ActorRefFromActor(actor).ToObjectRef(),
 	}
-	reservedSnap, err := w.getSnapshotPlugin().ReserveTagSnapshot(ctx, tagToCreate, actor, actorTemplate)
+	reservedSnap, err := w.getSnapshotPluginForActor(actor, actorTemplate).ReserveTagSnapshot(ctx, tagToCreate, actor, actorTemplate)
 	if err != nil {
 		return nil, err
 	}
@@ -300,7 +300,7 @@ func (w *ActorWorkflow) ensureTagSnapshotCopied(ctx context.Context, tag *ateapi
 	ctx, done := stepSpan(ctx, "CopyTagSnapshot")
 	defer func() { err = done(err) }()
 
-	return w.getSnapshotPlugin().CopyToTagSnapshot(ctx, tag, srcSnapshot)
+	return w.getSnapshotPluginForTag(tag).CopyToTagSnapshot(ctx, tag, srcSnapshot)
 }
 
 // ensureTagFinalized publishes the copy by setting status.state to

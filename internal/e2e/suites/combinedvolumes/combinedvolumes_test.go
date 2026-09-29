@@ -200,7 +200,9 @@ func createTemplate(ctx context.Context, t *testing.T, clients *e2e.Clients, ns 
 		// scheduler cannot hand its workers to another suite's actors.
 		Labels: map[string]string{"combinedvolumes": ns.Name},
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation: fmt.Sprintf("gs://%s/%s/", env["BUCKET_NAME"], ns.Name),
+			Object: &ateapipb.ObjectSnapshotStorage{
+				StorageLocation: fmt.Sprintf("gs://%s/%s/", env["BUCKET_NAME"], ns.Name),
+			},
 		},
 		Modify: func(tmpl *ateapipb.ActorTemplate) {
 			// Every volume is mounted at two paths, covering the read-only
