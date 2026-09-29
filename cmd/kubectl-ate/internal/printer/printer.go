@@ -339,7 +339,7 @@ func PrintTagsTo(out io.Writer, tags []*ateapipb.Tag, format string) error {
 			snapshotURI, contentScope := "<none>", "<none>"
 			if snapshot := tag.GetStatus().GetSnapshot().GetObject(); snapshot.GetSnapshotUri() != "" {
 				snapshotURI = snapshot.GetSnapshotUri()
-				contentScope = snapshot.GetContentScope().String()
+				contentScope = tag.GetStatus().GetSnapshot().GetContentScope().String()
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				tag.GetMetadata().GetAtespace(), tag.GetMetadata().GetName(), tag.GetScope(),

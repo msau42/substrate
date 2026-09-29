@@ -1129,8 +1129,7 @@ func TestValidateDeleteOptions(t *testing.T) {
 
 func validObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.ObjectSnapshot {
 	s := &ateapipb.ObjectSnapshot{
-		SnapshotUri:  "gs://private/atespaces/as/actors/" + someActorUID + "/snapshots/snap-1",
-		ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+		SnapshotUri: "gs://private/atespaces/as/actors/" + someActorUID + "/snapshots/snap-1",
 	}
 	for _, m := range mutate {
 		m(s)
@@ -1138,12 +1137,11 @@ func validObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.Obj
 	return s
 }
 
-// badObjectSnapshot violates both of ObjectSnapshot's rules at once, so a
+// badObjectSnapshot violates ObjectSnapshot's rules, so a
 // caller can assert that a containing type reaches every field of it.
 func badObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.ObjectSnapshot {
 	breakIt := func(s *ateapipb.ObjectSnapshot) {
 		s.SnapshotUri = ""
-		s.ContentScope = ateapipb.SnapshotContentScope(3)
 	}
 	return validObjectSnapshot(append([]func(*ateapipb.ObjectSnapshot){breakIt}, mutate...)...)
 }
@@ -1151,7 +1149,6 @@ func badObjectSnapshot(mutate ...func(*ateapipb.ObjectSnapshot)) *ateapipb.Objec
 func TestValidateObjectSnapshot(t *testing.T) {
 	valid := validObjectSnapshot
 	uriPath := field.NewPath("snapshot_uri")
-	scopePath := field.NewPath("content_scope")
 
 	tests := []struct {
 		name string
@@ -1161,20 +1158,6 @@ func TestValidateObjectSnapshot(t *testing.T) {
 		{
 			name: "valid",
 			obj:  valid(),
-		},
-		{
-			name: "valid content_scope: data",
-			obj: valid(func(s *ateapipb.ObjectSnapshot) {
-				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
-			}),
-		},
-		{
-			// UNSPECIFIED reads as FULL, so optional lets the zero value skip
-			// the bounds rather than failing the minimum.
-			name: "valid content_scope: unspecified",
-			obj: valid(func(s *ateapipb.ObjectSnapshot) {
-				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED
-			}),
 		},
 		{
 			name: "missing snapshot_uri",
@@ -1189,21 +1172,10 @@ func TestValidateObjectSnapshot(t *testing.T) {
 			want: field.ErrorList{field.TooLong(uriPath, nil, 2048).WithOrigin("maxLength")},
 		},
 		{
-			name: "content_scope above the enum",
-			obj:  valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
-			want: field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
-		},
-		{
-			name: "negative content_scope",
-			obj:  valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(-1) }),
-			want: field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("minimum")},
-		},
-		{
 			name: "every field invalid",
 			obj:  badObjectSnapshot(),
 			want: field.ErrorList{
 				field.Required(uriPath, ""),
-				field.Invalid(scopePath, nil, "").WithOrigin("maximum"),
 			},
 		},
 	}
@@ -1218,7 +1190,6 @@ func TestValidateObjectSnapshot(t *testing.T) {
 func TestValidateObjectSnapshotUpdate(t *testing.T) {
 	valid := validObjectSnapshot
 	uriPath := field.NewPath("snapshot_uri")
-	scopePath := field.NewPath("content_scope")
 
 	tests := []struct {
 		name   string
@@ -1240,32 +1211,10 @@ func TestValidateObjectSnapshotUpdate(t *testing.T) {
 			newObj: badObjectSnapshot(),
 		},
 		{
-			name:   "content_scope changed to a valid value",
-			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ObjectSnapshot) {
-				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
-			}),
-		},
-		{
-			name:   "content_scope changed to a value outside the enum",
-			oldObj: valid(),
-			newObj: valid(func(s *ateapipb.ObjectSnapshot) { s.ContentScope = ateapipb.SnapshotContentScope(3) }),
-			want:   field.ErrorList{field.Invalid(scopePath, nil, "").WithOrigin("maximum")},
-		},
-		{
 			name:   "snapshot_uri cleared",
 			oldObj: valid(),
 			newObj: valid(func(s *ateapipb.ObjectSnapshot) { s.SnapshotUri = "" }),
 			want:   field.ErrorList{field.Required(uriPath, "")},
-		},
-		{
-			// The other side of the ratchet: a row that predates these rules
-			// can still be repaired, one field at a time.
-			name:   "content_scope repaired",
-			oldObj: badObjectSnapshot(),
-			newObj: badObjectSnapshot(func(s *ateapipb.ObjectSnapshot) {
-				s.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
-			}),
 		},
 		{
 			name:   "snapshot_uri changed to a value that is too long",
@@ -1372,7 +1321,6 @@ func TestValidateNestedObjectSnapshot(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			want := field.ErrorList{
 				field.Required(tt.path.Child("snapshot_uri"), ""),
-				field.Invalid(tt.path.Child("content_scope"), nil, "").WithOrigin("maximum"),
 			}
 			assertValidateErr(t, tt.validate(context.Background()), want)
 		})
@@ -1385,9 +1333,9 @@ func TestValidateSnapshot(t *testing.T) {
 			SnapshotId: "snap-1",
 			Local: &ateapipb.LocalSnapshot{
 				NodeVmsWithLocalSnapshots: []string{"node-1"},
-				ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+			ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 		}
 		for _, m := range mutate {
 			m(s)
@@ -1399,6 +1347,7 @@ func TestValidateSnapshot(t *testing.T) {
 			SnapshotId:    "snap-1",
 			Object:        validObjectSnapshot(),
 			Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+			ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 		}
 		for _, m := range mutate {
 			m(s)
@@ -1431,17 +1380,27 @@ func TestValidateSnapshot(t *testing.T) {
 				SnapshotId: "snap-1",
 				Block: &ateapipb.BlockSnapshot{
 					VolumeSnapshotId: "vol-snap-1",
-					ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 					ActorTemplateUid: someActorUID,
-					ExternalVolume: &ateapipb.ExternalVolume{
-						VolumeName:      "snapshot",
-						StorageVolumeId: "vol-1",
-						VolumeType:      "pd.csi.storage.gke.io",
-						Status:          ateapipb.ExternalVolume_STATUS_CREATED,
-					},
+					SourceVolumeId:   "vol-1",
+					VolumeType:       "pd.csi.storage.gke.io",
 				},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
+		},
+		{
+			name: "content_scope above the enum",
+			obj: validObject(func(s *ateapipb.Snapshot) {
+				s.ContentScope = ateapipb.SnapshotContentScope(3)
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("content_scope"), nil, "").WithOrigin("maximum")},
+		},
+		{
+			name: "negative content_scope",
+			obj: validObject(func(s *ateapipb.Snapshot) {
+				s.ContentScope = ateapipb.SnapshotContentScope(-1)
+			}),
+			want: field.ErrorList{field.Invalid(field.NewPath("content_scope"), nil, "").WithOrigin("minimum")},
 		},
 		{
 			name: "neither union member set",
@@ -1741,7 +1700,6 @@ func TestValidateTagRequestPayloads(t *testing.T) {
 			},
 			want: field.ErrorList{
 				field.Required(tagPath.Child("status", "snapshot", "object", "snapshot_uri"), ""),
-				field.Invalid(tagPath.Child("status", "snapshot", "object", "content_scope"), nil, "").WithOrigin("maximum"),
 			},
 		},
 		{

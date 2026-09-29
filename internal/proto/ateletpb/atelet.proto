@@ -130,9 +130,9 @@ message TerminateRequest {
 
   WorkloadSpec spec = 7;
 
-  // Optional snapshot metadata (e.g. external block volume backing the actor's
-  // checkpoint directory).
-  ateapi.Snapshot snapshot = 8;
+  // Optional backing storage for the actor's snapshots (e.g. external block
+  // volume backing the actor's checkpoint directory).
+  ateapi.SnapshotStorage snapshot_storage = 8;
 }
 
 message TerminateResponse {
@@ -164,9 +164,9 @@ message RunRequest {
   int64 cpu_milli = 10;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 11; // Memory limit in bytes.
 
-  // Optional snapshot metadata (e.g. external block volume backing the actor's
-  // checkpoint directory).
-  ateapi.Snapshot snapshot = 12;
+  // Optional backing storage for the actor's snapshots (e.g. external block
+  // volume backing the actor's checkpoint directory).
+  ateapi.SnapshotStorage snapshot_storage = 12;
 }
 
 // EgressGateway configures tunneled egress for one actor activation.
@@ -416,9 +416,12 @@ message CheckpointRequest {
   // What should be included in the checkpoint.
   SnapshotScope scope = 11;
 
-  // Optional snapshot metadata (e.g. external block volume backing the actor's
-  // checkpoint directory).
+  // Optional snapshot metadata.
   ateapi.Snapshot snapshot = 12;
+
+  // Optional backing storage for the actor's snapshots (e.g. external block
+  // volume backing the actor's checkpoint directory).
+  ateapi.SnapshotStorage snapshot_storage = 13;
 }
 
 message CheckpointResponse {
@@ -447,9 +450,12 @@ message UploadPausedCheckpointRequest {
   // upload by selecting the durable-dir tar) and rejects otherwise.
   SnapshotScope desired_scope = 8;
 
-  // Optional snapshot metadata (e.g. external block volume backing the actor's
-  // checkpoint directory).
+  // Optional snapshot metadata.
   ateapi.Snapshot snapshot = 9;
+
+  // Optional backing storage for the actor's snapshots (e.g. external block
+  // volume backing the actor's checkpoint directory).
+  ateapi.SnapshotStorage snapshot_storage = 10;
 }
 
 message UploadPausedCheckpointResponse {
@@ -499,9 +505,12 @@ message RestoreRequest {
   int64 cpu_milli = 14;    // CPU limit in millicores (1000 = one core).
   int64 memory_bytes = 15; // Memory limit in bytes.
 
-  // Optional snapshot metadata (e.g. external block volume backing the actor's
-  // checkpoint directory).
+  // Optional snapshot metadata.
   ateapi.Snapshot snapshot = 16;
+
+  // Optional backing storage for the actor's snapshots (e.g. external block
+  // volume backing the actor's checkpoint directory).
+  ateapi.SnapshotStorage snapshot_storage = 17;
 }
 
 message RestoreResponse {

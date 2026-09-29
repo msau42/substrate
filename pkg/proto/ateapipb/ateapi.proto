@@ -170,19 +170,12 @@ message ObjectSnapshot {
   // +k8s:maxLength=2048 # the template's storage_location bound plus the owner prefix and snapshot name
   string snapshot_uri = 1;
 
-  // content_scope is what the snapshot captured.
-  //
-  // +k8s:optional
-  // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
-  SnapshotContentScope content_scope = 2;
-
   // UID of the ActorTemplate whose sandbox this snapshot's guest state was
   // captured from.
   //
   // +k8s:optional
   // +k8s:format=k8s-uuid
-  string actor_template_uid = 3;
+  string actor_template_uid = 2;
 }
 
 // LocalSnapshot records information about a node-local snapshot.
@@ -198,46 +191,42 @@ message LocalSnapshot {
   // +k8s:listType=set
   // +k8s:eachVal=+k8s:format=k8s-long-name
   repeated string node_vms_with_local_snapshots = 1;
-
-  // Scope the pause checkpoint captured (the template's onPause at pause
-  // time). UNSPECIFIED is tolerated for compatibility and reads as FULL.
-  //
-  // +k8s:optional
-  // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
-  SnapshotContentScope content_scope = 2;
 }
 
 // BlockSnapshot describes a snapshot backed by block storage.
+// For an Actor snapshot, the backing volume is tracked in
+// ActorStatus.snapshot_storage.block_volume.
 message BlockSnapshot {
-  // external_volume is the backing block volume for all of Actor's snapshot.
-  // It persists for the lifetime of the Actor.
-  // In the context of a Tag, this is the source volume to take a snapshot from.
-  //
-  // +k8s:optional
-  ExternalVolume external_volume = 1;
-
   // volume_snapshot_id is the identifier for a Tag snapshot.
   // It persists for the lifetime of the Tag.
-  // It is unset when this snapshot is not associated with a Tag.
+  // It is unset when this snapshot is not associated with a Tag, or while the
+  // Tag is still being created.
   //
   // +k8s:optional
   // +k8s:maxLength=256
-  string volume_snapshot_id = 2;
-
-  // content_scope is what the snapshot captured.
-  //
-  // +k8s:optional
-  // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
-  SnapshotContentScope content_scope = 3;
+  string volume_snapshot_id = 1;
 
   // UID of the ActorTemplate whose sandbox this snapshot's guest state was
   // captured from.
   //
   // +k8s:optional
   // +k8s:format=k8s-uuid
-  string actor_template_uid = 4;
+  string actor_template_uid = 2;
+
+  // source_volume_id is the storage_volume_id of the source Actor's block
+  // volume from which a Tag snapshot is created. Set on Tag snapshots only.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=256
+  string source_volume_id = 3;
+
+  // volume_type is the internal volume plugin name or CSI driver name of the
+  // backing block storage. Set on Tag snapshots so the storage driver can be
+  // resolved during Tag creation and deletion without the source Actor.
+  //
+  // +k8s:optional
+  // +k8s:maxLength=253
+  string volume_type = 4;
 }
 
 // Snapshot describes a snapshot of an Actor.
@@ -274,6 +263,14 @@ message Snapshot {
   // +k8s:optional
   // +k8s:unionMember
   BlockSnapshot block = 5;
+
+  // content_scope is what the snapshot captured.
+  // UNSPECIFIED is tolerated for compatibility and reads as FULL.
+  //
+  // +k8s:optional
+  // +k8s:minimum=1
+  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
+  SnapshotContentScope content_scope = 6;
 }
 
 enum SnapshotContentScope {
@@ -617,6 +614,17 @@ enum ActorState {
   // Keep this in sync with ActorStatus.state's maximum.
 }
 
+// SnapshotStorage describes the backing storage provisioned for an Actor's
+// snapshots across the Actor's lifetime.
+message SnapshotStorage {
+  // block_volume is the dedicated block volume that stores this Actor's
+  // snapshots when using block-based snapshot storage.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  ExternalVolume block_volume = 1;
+}
+
 message ActorStatus {
   // state is the Actor's current lifecycle state.
   //
@@ -662,6 +670,13 @@ message ActorStatus {
   //
   // +k8s:optional
   Snapshot in_progress_snapshot_status = 11;
+
+  // snapshot_storage tracks the backing storage resource (e.g. CSI block volume)
+  // provisioned for this Actor's snapshots. It persists for the lifetime of the
+  // Actor and is deleted when the Actor is deleted.
+  //
+  // +k8s:optional
+  SnapshotStorage snapshot_storage = 12;
 }
 
 // WorkerAssignment points at the Worker currently hosting an Actor.

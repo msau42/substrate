@@ -194,7 +194,7 @@ func (w *ActorWorkflow) ensureAteletTerminated(ctx context.Context, actorRef res
 		ActorTemplateAtespace: actor.GetActorTemplate().GetAtespace(),
 		ActorTemplateName:     actor.GetActorTemplate().GetName(),
 		Spec:                  workloadSpec,
-		Snapshot:              activeActorSnapshot(actor),
+		SnapshotStorage:       actor.GetStatus().GetSnapshotStorage(),
 	}
 
 	if _, err := client.Terminate(ctx, req); err != nil {
@@ -273,7 +273,7 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 	}
 
 	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, activeActorSnapshot(latestActor), assignment.GetNodeName()); err != nil {
+		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
 			return nil, err
 		}
 		_, _, err := releaseWorker(ctx, w.store, latestActor)

@@ -72,8 +72,9 @@ func TestCreateActor_Success(t *testing.T) {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ActorTemplateUid: tmpl.GetMetadata().GetUid()},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 		},
 		WorkerSelector: &ateapipb.Selector{MatchLabels: map[string]string{"tier": "free"}},
@@ -289,7 +290,7 @@ func TestCreateActor_RejectsDifferentTemplateForDataSnapshot(t *testing.T) {
 	createTemplateWithSelector(t, tc, "tmpl2", nil)
 
 	seedTag(t, tc, "data-source", "data-snapshot", func(tag *ateapipb.Tag) {
-		tag.Status.Snapshot.Object.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+		tag.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 		tag.Status.ActorTemplateUid = tmpl.GetMetadata().GetUid()
 	})
 
@@ -689,8 +690,9 @@ func TestUpdateActor_Success(t *testing.T) {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ActorTemplateUid: tmpl.GetMetadata().GetUid()},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 		},
 		WorkerSelector: &ateapipb.Selector{
@@ -838,8 +840,9 @@ func TestUpdateActor(t *testing.T) {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ActorTemplateUid: tmpl.GetMetadata().GetUid()},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 		},
 		WorkerSelector: &ateapipb.Selector{
@@ -2805,8 +2808,9 @@ func TestResumeActor(t *testing.T) {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_RUNNING,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ActorTemplateUid: tmpl.GetMetadata().GetUid()},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 			WorkerAssignment: &ateapipb.WorkerAssignment{
 				Worker:          &ateapipb.ObjectRef{Name: podUID},
@@ -3207,7 +3211,8 @@ func TestSuspendActor(t *testing.T) {
 			Snapshot: &ateapipb.Snapshot{
 				SnapshotId:    tagged.GetStatus().GetSnapshot().GetSnapshotId(),
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: tagSnapshotURI, ContentScope: sourceActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope()},
+				ContentScope:  sourceActor.GetStatus().GetDurableSnapshotStatus().GetContentScope(),
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: tagSnapshotURI},
 			},
 			ActorTemplateUid: tmpl.GetMetadata().GetUid(),
 			State:            ateapipb.TagState_TAG_STATE_READY,
@@ -3316,10 +3321,10 @@ func TestSuspendActor(t *testing.T) {
 				SnapshotId: sourceActor.GetStatus().GetDurableSnapshotStatus().GetSnapshotId(),
 				Object: &ateapipb.ObjectSnapshot{
 					SnapshotUri:      snapshotURI,
-					ContentScope:     sourceActor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
 					ActorTemplateUid: tmpl.GetMetadata().GetUid(),
 				},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  sourceActor.GetStatus().GetDurableSnapshotStatus().GetContentScope(),
 			},
 		},
 	}
@@ -3612,15 +3617,16 @@ func TestPauseActor(t *testing.T) {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_PAUSED,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, ActorTemplateUid: tmpl.GetMetadata().GetUid()},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ActorTemplateUid: tmpl.GetMetadata().GetUid()},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 			LatestSnapshotStatus: &ateapipb.Snapshot{
 				Local: &ateapipb.LocalSnapshot{
 					NodeVmsWithLocalSnapshots: []string{"node1"},
-					ContentScope:              ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				},
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 		},
 	}
@@ -4326,7 +4332,7 @@ func TestSuspendActor_FromPaused(t *testing.T) {
 	if got, want := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetSnapshotUri(), upload.GetDestinationSnapshotUri(); got != want {
 		t.Errorf("snapshot URI = %q, want the upload destination %q", got, want)
 	}
-	if got := actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(); got != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
+	if got := actor.GetStatus().GetDurableSnapshotStatus().GetContentScope(); got != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
 		t.Errorf("snapshot ContentScope = %v, want FULL", got)
 	}
 }

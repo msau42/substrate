@@ -175,17 +175,27 @@ func RunscDebugLogDir(actorUID, containerName string) string {
 	)
 }
 
-func CheckpointStateDir(actorUID string) string {
-	return filepath.Join(
-		ActorPath(actorUID),
-		"checkpoint-state",
-	)
-}
+const (
+	// CheckpointStateDirName is the subdirectory under LocalCheckpointsDir
+	// where ateom writes raw checkpoint files before staging.
+	CheckpointStateDirName = "checkpoint-state"
+
+	// RestoreStateDirName is the subdirectory under LocalCheckpointsDir
+	// where atelet stages checkpoint files for ateom to restore from.
+	RestoreStateDirName = "restore-state"
+)
 
 func LocalCheckpointsDir(actorUID string) string {
 	return filepath.Join(
 		ActorPath(actorUID),
 		"local-checkpoint",
+	)
+}
+
+func CheckpointStateDir(actorUID string) string {
+	return filepath.Join(
+		LocalCheckpointsDir(actorUID),
+		CheckpointStateDirName,
 	)
 }
 
@@ -263,8 +273,8 @@ func SystemInfoVolumeRoot(actorUID, volumeName string) string {
 // yet been loaded.
 func RestoreStateDir(actorUID string) string {
 	return filepath.Join(
-		ActorPath(actorUID),
-		"restore-state",
+		LocalCheckpointsDir(actorUID),
+		RestoreStateDirName,
 	)
 }
 

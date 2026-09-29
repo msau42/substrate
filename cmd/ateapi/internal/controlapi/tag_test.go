@@ -674,7 +674,8 @@ func TestUpdateTag(t *testing.T) {
 				Status: &ateapipb.TagStatus{
 					Snapshot: &ateapipb.Snapshot{
 						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://attacker/elsewhere", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA},
+						ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
+						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://attacker/elsewhere"},
 					},
 					ActorTemplateUid: "other-template-uid",
 				},
@@ -790,7 +791,8 @@ func newTestSuspendedActor(t *testing.T, ctx context.Context, st store.Interface
 	}
 	return mustUpdateActorStatus(t, ctx, st, actor, func(status *ateapipb.ActorStatus) {
 		status.DurableSnapshotStatus = &ateapipb.Snapshot{
-			Object: &ateapipb.ObjectSnapshot{SnapshotUri: uri.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+			ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			Object:       &ateapipb.ObjectSnapshot{SnapshotUri: uri.String()},
 		}
 	})
 }
@@ -814,9 +816,9 @@ func newTestTag(t *testing.T, name string, actor *ateapipb.Actor) *ateapipb.Tag 
 			Snapshot: &ateapipb.Snapshot{
 				SnapshotId:    uri.Name(),
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  actor.GetStatus().GetDurableSnapshotStatus().GetContentScope(),
 				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  uri.String(),
-					ContentScope: actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
+					SnapshotUri: uri.String(),
 				},
 			},
 			State: ateapipb.TagState_TAG_STATE_READY,

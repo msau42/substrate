@@ -97,7 +97,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 			}
 		}
 	}
-	initialSnapshot, err := s.getSnapshotPlugin().PrepareNewActor(ctx, inActor, template)
+	snapshotStorage, initialSnapshot, err := s.getSnapshotPlugin().PrepareNewActor(ctx, inActor, template)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +117,7 @@ func (s *ServiceImpl) CreateActor(ctx context.Context, inActor *ateapipb.Actor) 
 		State:                 ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 		ActorVolumes:          initVols,
 		DurableSnapshotStatus: initialSnapshot,
+		SnapshotStorage:       snapshotStorage,
 	}
 	if errs := validateActorUpdate(ctx, field.NewPath("actor"), outActor, inActor, true); len(errs) > 0 {
 		return nil, toGRPCInternalError(errs)
@@ -147,7 +148,7 @@ func (s *ServiceImpl) resolveTagForNewActor(ctx context.Context, actor *ateapipb
 		return nil, err
 	}
 	if actor.GetSourceTag() == nil && sourceTag.GetStatus().GetSnapshot().GetBlock() == nil {
-		if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot().GetObject()); err != nil {
+		if err := validateGoldenSnapshotScope(sourceTag.GetStatus().GetSnapshot()); err != nil {
 			return nil, err
 		}
 	}

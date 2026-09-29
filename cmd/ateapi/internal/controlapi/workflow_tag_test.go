@@ -45,9 +45,9 @@ func seedTagSource(t *testing.T, ctx context.Context, persistence store.Interfac
 	objects.PutSnapshot(t, uri, objectNames...)
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
 		s.DurableSnapshotStatus = &ateapipb.Snapshot{
+			ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			Object: &ateapipb.ObjectSnapshot{
 				SnapshotUri:      uri.String(),
-				ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				ActorTemplateUid: template.GetMetadata().GetUid(),
 			},
 		}
@@ -105,7 +105,7 @@ func TestTagActorSnapshot(t *testing.T) {
 	if got, want := tag.GetStatus().GetActorTemplateUid(), template.GetMetadata().GetUid(); got != want {
 		t.Errorf("actor template uid = %q, want %q", got, want)
 	}
-	if got, want := tag.GetStatus().GetSnapshot().GetObject().GetContentScope(), ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL; got != want {
+	if got, want := tag.GetStatus().GetSnapshot().GetContentScope(), ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL; got != want {
 		t.Errorf("content scope = %v, want the source's %v", got, want)
 	}
 

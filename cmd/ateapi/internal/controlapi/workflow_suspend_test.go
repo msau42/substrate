@@ -660,8 +660,9 @@ func TestEnsureMarkedSuspending_PausedScopeRejection(t *testing.T) {
 				Status: &ateapipb.ActorStatus{
 					State: ateapipb.ActorState_ACTOR_STATE_PAUSED,
 					LatestSnapshotStatus: &ateapipb.Snapshot{
-						SnapshotId: "snap",
-						Local:      &ateapipb.LocalSnapshot{NodeVmsWithLocalSnapshots: []string{"node1"}, ContentScope: tc.captured},
+						SnapshotId:   "snap",
+						Local:        &ateapipb.LocalSnapshot{NodeVmsWithLocalSnapshots: []string{"node1"}},
+						ContentScope: tc.captured,
 					},
 				},
 			})

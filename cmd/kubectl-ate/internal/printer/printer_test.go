@@ -601,7 +601,8 @@ func TestPrintTagsTo_Table(t *testing.T) {
 			Status: &ateapipb.TagStatus{
 				State: ateapipb.TagState_TAG_STATE_READY,
 				Snapshot: &ateapipb.Snapshot{
-					Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://private/atespaces/team-a/tags/v2", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					Object:       &ateapipb.ObjectSnapshot{SnapshotUri: "gs://private/atespaces/team-a/tags/v2"},
 				},
 			},
 		},
@@ -615,7 +616,8 @@ func TestPrintTagsTo_Table(t *testing.T) {
 			Status: &ateapipb.TagStatus{
 				State: ateapipb.TagState_TAG_STATE_READY,
 				Snapshot: &ateapipb.Snapshot{
-					Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://private/atespaces/team-a/tags/v1", ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					Object:       &ateapipb.ObjectSnapshot{SnapshotUri: "gs://private/atespaces/team-a/tags/v1"},
 				},
 			},
 		},

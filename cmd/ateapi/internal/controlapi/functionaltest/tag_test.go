@@ -49,7 +49,8 @@ func seedTag(t *testing.T, tc *testContext, actorName, tagName string, opts ...f
 	}
 	actor, err = tc.persistence.UpdateActor(ctx, resources.ActorRefFromActor(actor), store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.DurableSnapshotStatus = &ateapipb.Snapshot{
-			Object: &ateapipb.ObjectSnapshot{SnapshotUri: actorSnapshotURI.String(), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+			ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+			Object:       &ateapipb.ObjectSnapshot{SnapshotUri: actorSnapshotURI.String()},
 		}
 		return nil
 	})
@@ -69,9 +70,9 @@ func seedTag(t *testing.T, tc *testContext, actorName, tagName string, opts ...f
 			Snapshot: &ateapipb.Snapshot{
 				SnapshotId:    uri.Name(),
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  actor.GetStatus().GetDurableSnapshotStatus().GetContentScope(),
 				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  uri.String(),
-					ContentScope: actor.GetStatus().GetDurableSnapshotStatus().GetObject().GetContentScope(),
+					SnapshotUri: uri.String(),
 				},
 			},
 			State: ateapipb.TagState_TAG_STATE_READY,

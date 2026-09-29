@@ -137,7 +137,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 	// fabricate the memory a Full commit needs from a Data-only capture.
 	// Reject before leaving PAUSED so the actor stays resumable.
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED &&
-		pausedContentScope(actor.GetStatus().GetLatestSnapshotStatus().GetLocal(), actorTemplate) == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA &&
+		pausedContentScope(actor.GetStatus().GetLatestSnapshotStatus(), actorTemplate) == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA &&
 		commitSnapshotScope(actorRef.Atespace, actorTemplate) == ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
 		return nil, status.Errorf(codes.FailedPrecondition, "actor %s paused with a Data snapshot; the template commits Full, which a paused-origin suspend cannot produce", actorRef)
 	}
@@ -179,8 +179,8 @@ func commitSnapshotScope(atespace string, tmpl *ateapipb.ActorTemplate) ateapipb
 // captured with: the value recorded at pause finalization, or — for actors
 // paused before content_scope existed — the template's onPause, the same
 // derivation resume uses for local snapshots.
-func pausedContentScope(local *ateapipb.LocalSnapshot, tmpl *ateapipb.ActorTemplate) ateapipb.SnapshotContentScope {
-	if scope := local.GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
+func pausedContentScope(snap *ateapipb.Snapshot, tmpl *ateapipb.ActorTemplate) ateapipb.SnapshotContentScope {
+	if scope := snap.GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
 		return scope
 	}
 	return tmpl.GetSnapshotConfig().GetOnPause()
@@ -245,9 +245,10 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 				SnapshotUri: actor.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri(),
 			},
 		},
-		Scope:    actorSnapshotContentScopeToAtelet(commitSnapshotScope(actor.GetMetadata().GetAtespace(), actorTemplate)),
-		ActorUid: actor.GetMetadata().Uid,
-		Snapshot: actor.GetStatus().GetInProgressSnapshotStatus(),
+		Scope:           actorSnapshotContentScopeToAtelet(commitSnapshotScope(actor.GetMetadata().GetAtespace(), actorTemplate)),
+		ActorUid:        actor.GetMetadata().Uid,
+		Snapshot:        actor.GetStatus().GetInProgressSnapshotStatus(),
+		SnapshotStorage: actor.GetStatus().GetSnapshotStorage(),
 	}
 	wireSnapshotScope = ateattr.SnapshotScopeValue(req.Scope)
 
@@ -301,7 +302,8 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 		DestinationSnapshotUri: actor.GetStatus().GetInProgressSnapshotStatus().GetObject().GetSnapshotUri(),
 		// The commit scope, like a running-origin suspend; atelet converts
 		// from the captured scope in the snapshot's manifest where possible.
-		DesiredScope: actorSnapshotContentScopeToAtelet(commitSnapshotScope(actor.GetMetadata().GetAtespace(), actorTemplate)),
+		DesiredScope:    actorSnapshotContentScopeToAtelet(commitSnapshotScope(actor.GetMetadata().GetAtespace(), actorTemplate)),
+		SnapshotStorage: actor.GetStatus().GetSnapshotStorage(),
 	}
 	if inProgress := actor.GetStatus().GetInProgressSnapshotStatus(); inProgress.GetBlock() != nil {
 		req.Snapshot = inProgress
@@ -367,7 +369,7 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 
 	// 1. Free the worker (if it hasn't been freed yet)
 	if assignment := latestActor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetInProgressSnapshotStatus(), assignment.GetNodeName()); err != nil {
+		if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, assignment.GetNodeName()); err != nil {
 			return nil, err
 		}
 		t = time.Now()
@@ -397,7 +399,6 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	if inProgressSnapshotURI != "" {
 		externalSnapshot = &ateapipb.ObjectSnapshot{
 			SnapshotUri:      inProgressSnapshotURI,
-			ContentScope:     commitSnapshotScope(actorRef.Atespace, actorTemplate),
 			ActorTemplateUid: actorTemplate.GetMetadata().GetUid(),
 		}
 	}
@@ -423,16 +424,17 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 				SnapshotId:    inProgressSnapshotID,
 				Object:        proto.CloneOf(externalSnapshot),
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  commitSnapshotScope(actorRef.Atespace, actorTemplate),
 			}
 			toUpdate.Status.InProgressSnapshotStatus = nil
 		} else if inProgressBlock != nil {
 			blockSnap := proto.CloneOf(inProgressBlock)
 			blockSnap.ActorTemplateUid = actorTemplate.GetMetadata().GetUid()
-			blockSnap.ContentScope = commitSnapshotScope(actorRef.Atespace, actorTemplate)
 			toUpdate.Status.DurableSnapshotStatus = &ateapipb.Snapshot{
 				SnapshotId:    inProgressSnapshotID,
 				Block:         blockSnap,
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  commitSnapshotScope(actorRef.Atespace, actorTemplate),
 			}
 			toUpdate.Status.InProgressSnapshotStatus = nil
 		}

@@ -196,8 +196,9 @@ func (w *ActorWorkflow) ensureAteletPaused(ctx context.Context, actorRef resourc
 				SnapshotName: actor.GetStatus().GetInProgressSnapshotStatus().GetSnapshotId(),
 			},
 		},
-		Scope:    actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause()),
-		ActorUid: actor.GetMetadata().Uid,
+		Scope:           actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause()),
+		ActorUid:        actor.GetMetadata().Uid,
+		SnapshotStorage: actor.GetStatus().GetSnapshotStorage(),
 	}
 	if inProgress := actor.GetStatus().GetInProgressSnapshotStatus(); inProgress.GetBlock() != nil {
 		req.Snapshot = inProgress
@@ -242,7 +243,7 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			slog.Warn("Worker already gone during finalize pause, skipping release", "worker", assignment.GetWorkerPod())
 		} else {
 			nodeName = worker.GetNodeName()
-			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, latestActor.GetStatus().GetInProgressSnapshotStatus(), nodeName); err != nil {
+			if err := w.getSnapshotPlugin().UnassignFromNode(ctx, latestActor, nodeName); err != nil {
 				return nil, err
 			}
 			// Drop just this actor's assignment; any other actors the worker
@@ -285,9 +286,7 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 			toUpdate.Status.State = newState
 			// TODO(dberkov) - what if InProgressSnapshotStatus.SnapshotId is empty? That shouldn't be possible.
 			if inProgressName := toUpdate.GetStatus().GetInProgressSnapshotStatus().GetSnapshotId(); inProgressName != "" {
-				localSnapshot := &ateapipb.LocalSnapshot{
-					ContentScope: contentScope,
-				}
+				localSnapshot := &ateapipb.LocalSnapshot{}
 				if newState != ateapipb.ActorState_ACTOR_STATE_CRASHED {
 					localSnapshot.NodeVmsWithLocalSnapshots = []string{nodeName}
 				}
@@ -295,6 +294,7 @@ func (w *ActorWorkflow) ensurePausedFinalized(ctx context.Context, actorRef reso
 					SnapshotId:    inProgressName,
 					Local:         localSnapshot,
 					Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
+					ContentScope:  contentScope,
 				}
 				toUpdate.Status.InProgressSnapshotStatus = nil
 			}

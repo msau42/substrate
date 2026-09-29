@@ -167,8 +167,8 @@ func TestEnsurePausedFinalized_RecordsContentScope(t *testing.T) {
 			if got.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_PAUSED {
 				t.Fatalf("state = %v, want PAUSED", got.GetStatus().GetState())
 			}
-			if scope := got.GetStatus().GetLatestSnapshotStatus().GetLocal().GetContentScope(); scope != tc.want {
-				t.Errorf("LocalSnapshot.ContentScope = %v, want %v", scope, tc.want)
+			if scope := got.GetStatus().GetLatestSnapshotStatus().GetContentScope(); scope != tc.want {
+				t.Errorf("LatestSnapshotStatus.ContentScope = %v, want %v", scope, tc.want)
 			}
 			if surv := got.GetStatus().GetLatestSnapshotStatus().GetSurvivability(); surv != ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT {
 				t.Errorf("LatestSnapshotStatus.Survivability = %v, want RESIDENT", surv)

@@ -430,9 +430,9 @@ func TestValidateActorUpdate(t *testing.T) {
 		validOutput(withStatus(func(s *ateapipb.ActorStatus) {
 			s.DurableSnapshotStatus = &ateapipb.Snapshot{
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  "gs://private/atespaces/as/actors/" + someActorUID + "/snapshots/snap-1",
-					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					SnapshotUri: "gs://private/atespaces/as/actors/" + someActorUID + "/snapshots/snap-1",
 				},
 			}
 		})),
@@ -530,35 +530,38 @@ func TestValidateActorUpdate(t *testing.T) {
 		})),
 		field.ErrorList{field.Duplicate(field.NewPath("status", "latest_snapshot_status", "local", "node_vms_with_local_snapshots").Index(1), nil)},
 	}, {
-		"valid actor.status.latest_snapshot_status.local.content_scope",
+		"valid actor.status.latest_snapshot_status.content_scope",
 		validInput(),
 		validOutput(withStatus(func(s *ateapipb.ActorStatus) {
 			s.LatestSnapshotStatus = &ateapipb.Snapshot{
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
-				Local:         &ateapipb.LocalSnapshot{ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA},
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA,
+				Local:         &ateapipb.LocalSnapshot{},
 			}
 		})),
 		nil,
 	}, {
-		"negative actor.status.latest_snapshot_status.local.content_scope",
+		"negative actor.status.latest_snapshot_status.content_scope",
 		validInput(),
 		validOutput(withStatus(func(s *ateapipb.ActorStatus) {
 			s.LatestSnapshotStatus = &ateapipb.Snapshot{
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
-				Local:         &ateapipb.LocalSnapshot{ContentScope: ateapipb.SnapshotContentScope(-1)},
+				ContentScope:  ateapipb.SnapshotContentScope(-1),
+				Local:         &ateapipb.LocalSnapshot{},
 			}
 		})),
-		field.ErrorList{field.Invalid(field.NewPath("status", "latest_snapshot_status", "local", "content_scope"), nil, "").WithOrigin("minimum")},
+		field.ErrorList{field.Invalid(field.NewPath("status", "latest_snapshot_status", "content_scope"), nil, "").WithOrigin("minimum")},
 	}, {
-		"invalid actor.status.latest_snapshot_status.local.content_scope",
+		"invalid actor.status.latest_snapshot_status.content_scope",
 		validInput(),
 		validOutput(withStatus(func(s *ateapipb.ActorStatus) {
 			s.LatestSnapshotStatus = &ateapipb.Snapshot{
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_RESIDENT,
-				Local:         &ateapipb.LocalSnapshot{ContentScope: ateapipb.SnapshotContentScope(3)},
+				ContentScope:  ateapipb.SnapshotContentScope(3),
+				Local:         &ateapipb.LocalSnapshot{},
 			}
 		})),
-		field.ErrorList{field.Invalid(field.NewPath("status", "latest_snapshot_status", "local", "content_scope"), nil, "").WithOrigin("maximum")},
+		field.ErrorList{field.Invalid(field.NewPath("status", "latest_snapshot_status", "content_scope"), nil, "").WithOrigin("maximum")},
 	}, {
 		"too many actor_volumes",
 		validInput(),
@@ -1578,7 +1581,8 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 					Snapshot: &ateapipb.Snapshot{
 						SnapshotId:    someActorUID,
 						Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID, ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+						ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+						Object:        &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/atespaces/ate-golden/tags/" + someActorUID},
 					},
 				},
 			}
@@ -1593,7 +1597,7 @@ func TestCreateActor_GoldenTagDefault(t *testing.T) {
 				tag.Status.ActorTemplateUid = "other"
 				wantCode = codes.FailedPrecondition
 			case "data scope":
-				tag.Status.Snapshot.GetObject().ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+				tag.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 				wantCode = codes.FailedPrecondition
 			}
 			if scenario != "missing" {

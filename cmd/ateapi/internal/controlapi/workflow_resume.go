@@ -144,24 +144,25 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
 // taken before that rule existed — surface a clear error instead of shipping
 // a restore request atelet would reject (or that would boot an empty guest).
-func validateGoldenSnapshotScope(snapshot *ateapipb.ObjectSnapshot) error {
+func validateGoldenSnapshotScope(snapshot *ateapipb.Snapshot) error {
 	scope := snapshot.GetContentScope()
 	switch scope {
 	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED,
 		ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL:
 		return nil
 	default:
+		id := snapshot.GetObject().GetSnapshotUri()
+		if id == "" {
+			id = snapshot.GetSnapshotId()
+		}
 		return status.Errorf(codes.FailedPrecondition,
 			"ActorTemplate golden snapshot %q was taken with scope %s, not Full; regenerate the golden snapshot",
-			snapshot.GetSnapshotUri(), scope)
+			id, scope)
 	}
 }
 
 func snapshotContentScope(snap *ateapipb.Snapshot) ateapipb.SnapshotContentScope {
-	if scope := snap.GetObject().GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
-		return scope
-	}
-	if scope := snap.GetBlock().GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
+	if scope := snap.GetContentScope(); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED {
 		return scope
 	}
 	return ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL
@@ -199,7 +200,7 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 			return nil, nil, src, status.Errorf(codes.DataLoss, "Actor %s external snapshot: %v", actorRef, err)
 		}
 		src.Snapshot = durable
-		src.Scope = durable.GetObject().GetContentScope()
+		src.Scope = durable.GetContentScope()
 		capturedUnder := durable.GetObject().GetActorTemplateUid()
 		src.TemplateReplaced = capturedUnder != "" && capturedUnder != actorTemplate.GetMetadata().GetUid()
 	} else if hasDurableSnapshot(durable) && durable.GetBlock() != nil {
@@ -238,13 +239,11 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 			}
 			goldenSnap := tag.GetStatus().GetSnapshot()
 			if blockSnap := goldenSnap.GetBlock(); blockSnap != nil {
-				if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || (blockSnap.GetVolumeSnapshotId() == "" && blockSnap.GetExternalVolume().GetStorageVolumeId() == "") || tag.GetStatus().GetActorTemplateUid() != actorTemplate.GetMetadata().GetUid() {
+				if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || (blockSnap.GetVolumeSnapshotId() == "" && blockSnap.GetSourceVolumeId() == "") || tag.GetStatus().GetActorTemplateUid() != actorTemplate.GetMetadata().GetUid() {
 					return nil, nil, src, status.Error(codes.FailedPrecondition, "ActorTemplate golden tag is incomplete or belongs to another template")
 				}
-				if scope := snapshotContentScope(goldenSnap); scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED && scope != ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL {
-					return nil, nil, src, status.Errorf(codes.FailedPrecondition,
-						"ActorTemplate golden snapshot %q was taken with scope %s, not Full; regenerate the golden snapshot",
-						goldenSnap.GetSnapshotId(), scope)
+				if err := validateGoldenSnapshotScope(goldenSnap); err != nil {
+					return nil, nil, src, err
 				}
 				src.GoldenSnapshot = goldenSnap
 			} else {
@@ -252,7 +251,7 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 				if tag.GetStatus().GetState() != ateapipb.TagState_TAG_STATE_READY || golden.GetSnapshotUri() == "" || tag.GetStatus().GetActorTemplateUid() != actorTemplate.GetMetadata().GetUid() {
 					return nil, nil, src, status.Error(codes.FailedPrecondition, "ActorTemplate golden tag is incomplete or belongs to another template")
 				}
-				if err := validateGoldenSnapshotScope(golden); err != nil {
+				if err := validateGoldenSnapshotScope(goldenSnap); err != nil {
 					return nil, nil, src, err
 				}
 				goldenURI := golden.GetSnapshotUri()
@@ -331,7 +330,7 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := w.getSnapshotPlugin().AssignToNode(ctx, actor, activeActorSnapshot(actor), worker.GetNodeName()); err != nil {
+		if err := w.getSnapshotPlugin().AssignToNode(ctx, actor, worker.GetNodeName()); err != nil {
 			return nil, nil, err
 		}
 		markSkipped(ctx, "actor already RESUMING with a valid worker assignment")
@@ -374,20 +373,10 @@ func (w *ActorWorkflow) ensureWorkerAssigned(ctx context.Context, actorRef resou
 		}
 		return nil, nil, err
 	}
-	if err := w.getSnapshotPlugin().AssignToNode(ctx, assignedActor, activeActorSnapshot(assignedActor), assignedWorker.GetNodeName()); err != nil {
+	if err := w.getSnapshotPlugin().AssignToNode(ctx, assignedActor, assignedWorker.GetNodeName()); err != nil {
 		return nil, nil, err
 	}
 	return assignedActor, assignedWorker, nil
-}
-
-func activeActorSnapshot(actor *ateapipb.Actor) *ateapipb.Snapshot {
-	if snap := actor.GetStatus().GetDurableSnapshotStatus(); snap.GetBlock() != nil {
-		return snap
-	}
-	if snap := actor.GetStatus().GetLatestSnapshotStatus(); snap != nil {
-		return snap
-	}
-	return actor.GetStatus().GetDurableSnapshotStatus()
 }
 
 // validateAssignedWorker checks a RESUMING actor's persisted assignment
@@ -737,6 +726,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			EgressGateway:         egressGateway,
 			CpuMilli:              cpuMilli,
 			MemoryBytes:           memBytes,
+			SnapshotStorage:       actor.GetStatus().GetSnapshotStorage(),
 		}
 		req.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
 		req.Config = &ateletpb.RestoreRequest_LocalConfig{
@@ -755,7 +745,11 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		default:
 			req.Scope = actorSnapshotContentScopeToAtelet(actorTemplate.GetSnapshotConfig().GetOnPause())
 		}
-		if blockSnap := actor.GetStatus().GetDurableSnapshotStatus().GetBlock(); blockSnap != nil {
+		if actor.GetStatus().GetSnapshotStorage().GetBlockVolume() != nil {
+			blockSnap := actor.GetStatus().GetDurableSnapshotStatus().GetBlock()
+			if blockSnap == nil {
+				blockSnap = &ateapipb.BlockSnapshot{}
+			}
 			req.Snapshot = &ateapipb.Snapshot{
 				SnapshotId:    actor.GetStatus().GetLatestSnapshotStatus().GetSnapshotId(),
 				Survivability: actor.GetStatus().GetLatestSnapshotStatus().GetSurvivability(),
@@ -821,6 +815,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			CpuMilli:          cpuMilli,
 			MemoryBytes:       memBytes,
 			Snapshot:          src.Snapshot,
+			SnapshotStorage:   actor.GetStatus().GetSnapshotStorage(),
 		}
 		if _, err = client.Restore(ctx, req); err != nil {
 			slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",
@@ -856,7 +851,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 			EgressGateway:         egressGateway,
 			CpuMilli:              cpuMilli,
 			MemoryBytes:           memBytes,
-			Snapshot:              actor.GetStatus().GetDurableSnapshotStatus(),
+			SnapshotStorage:       actor.GetStatus().GetSnapshotStorage(),
 		}
 		if _, err = client.Run(ctx, req); err != nil {
 			slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",

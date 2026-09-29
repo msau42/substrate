@@ -315,11 +315,7 @@ func hasDurableSnapshot(snap *ateapipb.Snapshot) bool {
 	if snap.GetObject().GetSnapshotUri() != "" {
 		return true
 	}
-	blockSnap := snap.GetBlock()
-	if blockSnap == nil || snap.GetSnapshotId() == "" {
-		return false
-	}
-	return blockSnap.GetVolumeSnapshotId() != "" || blockSnap.GetExternalVolume().GetStorageVolumeId() != ""
+	return snap.GetBlock() != nil && snap.GetSnapshotId() != ""
 }
 
 // suspendActor waits for the golden actor to produce an external snapshot.

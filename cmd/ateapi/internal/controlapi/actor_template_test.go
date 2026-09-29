@@ -387,9 +387,9 @@ func TestDeleteActorTemplate(t *testing.T) {
 			objects.PutSnapshot(t, actorURI, "manifest.json")
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
 				s.DurableSnapshotStatus = &ateapipb.Snapshot{
+					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 					Object: &ateapipb.ObjectSnapshot{
 						SnapshotUri:      actorURI.String(),
-						ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 						ActorTemplateUid: tmpl.GetMetadata().GetUid(),
 					},
 				}

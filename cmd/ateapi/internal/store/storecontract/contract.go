@@ -1147,9 +1147,9 @@ func newTestSuspendedActor(atespace, name string) *ateapipb.Actor {
 		Status: &ateapipb.ActorStatus{
 			State: ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
 			DurableSnapshotStatus: &ateapipb.Snapshot{
+				ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  testActorSnapshotURI("gs://private", atespace, name),
-					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					SnapshotUri: testActorSnapshotURI("gs://private", atespace, name),
 				},
 			},
 		},
@@ -1170,9 +1170,9 @@ func newTestInProgressTag(name string, actor *ateapipb.Actor) *ateapipb.Tag {
 			Snapshot: &ateapipb.Snapshot{
 				SnapshotId:    name,
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 				Object: &ateapipb.ObjectSnapshot{
-					SnapshotUri:  testTagSnapshotURI("gs://private", atespace, name),
-					ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
+					SnapshotUri: testTagSnapshotURI("gs://private", atespace, name),
 				},
 			},
 		},
@@ -1346,7 +1346,7 @@ func runTagContractTests(t *testing.T, setup func(t *testing.T) store.Interface)
 			{
 				name: "snapshot content scope",
 				mutate: func(toUpdate *ateapipb.Tag) {
-					toUpdate.Status.Snapshot.GetObject().ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
+					toUpdate.Status.Snapshot.ContentScope = ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_DATA
 				},
 			},
 			{

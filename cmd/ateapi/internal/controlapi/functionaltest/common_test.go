@@ -459,7 +459,8 @@ func createTemplateWithContainersAndVolumes(t *testing.T, tc *testContext, ns st
 		Status: &ateapipb.TagStatus{
 			Snapshot: &ateapipb.Snapshot{
 				Survivability: ateapipb.SurvivabilityRung_SURVIVABILITY_RUNG_DURABLE,
-				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
+				Object:        &ateapipb.ObjectSnapshot{SnapshotUri: goldenSnapshotURI(t)},
+				ContentScope:  ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
 			},
 			ActorTemplateUid: created.GetMetadata().GetUid(),
 			State:            ateapipb.TagState_TAG_STATE_READY,

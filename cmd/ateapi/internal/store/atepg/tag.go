@@ -206,9 +206,10 @@ func isAllowedPendingExternalVolumeFinalization(storedTag, mutatedTag *ateapipb.
 	}
 	return storedSnap.GetSnapshotId() == mutatedSnap.GetSnapshotId() &&
 		storedSnap.GetSurvivability() == mutatedSnap.GetSurvivability() &&
-		storedBlock.GetContentScope() == mutatedBlock.GetContentScope() &&
+		storedSnap.GetContentScope() == mutatedSnap.GetContentScope() &&
 		storedBlock.GetActorTemplateUid() == mutatedBlock.GetActorTemplateUid() &&
-		proto.Equal(storedBlock.GetExternalVolume(), mutatedBlock.GetExternalVolume())
+		storedBlock.GetSourceVolumeId() == mutatedBlock.GetSourceVolumeId() &&
+		storedBlock.GetVolumeType() == mutatedBlock.GetVolumeType()
 }
 
 func validateUpdateTagMutation(storedTag, mutatedTag *ateapipb.Tag) error {

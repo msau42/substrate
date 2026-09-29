@@ -94,3 +94,18 @@ func TestActorPathUsesUID(t *testing.T) {
 		t.Errorf("ActorPath(%q) = %q, want suffix %q", uid1, path1, want)
 	}
 }
+
+func TestSnapshotDirsShareLocalCheckpointsMount(t *testing.T) {
+	uid := "123e4567-e89b-12d3-a456-426614174000"
+	mount := LocalCheckpointsDir(uid)
+
+	for name, dir := range map[string]string{
+		"CheckpointStateDir": CheckpointStateDir(uid),
+		"RestoreStateDir":    RestoreStateDir(uid),
+		"LocalSnapshotDir":   LocalSnapshotDir(uid, "snap-1"),
+	} {
+		if !strings.HasPrefix(dir, mount+"/") {
+			t.Errorf("%s(%q) = %q, want under mount %q", name, uid, dir, mount)
+		}
+	}
+}

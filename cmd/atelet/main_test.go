@@ -115,11 +115,11 @@ func TestCopyLocalCheckpointLinks(t *testing.T) {
 
 	t.Run("links when it can", func(t *testing.T) {
 		srcDir, dstDir := newDirs(t)
-		s := &AteomHerder{}
-		if err := s.copyLocalCheckpoint(context.Background(), snapshot, srcDir, dstDir, []string{"memory-ranges"}); err != nil {
-			t.Fatalf("copyLocalCheckpoint: %v", err)
+		srcSnapDir := filepath.Join(srcDir, snapshot)
+		if err := stageRestoreFiles(context.Background(), srcSnapDir, dstDir, []string{"memory-ranges"}); err != nil {
+			t.Fatalf("stageRestoreFiles: %v", err)
 		}
-		src := filepath.Join(srcDir, snapshot, "memory-ranges")
+		src := filepath.Join(srcSnapDir, "memory-ranges")
 		dst := filepath.Join(dstDir, "memory-ranges")
 		if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("dst content = %q (err %v), want %q", got, err, want)
@@ -131,20 +131,20 @@ func TestCopyLocalCheckpointLinks(t *testing.T) {
 
 	t.Run("falls back to copying across filesystems", func(t *testing.T) {
 		srcDir, dstDir := newDirs(t)
+		srcSnapDir := filepath.Join(srcDir, snapshot)
 		// EXDEV stands in for the mount boundary a unit test cannot produce.
 		orig := linkFile
 		linkFile = func(string, string) error { return unix.EXDEV }
 		t.Cleanup(func() { linkFile = orig })
 
-		s := &AteomHerder{}
-		if err := s.copyLocalCheckpoint(context.Background(), snapshot, srcDir, dstDir, []string{"memory-ranges"}); err != nil {
-			t.Fatalf("copyLocalCheckpoint: %v", err)
+		if err := stageRestoreFiles(context.Background(), srcSnapDir, dstDir, []string{"memory-ranges"}); err != nil {
+			t.Fatalf("stageRestoreFiles: %v", err)
 		}
 		dst := filepath.Join(dstDir, "memory-ranges")
 		if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("dst content = %q (err %v), want %q", got, err, want)
 		}
-		if inode(t, filepath.Join(srcDir, snapshot, "memory-ranges")) == inode(t, dst) {
+		if inode(t, filepath.Join(srcSnapDir, "memory-ranges")) == inode(t, dst) {
 			t.Error("expected a copy on the fallback path, got a link")
 		}
 	})
@@ -154,14 +154,14 @@ func TestCopyLocalCheckpointLinks(t *testing.T) {
 	// link to src, where its O_TRUNC empties both before the copy reads a byte.
 	t.Run("other link failures are fatal", func(t *testing.T) {
 		srcDir, dstDir := newDirs(t)
+		srcSnapDir := filepath.Join(srcDir, snapshot)
 		dst := filepath.Join(dstDir, "memory-ranges")
-		if err := os.Link(filepath.Join(srcDir, snapshot, "memory-ranges"), dst); err != nil {
+		if err := os.Link(filepath.Join(srcSnapDir, "memory-ranges"), dst); err != nil {
 			t.Fatal(err)
 		}
-		s := &AteomHerder{}
 		// dst already exists, so os.Link fails with EEXIST.
-		if err := s.copyLocalCheckpoint(context.Background(), snapshot, srcDir, dstDir, []string{"memory-ranges"}); err == nil {
-			t.Fatal("copyLocalCheckpoint accepted a non-EXDEV link failure, want an error")
+		if err := stageRestoreFiles(context.Background(), srcSnapDir, dstDir, []string{"memory-ranges"}); err == nil {
+			t.Fatal("stageRestoreFiles accepted a non-EXDEV link failure, want an error")
 		}
 		if got, err := os.ReadFile(dst); err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("dst content = %q (err %v), want the untouched %q", got, err, want)
@@ -1582,11 +1582,12 @@ func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
 			r.DestinationSnapshotUri = ""
 			r.Snapshot = &ateapipb.Snapshot{
 				SnapshotId: "snap-block-1",
-				Block: &ateapipb.BlockSnapshot{
-					ExternalVolume: &ateapipb.ExternalVolume{
-						VolumeName:      "snapshot",
-						StorageVolumeId: "vol-1",
-					},
+				Block:      &ateapipb.BlockSnapshot{},
+			}
+			r.SnapshotStorage = &ateapipb.SnapshotStorage{
+				BlockVolume: &ateapipb.ExternalVolume{
+					VolumeName:      "snapshot",
+					StorageVolumeId: "vol-1",
 				},
 			}
 		}, false},

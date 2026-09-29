@@ -476,8 +476,8 @@ func (s *AteomHerder) getBlockSnapshotPlugin() snapshot.SnapshotPluginWorkerPlan
 	return s.blockSnapshotPlugin
 }
 
-func (s *AteomHerder) getSnapshotPluginFor(snap *ateapipb.Snapshot) snapshot.SnapshotPluginWorkerPlane {
-	if snap.GetBlock().GetExternalVolume() != nil {
+func (s *AteomHerder) getSnapshotPluginFor(storage *ateapipb.SnapshotStorage) snapshot.SnapshotPluginWorkerPlane {
+	if storage.GetBlockVolume() != nil {
 		return s.getBlockSnapshotPlugin()
 	}
 	return s.getSnapshotPlugin()
@@ -540,8 +540,11 @@ func (s *AteomHerder) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *
 		return nil, err
 	}
 
-	if err := s.getSnapshotPluginFor(req.GetSnapshot()).PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshot()); err != nil {
+	if err := s.getSnapshotPluginFor(req.GetSnapshotStorage()).PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshotStorage()); err != nil {
 		return nil, fmt.Errorf("while preparing snapshot storage: %w", err)
+	}
+	if err := resetSnapshotStateDirs(actorUID); err != nil {
+		return nil, fmt.Errorf("while resetting snapshot state dirs: %w", err)
 	}
 
 	// Record the sandbox binaries this actor is running so a later Checkpoint
@@ -737,8 +740,8 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// pins it to this node, nothing clears the field).
 	//
 	// Best-effort: if this fail, the actor's terminate prunes again.
-	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
-	if req.GetSnapshot().GetBlock() == nil {
+	plugin := s.getSnapshotPluginFor(req.GetSnapshotStorage())
+	if req.GetSnapshotStorage().GetBlockVolume() == nil && req.GetSnapshot().GetBlock() == nil {
 		if err := plugin.DetachCheckpointDir(ctx, actorUID, ""); err != nil {
 			slog.WarnContext(ctx, "failed to prune superseded local checkpoints", slog.Any("actor", actorRef), slog.Any("err", err))
 		}
@@ -757,13 +760,17 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 		dPersist = time.Since(tPersist)
 		return nil, err
 	}
+	if err := resetSnapshotStateDirs(actorUID); err != nil {
+		dPersist = time.Since(tPersist)
+		return nil, fmt.Errorf("while resetting snapshot state dirs: %w", err)
+	}
 	if _, err := plugin.CommitCheckpoint(ctx, req, writeDir); err != nil {
 		dPersist = time.Since(tPersist)
 		return nil, fmt.Errorf("while committing checkpoint: %w", err)
 	}
 	dPersist = time.Since(tPersist)
 
-	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil && req.GetType() == ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL {
+	if extVol := req.GetSnapshotStorage().GetBlockVolume(); extVol != nil && req.GetType() == ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL {
 		detachCtx := block.WithVolumeMetadata(ctx, block.VolumeMetadata{
 			StorageVolumeID: extVol.GetStorageVolumeId(),
 			VolumeType:      extVol.GetVolumeType(),
@@ -882,7 +889,7 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 		}
 	}
 
-	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
+	plugin := s.getSnapshotPluginFor(req.GetSnapshotStorage())
 	escalateCtx := object.WithLocalSnapshotName(ctx, req.GetLocalSnapshotName())
 	escalateCtx = block.WithLocalSnapshotName(escalateCtx, req.GetLocalSnapshotName())
 	ckptReq := &ateletpb.CheckpointRequest{
@@ -898,7 +905,8 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 				SnapshotUri: req.GetDestinationSnapshotUri(),
 			},
 		},
-		Snapshot: req.GetSnapshot(),
+		Snapshot:        req.GetSnapshot(),
+		SnapshotStorage: req.GetSnapshotStorage(),
 	}
 
 	tPersist := time.Now()
@@ -912,7 +920,7 @@ func (s *AteomHerder) UploadPausedCheckpoint(ctx context.Context, req *ateletpb.
 	// actor; free the node's disk (best-effort, like Checkpoint).
 	detachCtx := ctx
 	detachVolumeID := req.GetLocalSnapshotName()
-	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil {
+	if extVol := req.GetSnapshotStorage().GetBlockVolume(); extVol != nil {
 		detachCtx = block.WithVolumeMetadata(ctx, block.VolumeMetadata{
 			VolumeType:      extVol.GetVolumeType(),
 			StorageVolumeID: extVol.GetStorageVolumeId(),
@@ -1029,11 +1037,14 @@ func (s *AteomHerder) Restore(ctx context.Context, req *ateletpb.RestoreRequest)
 		return nil, fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 
-	plugin := s.getSnapshotPluginFor(req.GetSnapshot())
+	plugin := s.getSnapshotPluginFor(req.GetSnapshotStorage())
 	tMount := time.Now()
 	mountErr := s.mountExternalVolumes(ctx, actorUID, req.GetSpec().GetVolumes())
 	if mountErr == nil {
-		mountErr = plugin.PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshot())
+		mountErr = plugin.PrepareSnapshotStorage(ctx, actorUID, req.GetSnapshotStorage())
+	}
+	if mountErr == nil {
+		mountErr = resetSnapshotStateDirs(actorUID)
 	}
 	dMount = time.Since(tMount)
 	if mountErr != nil {
@@ -1277,7 +1288,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	// most one item.
 	detachCtx := ctx
 	storageVolID := ""
-	if extVol := req.GetSnapshot().GetBlock().GetExternalVolume(); extVol != nil {
+	if extVol := req.GetSnapshotStorage().GetBlockVolume(); extVol != nil {
 		storageVolID = extVol.GetStorageVolumeId()
 		detachCtx = block.WithVolumeMetadata(ctx, block.VolumeMetadata{
 			StorageVolumeID: extVol.GetStorageVolumeId(),
@@ -1285,7 +1296,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 			VolumeContext:   extVol.GetVolumeContext(),
 		})
 	}
-	if err := s.getSnapshotPluginFor(req.GetSnapshot()).DetachCheckpointDir(detachCtx, actorUID, storageVolID); err != nil {
+	if err := s.getSnapshotPluginFor(req.GetSnapshotStorage()).DetachCheckpointDir(detachCtx, actorUID, storageVolID); err != nil {
 		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 
@@ -1332,7 +1343,7 @@ func stageRestoreFiles(ctx context.Context, srcDir, dstDir string, files []strin
 }
 
 // linkFile is os.Link, indirected so a test can force the cross-filesystem
-// fallback in copyLocalCheckpoint without mounting a second filesystem.
+// fallback in stageRestoreFiles without mounting a second filesystem.
 var linkFile = os.Link
 
 // goldenOnlyFiles returns the golden snapshot files not shadowed by the
@@ -1839,20 +1850,8 @@ func resetActorDirs(actorUID string) error {
 		return wrapFileSystemErr("while creating PID file dir: %w", err)
 	}
 
-	checkpointDir := ateompath.CheckpointStateDir(actorUID)
-	if err := os.RemoveAll(checkpointDir); err != nil {
-		return wrapFileSystemErr("while deleting checkpoint-state dir: %w", err)
-	}
-	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
-		return wrapFileSystemErr("while creating checkpoint-state dir: %w", err)
-	}
-
-	restoreStateDir := ateompath.RestoreStateDir(actorUID)
-	if err := os.RemoveAll(restoreStateDir); err != nil {
-		return wrapFileSystemErr("while deleting restore-state dir: %w", err)
-	}
-	if err := os.MkdirAll(restoreStateDir, 0o700); err != nil {
-		return wrapFileSystemErr("while creating restore-state dir: %w", err)
+	if err := resetSnapshotStateDirs(actorUID); err != nil {
+		return err
 	}
 
 	durableDirVolumesMountDir := ateompath.DurableDirVolumeMountsDir(actorUID)
@@ -1888,6 +1887,28 @@ func resetActorDirs(actorUID string) error {
 	}
 	if err := os.MkdirAll(volumesDir, 0o755); err != nil {
 		return wrapFileSystemErr("while creating volumes dir: %w", err)
+	}
+
+	return nil
+}
+
+// resetSnapshotStateDirs empties and recreates the actor's checkpoint-state
+// and restore-state directories under SnapshotStorageDir.
+func resetSnapshotStateDirs(actorUID string) error {
+	checkpointDir := ateompath.CheckpointStateDir(actorUID)
+	if err := os.RemoveAll(checkpointDir); err != nil {
+		return wrapFileSystemErr("while deleting checkpoint-state dir: %w", err)
+	}
+	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
+		return wrapFileSystemErr("while creating checkpoint-state dir: %w", err)
+	}
+
+	restoreStateDir := ateompath.RestoreStateDir(actorUID)
+	if err := os.RemoveAll(restoreStateDir); err != nil {
+		return wrapFileSystemErr("while deleting restore-state dir: %w", err)
+	}
+	if err := os.MkdirAll(restoreStateDir, 0o700); err != nil {
+		return wrapFileSystemErr("while creating restore-state dir: %w", err)
 	}
 
 	return nil
