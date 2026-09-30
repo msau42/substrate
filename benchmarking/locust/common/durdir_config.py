@@ -28,6 +28,12 @@ def add_durdir_arguments(parser: LocustArgumentParser) -> None:
         help="Size of the test file written and read during the DurDir benchmark (default: 8388608 = 8 MiB)",
     )
     group.add_argument(
+        "--durdir-overwrite-size-bytes",
+        type=int,
+        default=0,
+        help="Size of the prefix overwritten on each DurDir cycle (default: 0 = overwrite entire file)",
+    )
+    group.add_argument(
         "--durdir-read-mode",
         type=str,
         default="data",

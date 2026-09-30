@@ -105,6 +105,43 @@ func TestDurDirUsesConfiguredFileSize(t *testing.T) {
 	}
 }
 
+func TestDurDirStepUsesOverwriteSize(t *testing.T) {
+	fileSize := int64(65536)      // 64 KiB
+	overwriteSize := int64(16384) // 16 KiB
+	srv := &fake.Server{Data: make([]byte, fileSize)}
+	fakeCtrl := &fakeControlClient{}
+	cfg := &userclass.Config{
+		APIStub: fakeCtrl,
+		Dyn: dynconfig.NewHolder(dynconfig.Config{
+			DurDirFileSize:      fileSize,
+			DurDirOverwriteSize: overwriteSize,
+			ResumeMode:          dynconfig.ResumeModeExplicit,
+		}),
+	}
+	du := newTestDurDirUser(t, srv, cfg)
+	dynCfg := cfg.Dyn.Load()
+
+	if err := du.bootstrap(context.Background(), dynCfg); err != nil {
+		t.Fatalf("bootstrap failed: %v", err)
+	}
+	du.step(context.Background(), dynCfg)
+
+	wantSizes := []int32{int32(fileSize), int32(overwriteSize)}
+	if got := srv.RecordedWriteSizes(); !reflect.DeepEqual(got, wantSizes) {
+		t.Errorf("recorded write sizes: got %v, want %v", got, wantSizes)
+	}
+	wantModes := []gluttonpb.WriteMode{
+		gluttonpb.WriteMode_WRITE_MODE_TRUNCATE,
+		gluttonpb.WriteMode_WRITE_MODE_OVERWRITE,
+	}
+	if got := srv.RecordedWriteModes(); !reflect.DeepEqual(got, wantModes) {
+		t.Errorf("recorded write modes: got %v, want %v", got, wantModes)
+	}
+	if du.expectedSize != fileSize {
+		t.Errorf("expectedSize after partial overwrite: got %d, want %d", du.expectedSize, fileSize)
+	}
+}
+
 func TestDurDirTestFileIsAValidGluttonKey(t *testing.T) {
 	if !regexp.MustCompile(`^[a-zA-Z0-9_-]+$`).MatchString(durDirTestFile) {
 		t.Fatalf("durDirTestFile %q would be rejected by glutton", durDirTestFile)

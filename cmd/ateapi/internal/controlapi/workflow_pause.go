@@ -76,12 +76,6 @@ func (w *ActorWorkflow) PauseActor(ctx context.Context, actorRef resources.Actor
 	if wireSnapshotScope, err = w.ensureAteletPaused(leaseCtx, actorRef, actor, actorTemplate); err != nil {
 		return nil, err
 	}
-	// TODO: There is no difference between suspend and pause for now, but we
-	// could optimize pause by not detaching. We would need to make sure Resume
-	// is idempotent.
-	if err = w.ensureVolumesDetached(leaseCtx, actor, actorTemplate, "DetachVolumesForPause", ateattr.OperationPause); err != nil {
-		return nil, err
-	}
 	// FinalizePaused clears the WorkerAssignment the labels read, so snapshot
 	// them here, as crash.go does for the crash counter.
 	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", wireSnapshotScope)

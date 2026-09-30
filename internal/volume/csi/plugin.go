@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/agent-substrate/substrate/internal/credbundle"
@@ -121,11 +122,37 @@ func (p *Plugin) DeleteVolume(ctx context.Context, volumeID string) error {
 	return nil
 }
 
+// resolveCSINodeID converts a bare Kubernetes node name to a GCE PD CSI node ID
+// (projects/{project}/zones/{zone}/instances/{node}) when volumeID uses the
+// GCE PD CSI format (projects/{project}/zones/{zone}/disks/{disk}).
+func resolveCSINodeID(volumeID, node string) string {
+	if !strings.Contains(node, "/") && strings.HasPrefix(volumeID, "projects/") {
+		if idx := strings.Index(volumeID, "/disks/"); idx > 0 {
+			return volumeID[:idx] + "/instances/" + node
+		}
+	}
+	return node
+}
+
+// resolvePublishContext derives the CSI PublishContext for GCE PD volumes when
+// volumeID encodes the disk name (projects/{project}/zones/{zone}/disks/{disk}).
+func resolvePublishContext(volumeID string) map[string]string {
+	if strings.HasPrefix(volumeID, "projects/") {
+		if idx := strings.LastIndex(volumeID, "/disks/"); idx > 0 {
+			diskName := volumeID[idx+len("/disks/"):]
+			if diskName != "" {
+				return map[string]string{"device-name": diskName}
+			}
+		}
+	}
+	return nil
+}
+
 // AttachVolume maps to CSI Controller ControllerPublishVolume.
 func (p *Plugin) AttachVolume(ctx context.Context, volumeID string, node string) error {
 	req := &csi.ControllerPublishVolumeRequest{
 		VolumeId:         volumeID,
-		NodeId:           node,
+		NodeId:           resolveCSINodeID(volumeID, node),
 		VolumeCapability: getStandardCapabilities()[0], // Use primary capability
 		Readonly:         false,
 	}
@@ -157,7 +184,7 @@ func (p *Plugin) AttachVolume(ctx context.Context, volumeID string, node string)
 func (p *Plugin) DetachVolume(ctx context.Context, volumeID string, node string) error {
 	req := &csi.ControllerUnpublishVolumeRequest{
 		VolumeId: volumeID,
-		NodeId:   node,
+		NodeId:   resolveCSINodeID(volumeID, node),
 	}
 
 	_, err := p.client.ControllerUnpublishVolume(ctx, req)
@@ -180,11 +207,13 @@ func (p *Plugin) MountVolume(ctx context.Context, volumeID string, targetPath st
 		return fmt.Errorf("failed to create staging directory %q: %w", stagingPath, err)
 	}
 
+	pubCtx := resolvePublishContext(volumeID)
 	stageReq := &csi.NodeStageVolumeRequest{
 		VolumeId:          volumeID,
 		StagingTargetPath: stagingPath,
 		VolumeCapability:  getStandardCapabilities()[0], // Use primary capability
 		VolumeContext:     volumeContext,
+		PublishContext:    pubCtx,
 	}
 
 	_, err := p.client.NodeStageVolume(ctx, stageReq)
@@ -204,6 +233,7 @@ func (p *Plugin) MountVolume(ctx context.Context, volumeID string, targetPath st
 		VolumeCapability: getStandardCapabilities()[0],
 		Readonly:         false,
 		VolumeContext:    volumeContext,
+		PublishContext:   pubCtx,
 	}
 	if stagingPath != "" {
 		req.StagingTargetPath = stagingPath

@@ -50,23 +50,24 @@ const (
 // Config is the dynamic-mutable subset of boomer's behavior. Holder swaps
 // it atomically so task goroutines read a consistent snapshot.
 type Config struct {
-	MinWait           time.Duration // gap between one actor's suspend and the VU's next resume, lower bound
-	MaxWait           time.Duration // upper bound of the same gap
-	MinLive           time.Duration // time a GluttonUser actor stays resumed between its first ping and suspend, lower bound
-	MaxLive           time.Duration // upper bound of the live window; zero (the default) suspends right after the ping
-	TraceProbability  float64
-	DurDirFileSize    int64  // bytes
-	ResumeMode        string // ResumeModeExplicit | ResumeModeImplicit
-	LifecycleMode     string // LifecycleModeSuspend | LifecycleModePause
-	DurDirReadMode    string // ReadModeData | ReadModeDigest
-	DurDirTemplate    string // ActorTemplate name
-	MemTarget         string // resident RAM the GluttonUser fills via WriteRAM, suffixed (e.g. "2Gi"); "" disables
-	MemChurn          string // RAM re-randomized in place each cycle via WriteRAM rotate, suffixed (e.g. "64Mi"); "" disables
-	MemRead           string // RAM walked (one byte per page) via ReadRAM after each resume, suffixed (e.g. "1Gi") or "all"; "" disables
-	MaxPingsPerWake   int    // cap on pings a GluttonUser sends during one resume/suspend cycle; values < 1 read as 1
-	SweperfTemplate   string // ActorTemplate name for the sweperf workload; "" falls back to default
-	SweperfTotalSteps int    // total steps in trace; 0 falls back to default
-	SweperfNumCycles  int    // number of cycles to partition steps into; 0 falls back to default
+	MinWait             time.Duration // gap between one actor's suspend and the VU's next resume, lower bound
+	MaxWait             time.Duration // upper bound of the same gap
+	MinLive             time.Duration // time a GluttonUser actor stays resumed between its first ping and suspend, lower bound
+	MaxLive             time.Duration // upper bound of the live window; zero (the default) suspends right after the ping
+	TraceProbability    float64
+	DurDirFileSize      int64  // bytes
+	DurDirOverwriteSize int64  // bytes; 0 falls back to full-file truncate write
+	ResumeMode          string // ResumeModeExplicit | ResumeModeImplicit
+	LifecycleMode       string // LifecycleModeSuspend | LifecycleModePause
+	DurDirReadMode      string // ReadModeData | ReadModeDigest
+	DurDirTemplate      string // ActorTemplate name
+	MemTarget           string // resident RAM the GluttonUser fills via WriteRAM, suffixed (e.g. "2Gi"); "" disables
+	MemChurn            string // RAM re-randomized in place each cycle via WriteRAM rotate, suffixed (e.g. "64Mi"); "" disables
+	MemRead             string // RAM walked (one byte per page) via ReadRAM after each resume, suffixed (e.g. "1Gi") or "all"; "" disables
+	MaxPingsPerWake     int    // cap on pings a GluttonUser sends during one resume/suspend cycle; values < 1 read as 1
+	SweperfTemplate     string // ActorTemplate name for the sweperf workload; "" falls back to default
+	SweperfTotalSteps   int    // total steps in trace; 0 falls back to default
+	SweperfNumCycles    int    // number of cycles to partition steps into; 0 falls back to default
 }
 
 // Holder lets readers Load() the current Config and writers Store() a new
@@ -97,23 +98,24 @@ type ProbabilityUpdater interface {
 // /boomer-config endpoint, so master + Python runner + Go worker share one
 // vocabulary for the boomer's runtime-tunable knobs.
 type payload struct {
-	TraceProbability  *float64 `json:"trace_probability"`
-	MinWaitTime       *float64 `json:"min_wait_time"`
-	MaxWaitTime       *float64 `json:"max_wait_time"`
-	MinLiveTime       *float64 `json:"min_live_time"`
-	MaxLiveTime       *float64 `json:"max_live_time"`
-	DurDirFileSize    *float64 `json:"durdir_file_size_bytes"`
-	ResumeMode        *string  `json:"resume_mode"`
-	LifecycleMode     *string  `json:"lifecycle_mode"`
-	DurDirReadMode    *string  `json:"durdir_read_mode"`
-	DurDirTemplate    *string  `json:"durdir_template"`
-	MemTarget         *string  `json:"mem_target"`
-	MemChurn          *string  `json:"mem_churn"`
-	MemRead           *string  `json:"mem_read"`
-	MaxPingsPerWake   *float64 `json:"max_pings_per_wake"`
-	SweperfTemplate   *string  `json:"sweperf_template"`
-	SweperfTotalSteps *float64 `json:"sweperf_total_steps"`
-	SweperfNumCycles  *float64 `json:"sweperf_num_cycles"`
+	TraceProbability    *float64 `json:"trace_probability"`
+	MinWaitTime         *float64 `json:"min_wait_time"`
+	MaxWaitTime         *float64 `json:"max_wait_time"`
+	MinLiveTime         *float64 `json:"min_live_time"`
+	MaxLiveTime         *float64 `json:"max_live_time"`
+	DurDirFileSize      *float64 `json:"durdir_file_size_bytes"`
+	DurDirOverwriteSize *float64 `json:"durdir_overwrite_size_bytes"`
+	ResumeMode          *string  `json:"resume_mode"`
+	LifecycleMode       *string  `json:"lifecycle_mode"`
+	DurDirReadMode      *string  `json:"durdir_read_mode"`
+	DurDirTemplate      *string  `json:"durdir_template"`
+	MemTarget           *string  `json:"mem_target"`
+	MemChurn            *string  `json:"mem_churn"`
+	MemRead             *string  `json:"mem_read"`
+	MaxPingsPerWake     *float64 `json:"max_pings_per_wake"`
+	SweperfTemplate     *string  `json:"sweperf_template"`
+	SweperfTotalSteps   *float64 `json:"sweperf_total_steps"`
+	SweperfNumCycles    *float64 `json:"sweperf_num_cycles"`
 }
 
 // Parse decodes a JSON blob (typically from a CLI flag) and merges its
@@ -189,6 +191,15 @@ func (c Config) Validate() error {
 	if c.DurDirFileSize > math.MaxInt32 {
 		return fmt.Errorf("durdir_file_size_bytes cannot exceed %d (2 GiB), got: %d", math.MaxInt32, c.DurDirFileSize)
 	}
+	if c.DurDirOverwriteSize < 0 {
+		return fmt.Errorf("durdir_overwrite_size_bytes cannot be negative: %d", c.DurDirOverwriteSize)
+	}
+	if c.DurDirOverwriteSize > math.MaxInt32 {
+		return fmt.Errorf("durdir_overwrite_size_bytes cannot exceed %d (2 GiB), got: %d", math.MaxInt32, c.DurDirOverwriteSize)
+	}
+	if c.DurDirFileSize > 0 && c.DurDirOverwriteSize > c.DurDirFileSize {
+		return fmt.Errorf("durdir_overwrite_size_bytes (%d) cannot exceed durdir_file_size_bytes (%d)", c.DurDirOverwriteSize, c.DurDirFileSize)
+	}
 	if c.ResumeMode != "" && c.ResumeMode != ResumeModeExplicit && c.ResumeMode != ResumeModeImplicit {
 		return fmt.Errorf("invalid resume_mode %q: must be %q or %q", c.ResumeMode, ResumeModeExplicit, ResumeModeImplicit)
 	}
@@ -236,6 +247,9 @@ func (p payload) merge(current Config) Config {
 	}
 	if p.DurDirFileSize != nil {
 		out.DurDirFileSize = int64(*p.DurDirFileSize)
+	}
+	if p.DurDirOverwriteSize != nil {
+		out.DurDirOverwriteSize = int64(*p.DurDirOverwriteSize)
 	}
 	if p.ResumeMode != nil {
 		out.ResumeMode = *p.ResumeMode
@@ -334,6 +348,7 @@ func StartPoll(
 					slog.Duration("min_live", next.MinLive),
 					slog.Duration("max_live", next.MaxLive),
 					slog.Int64("durdir_file_size_bytes", next.DurDirFileSize),
+					slog.Int64("durdir_overwrite_size_bytes", next.DurDirOverwriteSize),
 					slog.String("resume_mode", next.ResumeMode),
 					slog.String("lifecycle_mode", next.LifecycleMode),
 					slog.String("durdir_read_mode", next.DurDirReadMode),
@@ -380,6 +395,7 @@ func SubscribeSpawn(url string, holder *Holder, sampler ProbabilityUpdater, fetc
 			slog.Duration("min_live", next.MinLive),
 			slog.Duration("max_live", next.MaxLive),
 			slog.Int64("durdir_file_size_bytes", next.DurDirFileSize),
+			slog.Int64("durdir_overwrite_size_bytes", next.DurDirOverwriteSize),
 			slog.String("resume_mode", next.ResumeMode),
 			slog.String("lifecycle_mode", next.LifecycleMode),
 			slog.String("durdir_read_mode", next.DurDirReadMode),

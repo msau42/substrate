@@ -20,14 +20,34 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 	"github.com/agent-substrate/substrate/internal/volume"
 	"github.com/agent-substrate/substrate/internal/volume/csi"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// isMountPoint reports whether path is a mount point distinct from its parent directory.
+func isMountPoint(path string) (bool, error) {
+	var stx, parentStx unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &stx); err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := unix.Statx(unix.AT_FDCWD, filepath.Dir(path), unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &parentStx); err != nil {
+		return false, err
+	}
+	if stx.Mask&unix.STATX_MNT_ID != 0 && parentStx.Mask&unix.STATX_MNT_ID != 0 {
+		return stx.Mnt_id != parentStx.Mnt_id, nil
+	}
+	return stx.Dev_major != parentStx.Dev_major || stx.Dev_minor != parentStx.Dev_minor, nil
+}
 
 func (s *AteomHerder) mountExternalVolumes(ctx context.Context, actorUID string, volumes []*ateletpb.Volume) error {
 	for _, vol := range volumes {
@@ -38,6 +58,14 @@ func (s *AteomHerder) mountExternalVolumes(ctx context.Context, actorUID string,
 		hostPath := ateletpath.VolumeHostPath(actorUID, vol.GetName())
 		if err := os.MkdirAll(hostPath, 0o750); err != nil {
 			return fmt.Errorf("failed to create mount point %q: %w", hostPath, err)
+		}
+		mounted, err := isMountPoint(hostPath)
+		if err != nil {
+			return fmt.Errorf("failed to check mount point %q: %w", hostPath, err)
+		}
+		if mounted {
+			slog.InfoContext(ctx, "Volume already mounted on host path, skipping mount", slog.String("volume_id", ext.GetStorageVolumeId()), slog.String("host_path", hostPath))
+			continue
 		}
 		slog.InfoContext(ctx, "Mounting volume", slog.String("volume_id", ext.GetStorageVolumeId()), slog.String("host_path", hostPath), slog.String("volume_type", ext.GetVolumeType()))
 		plugin, err := s.getPlugin(ctx, ext.GetVolumeType())

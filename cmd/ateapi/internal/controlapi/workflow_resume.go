@@ -629,14 +629,20 @@ func (w *ActorWorkflow) ensureVolumesAttached(ctx context.Context, actor *ateapi
 
 	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
 	for _, vol := range getMountedActorVolumes(ctx, ref, actor.GetStatus().GetActorVolumes(), actorTemplate) {
-		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", vol.GetStorageVolumeId()), slog.String("node", node))
+		volID := vol.GetStorageVolumeId()
+		if w.volumeAttachedNode(volID) == node {
+			slog.InfoContext(ctx, "Volume already attached to node, skipping attach", slog.String("volume_id", volID), slog.String("node", node))
+			continue
+		}
+		slog.InfoContext(ctx, "Attaching volume to node", slog.String("volume_id", volID), slog.String("node", node))
 		plugin, err := w.pluginRegistry.GetPlugin(ctx, vol.GetVolumeType())
 		if err != nil {
 			return fmt.Errorf("failed to get volume plugin for %q: %w", vol.GetVolumeType(), err)
 		}
-		if err := plugin.AttachVolume(ctx, vol.GetStorageVolumeId(), node); err != nil {
-			return fmt.Errorf("failed to attach volume %q to node %q: %w", vol.GetStorageVolumeId(), node, err)
+		if err := plugin.AttachVolume(ctx, volID, node); err != nil {
+			return fmt.Errorf("failed to attach volume %q to node %q: %w", volID, node, err)
 		}
+		w.setVolumeAttachedNode(actor.GetMetadata().GetUid(), volID, node)
 	}
 	return nil
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/scheduling"
 	"github.com/agent-substrate/substrate/cmd/ateapi/internal/store"
@@ -111,6 +112,8 @@ type ActorWorkflow struct {
 	egressGatewayAddress string
 	pluginRegistry       VolumePluginRegistry
 	objectStore          objectstore.Store
+	volumeNodes          sync.Map // storageVolumeID -> nodeName
+	actorVolumeNodes     sync.Map // actorUID -> nodeName
 }
 
 // NewActorWorkflow creates a new ActorWorkflow. instruments may be nil.

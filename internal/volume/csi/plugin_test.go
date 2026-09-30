@@ -408,3 +408,20 @@ func TestClient_Identity(t *testing.T) {
 		t.Fatalf("Probe failed: %v", err)
 	}
 }
+
+func TestResolveCSINodeIDAndPublishContext(t *testing.T) {
+	pdVolID := "projects/my-proj/zones/us-central1-a/disks/substrate-123-data"
+	if got, want := resolveCSINodeID(pdVolID, "node-1"), "projects/my-proj/zones/us-central1-a/instances/node-1"; got != want {
+		t.Errorf("resolveCSINodeID(%q, %q) = %q, want %q", pdVolID, "node-1", got, want)
+	}
+	if got, want := resolveCSINodeID("test-vol", "node-1"), "node-1"; got != want {
+		t.Errorf("resolveCSINodeID(%q, %q) = %q, want %q", "test-vol", "node-1", got, want)
+	}
+	pubCtx := resolvePublishContext(pdVolID)
+	if got, want := pubCtx["device-name"], "substrate-123-data"; got != want {
+		t.Errorf("resolvePublishContext(%q)[device-name] = %q, want %q", pdVolID, got, want)
+	}
+	if got := resolvePublishContext("test-vol"); got != nil {
+		t.Errorf("resolvePublishContext(%q) = %v, want nil", "test-vol", got)
+	}
+}

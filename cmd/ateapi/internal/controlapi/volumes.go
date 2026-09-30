@@ -193,6 +193,69 @@ func actorVolumeID(actorUID string, volumeName string) string {
 	return fmt.Sprintf("substrate-%s-%s", actorUID, volumeName)
 }
 
+func (w *ActorWorkflow) volumeAttachedNode(volumeID string) string {
+	if volumeID == "" {
+		return ""
+	}
+	v, ok := w.volumeNodes.Load(volumeID)
+	if !ok {
+		return ""
+	}
+	node, _ := v.(string)
+	return node
+}
+
+func (w *ActorWorkflow) setVolumeAttachedNode(actorUID, volumeID, node string) {
+	if volumeID != "" && node != "" {
+		w.volumeNodes.Store(volumeID, node)
+	}
+	if actorUID != "" && node != "" {
+		w.actorVolumeNodes.Store(actorUID, node)
+	}
+}
+
+func (w *ActorWorkflow) actorAttachedNode(actorUID string) string {
+	if actorUID == "" {
+		return ""
+	}
+	v, ok := w.actorVolumeNodes.Load(actorUID)
+	if !ok {
+		return ""
+	}
+	node, _ := v.(string)
+	return node
+}
+
+func (w *ActorWorkflow) detachActorVolumesWithFallback(ctx context.Context, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, action string) error {
+	if actor.GetStatus().GetWorkerAssignment() != nil {
+		err := detachActorVolumes(ctx, w.store, w.pluginRegistry, actor, template, action)
+		if err == nil {
+			w.clearActorVolumes(actor)
+		}
+		return err
+	}
+	node := w.actorAttachedNode(actor.GetMetadata().GetUid())
+	if node == "" {
+		return detachActorVolumes(ctx, w.store, w.pluginRegistry, actor, template, action)
+	}
+	err := detachActorVolumesFromNode(ctx, w.pluginRegistry, actor, template, node)
+	if err == nil {
+		w.clearActorVolumes(actor)
+	}
+	return err
+}
+
+func (w *ActorWorkflow) clearActorVolumes(actor *ateapipb.Actor) {
+	for _, vol := range actor.GetStatus().GetActorVolumes() {
+		if id := vol.GetStorageVolumeId(); id != "" {
+			w.volumeNodes.Delete(id)
+		}
+	}
+	if uid := actor.GetMetadata().GetUid(); uid != "" {
+		w.actorVolumeNodes.Delete(uid)
+	}
+}
+
 // detachActorVolumes detaches all mounted external volumes for an actor from its worker node.
 func detachActorVolumes(ctx context.Context, st detachActorVolumesStore, registry VolumePluginRegistry, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, action string) error {
 	assignment := actor.GetStatus().GetWorkerAssignment()
@@ -216,6 +279,10 @@ func detachActorVolumes(ctx context.Context, st detachActorVolumesStore, registr
 		return nil
 	}
 
+	return detachActorVolumesFromNode(ctx, registry, actor, template, node)
+}
+
+func detachActorVolumesFromNode(ctx context.Context, registry VolumePluginRegistry, actor *ateapipb.Actor, template *ateapipb.ActorTemplate, node string) error {
 	ref := &ateapipb.ObjectRef{Atespace: actor.GetMetadata().GetAtespace(), Name: actor.GetMetadata().GetName()}
 	// If the template is available, only detach volumes that are actively mounted
 	// in the template's containers. If the template is missing/deleted, fall back to

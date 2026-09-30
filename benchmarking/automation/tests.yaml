@@ -568,6 +568,77 @@ tests:
       - "1.0"
       - "--max-wait-time"
       - "1.0"
+  - name: durdir_full_512mb
+    type: locust
+    description: "DurDir full (512 MiB, 16 MiB overwrite): 1 concurrent user, GCS object storage, digest read mode"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 3m
+    users: 1
+    workerCount: 1
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "536870912"
+      - "--durdir-overwrite-size-bytes"
+      - "16777216"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: durdir_full_512mb_pause
+    type: locust
+    description: "DurDir full (512 MiB, 16 MiB overwrite, pause): 1 concurrent user, local storage, digest read mode"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 3m
+    users: 1
+    workerCount: 1
+    flags:
+      - "--durdir-template"
+      - "glutton-durdir-full"
+      - "--lifecycle-mode"
+      - "pause"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "536870912"
+      - "--durdir-overwrite-size-bytes"
+      - "16777216"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
+  - name: durdir_full_512mb_extvol_pd
+    type: locust
+    description: "ExternalVolume PD (512 MiB, 16 MiB overwrite): 1 concurrent user, hyperdisk-balanced same-node, digest read mode"
+    targetCluster: dev
+    file: /app/tests/durdir.py
+    duration: 3m
+    users: 1
+    workerCount: 1
+    flags:
+      - "--durdir-template"
+      - "glutton-extvol-full"
+      - "--resume-mode"
+      - "explicit"
+      - "--durdir-read-mode"
+      - "digest"
+      - "--durdir-file-size-bytes"
+      - "536870912"
+      - "--durdir-overwrite-size-bytes"
+      - "16777216"
+      - "--min-wait-time"
+      - "1.0"
+      - "--max-wait-time"
+      - "1.0"
   - name: ingress_routercap_envoy_2cpu
     description: "Router capacity: Nighthawk adaptive max-RPS search under a 25ms tail-latency SLO, Envoy at 2 CPUs"
     type: nighthawk-ingress

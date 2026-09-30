@@ -61,6 +61,7 @@ type Server struct {
 	mu            sync.Mutex
 	paths         []string
 	writeSizes    []int32
+	writeModes    []gluttonpb.WriteMode
 	readModes     []gluttonpb.ReadMode
 	ramWriteSizes []string
 	ramWriteModes []gluttonpb.WriteMode
@@ -99,6 +100,12 @@ func (s *Server) RecordedWriteSizes() []int32 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]int32(nil), s.writeSizes...)
+}
+
+func (s *Server) RecordedWriteModes() []gluttonpb.WriteMode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]gluttonpb.WriteMode(nil), s.writeModes...)
 }
 
 func (s *Server) RecordedReadModes() []gluttonpb.ReadMode {
@@ -164,6 +171,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Lock()
 		s.writeSizes = append(s.writeSizes, req.GetSize())
+		s.writeModes = append(s.writeModes, req.GetWriteMode())
 		s.mu.Unlock()
 
 		resp, _ := proto.Marshal(&gluttonpb.WriteDiskResponse{

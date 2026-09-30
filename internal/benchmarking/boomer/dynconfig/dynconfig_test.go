@@ -35,6 +35,7 @@ func TestParseValid(t *testing.T) {
 		"min_live_time": 9,
 		"max_live_time": 14,
 		"durdir_file_size_bytes": 1048576,
+		"durdir_overwrite_size_bytes": 65536,
 		"resume_mode": "explicit",
 		"lifecycle_mode": "pause",
 		"durdir_read_mode": "data",
@@ -66,6 +67,9 @@ func TestParseValid(t *testing.T) {
 	}
 	if cfg.DurDirFileSize != 1048576 {
 		t.Errorf("DurDirFileSize: got %d, want 1048576", cfg.DurDirFileSize)
+	}
+	if cfg.DurDirOverwriteSize != 65536 {
+		t.Errorf("DurDirOverwriteSize: got %d, want 65536", cfg.DurDirOverwriteSize)
 	}
 	if cfg.ResumeMode != ResumeModeExplicit {
 		t.Errorf("ResumeMode: got %q, want %q", cfg.ResumeMode, ResumeModeExplicit)
@@ -134,6 +138,18 @@ func TestParseInvalidValues(t *testing.T) {
 		{
 			name: "file size exceeds 2 GiB",
 			json: `{"durdir_file_size_bytes": 2147483648}`,
+		},
+		{
+			name: "negative overwrite size",
+			json: `{"durdir_overwrite_size_bytes": -100}`,
+		},
+		{
+			name: "overwrite size exceeds 2 GiB",
+			json: `{"durdir_overwrite_size_bytes": 2147483648}`,
+		},
+		{
+			name: "overwrite size exceeds file size",
+			json: `{"durdir_file_size_bytes": 1024, "durdir_overwrite_size_bytes": 2048}`,
 		},
 		{
 			name: "invalid resume mode",
