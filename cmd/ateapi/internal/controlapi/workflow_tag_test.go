@@ -44,10 +44,9 @@ func seedTagSource(t *testing.T, ctx context.Context, persistence store.Interfac
 	uri := mustActorSnapshotURI(t, template, actor, name+"-snapshot")
 	objects.PutSnapshot(t, uri, objectNames...)
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{
-			SnapshotUri:      uri.String(),
-			ContentScope:     ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL,
-			ActorTemplateUid: template.GetMetadata().GetUid(),
+		s.LatestSnapshotGeneration = 1
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, template.GetMetadata().GetUid(), uri.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
 		}
 	})
 	return actor, uri
@@ -90,7 +89,7 @@ func TestTagActorSnapshot(t *testing.T) {
 		t.Fatalf("TagActorSnapshot: %v", err)
 	}
 
-	tagSnapshot := tag.GetStatus().GetSnapshot().GetSnapshotUri()
+	tagSnapshot := tagDurableSnapshotURI(tag)
 	if tagSnapshot == "" || tagSnapshot == actorSnapshot.String() {
 		t.Fatalf("tag snapshot uri = %q, want a copy of its own rather than the actor's %q", tagSnapshot, actorSnapshot)
 	}
@@ -198,9 +197,13 @@ func TestTagActorSnapshot_Preconditions(t *testing.T) {
 				uri := mustActorSnapshotURI(t, template, actor, "actor-1-snapshot")
 				objects.PutSnapshot(t, uri, "manifest.json")
 				mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-					s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: uri.String()}
+					var tmplUID string
 					if tt.builtOnTemplate {
-						s.ExternalSnapshot.ActorTemplateUid = template.GetMetadata().GetUid()
+						tmplUID = template.GetMetadata().GetUid()
+					}
+					s.LatestSnapshotGeneration = 1
+					s.Snapshots = []*ateapipb.Snapshot{
+						newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, tmplUID, uri.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
 					}
 				})
 			}
@@ -248,7 +251,7 @@ func TestTagActorSnapshot_RecreateAfterCopyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTag after the external store failure: %v", err)
 	}
-	if got := pending.GetStatus().GetSnapshot().GetSnapshotUri(); got != "" {
+	if got := tagDurableSnapshotURI(pending); got != "" {
 		t.Errorf("snapshot uri after the failure = %q, want unset: the copy never finished", got)
 	}
 	strandedURI := mustReservedTagSnapshotURI(t, pending)
@@ -287,7 +290,7 @@ func TestTagActorSnapshot_RecreateAfterCopyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TagActorSnapshot after the delete: %v", err)
 	}
-	recreated := tag.GetStatus().GetSnapshot().GetSnapshotUri()
+	recreated := tagDurableSnapshotURI(tag)
 	if recreated == "" || recreated == stranded {
 		t.Fatalf("snapshot uri after the delete = %q, want a fresh prefix rather than the stranded %q", recreated, stranded)
 	}
@@ -350,7 +353,7 @@ func TestTagActorSnapshot_RacesDelete(t *testing.T) {
 
 	// Nothing was collected out from under the copy, and the row in the store it
 	// is still there.
-	if got := tag.GetStatus().GetSnapshot().GetSnapshotUri(); got != pendingURI {
+	if got := tagDurableSnapshotURI(tag); got != pendingURI {
 		t.Errorf("snapshot uri = %q, want the prefix the create reserved, %q", got, pendingURI)
 	}
 	if diff := cmp.Diff([]string{"manifest.json", "memory.zst"}, objects.Snapshot(t, mustParseSnapshotURI(t, pendingURI))); diff != "" {
@@ -516,9 +519,9 @@ func TestDeleteTag_NotFound(t *testing.T) {
 
 func mustReservedTagSnapshotURI(t *testing.T, tag *ateapipb.Tag) resources.SnapshotURI {
 	t.Helper()
-	uri, err := resources.NewTagSnapshotURI(tag.GetStatus().GetStorageLocation(), tag.GetMetadata().GetAtespace(), tag.GetMetadata().GetUid())
+	uri, err := resources.ParseSnapshotURI(tagAnyDurableSnapshotURI(tag))
 	if err != nil {
-		t.Fatalf("NewTagSnapshotURI: %v", err)
+		t.Fatalf("ParseSnapshotURI: %v", err)
 	}
 	return uri
 }
