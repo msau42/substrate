@@ -174,25 +174,21 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 	ctx, done := stepSpan(ctx, "DiscardWorker")
 	defer func() { err = done(err) }()
 
-	if assignment := actor.GetStatus().GetWorkerAssignment(); assignment != nil {
-		hosted, err := workerHostsActor(ctx, w.store, assignment.GetWorker().GetName(), actor.GetMetadata().GetUid())
-		if err != nil {
+	if actor.GetStatus().GetAssignedNode() != "" {
+		if terr := w.ensureAteletTerminated(ctx, actorRef, actor, actorTemplate); terr != nil {
+			// A failed terminate lands the actor in CRASHED, which the user
+			// can revert again.
+			slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",
+				append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", terr))...)
+			if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationRevert, ateletCrashMessage("Terminate", terr)); cerr != nil {
+				return cerr
+			}
+			return fmt.Errorf("actor %s crashed: %w", actorRef, terr)
+		}
+		if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
 			return err
 		}
-		if hosted {
-			if terr := w.ensureAteletTerminated(ctx, actorRef, actor, actorTemplate); terr != nil {
-				// A failed terminate lands the actor in CRASHED, which the user
-				// can revert again — that retry needs no live worker.
-				slog.LogAttrs(ctx, slog.LevelError, "Setting Actor to crashed due to error",
-					append(ateattr.ActorRefLogAttrs(actorRef), slog.Any("err", terr))...)
-				if cerr := crashActor(ctx, w.store, actorRef, ateattr.OperationRevert, ateletCrashMessage("Terminate", terr)); cerr != nil {
-					return cerr
-				}
-				return fmt.Errorf("actor %s crashed: %w", actorRef, terr)
-			}
-			if err := w.ensureVolumesDetached(ctx, actor, actorTemplate, "DetachVolumesForRevert", ateattr.OperationRevert); err != nil {
-				return err
-			}
+		if actor.GetStatus().GetWorkerAssignment() != nil {
 			if _, _, err := releaseWorker(ctx, w.store, actor); err != nil {
 				return fmt.Errorf("while releasing worker: %w", err)
 			}
@@ -253,6 +249,7 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 	storedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(latestActor), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
 		toUpdate.Status.WorkerAssignment = nil
+		toUpdate.Status.AssignedNode = ""
 		toUpdate.Status.InProgressSnapshotUri = ""
 		toUpdate.Status.InProgressLocalSnapshotName = ""
 		toUpdate.Status.LocalSnapshot = nil
