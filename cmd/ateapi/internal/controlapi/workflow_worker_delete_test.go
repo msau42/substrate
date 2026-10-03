@@ -109,9 +109,12 @@ func TestDeleteWorkerWorkflow_ReleasesBoundActor(t *testing.T) {
 	actor := seedAPIActor(t, ctx, persistence, ateapipb.ActorState_ACTOR_STATE_RUNNING, func(a *ateapipb.Actor) {
 		// Both in-progress checkpoints are set so the assertion covers the
 		// shared crash path, which cannot know which workflow was in flight.
-		a.Status.InProgressSnapshotUri = someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot")
-		a.Status.InProgressLocalSnapshotName = "partial-local-snapshot"
-		a.Status.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last")}
+		a.Status.LatestSnapshotGeneration = 3
+		a.Status.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+			newDurableSnapshot(2, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot"), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+			newLocalSnapshot(3, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", "partial-local-snapshot", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+		}
 	})
 	assignAPIWorker(t, ctx, persistence, apiWorkerName, actor.GetMetadata().GetUid())
 
@@ -134,17 +137,18 @@ func TestDeleteWorkerWorkflow_ReleasesBoundActor(t *testing.T) {
 	}
 	// The local checkpoint lived on the node that went away, so it dies with
 	// the worker.
-	if got.GetStatus().GetInProgressLocalSnapshotName() != "" {
+	if inProgressLocalSnapshotName(got.GetStatus()) != "" {
 		t.Errorf("in-progress local checkpoint not cleared: %v", got.GetStatus())
 	}
 	// The durable one is kept: it names the prefix whatever atelet already
 	// uploaded lives under, which delete or revert needs to collect it.
-	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot"); got.GetStatus().GetInProgressSnapshotUri() != want {
+	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "partial-snapshot"); inProgressDurableSnapshotURI(got.GetStatus()) != want {
 		t.Errorf("in-progress external checkpoint not preserved: %v", got.GetStatus())
 	}
 	// The last completed snapshot is what makes the actor resumable, so it stays.
-	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"); got.GetStatus().GetExternalSnapshot().GetSnapshotUri() != want {
-		t.Errorf("external snapshot = %q, want it preserved as %q", got.GetStatus().GetExternalSnapshot().GetSnapshotUri(), want)
+	_, gotObj := latestCompletedDurableSnapshot(got.GetStatus())
+	if want := someActorSnapshotURI(t, testStorageLocation, apiActorRef.Atespace, "last"); gotObj.GetSnapshotUri() != want {
+		t.Errorf("external snapshot = %q, want it preserved as %q", gotObj.GetSnapshotUri(), want)
 	}
 }
 

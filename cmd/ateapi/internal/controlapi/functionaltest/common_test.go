@@ -458,8 +458,7 @@ func createTemplateWithContainersAndVolumes(t *testing.T, tc *testContext, ns st
 		SourceActor: &ateapipb.ObjectRef{Atespace: resources.GoldenActorAtespace, Name: created.GetMetadata().GetUid()},
 		Scope:       ateapipb.TagScope_TAG_SCOPE_PUBLISHED,
 		Status: &ateapipb.TagStatus{
-			Snapshot:         &ateapipb.ExternalSnapshot{SnapshotUri: goldenSnapshotURI(t), ContentScope: ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL},
-			StorageLocation:  testStorageLocation,
+			Snapshot:         newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_GOLDEN, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, created.GetMetadata().GetUid(), goldenSnapshotURI(t)),
 			ActorTemplateUid: created.GetMetadata().GetUid(),
 		},
 	})
@@ -484,6 +483,82 @@ func createTemplateWithContainersAndVolumes(t *testing.T, tc *testContext, ns st
 		t.Fatalf("failed to record the template's golden snapshot: %v", err)
 	}
 	return updated
+}
+
+func newDurableSnapshot(gen int32, owner ateapipb.SnapshotOwner, scope ateapipb.SnapshotContentScope, templateUID, uri string) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{
+		Generation:       gen,
+		Owner:            owner,
+		ContentScope:     scope,
+		ActorTemplateUid: templateUID,
+		Storage: []*ateapipb.SnapshotStorage{{
+			Durability: ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE,
+			Status:     ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED,
+			Object:     &ateapipb.ObjectSnapshot{SnapshotUri: uri},
+		}},
+	}
+}
+
+func newLocalSnapshot(gen int32, scope ateapipb.SnapshotContentScope, templateUID, name string) *ateapipb.Snapshot {
+	return &ateapipb.Snapshot{
+		Generation:       gen,
+		Owner:            ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR,
+		ContentScope:     scope,
+		ActorTemplateUid: templateUID,
+		Storage: []*ateapipb.SnapshotStorage{{
+			Durability: ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_LOCAL,
+			Status:     ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED,
+			Local:      &ateapipb.LocalSnapshot{SnapshotName: name},
+		}},
+	}
+}
+
+func durableSnapshot(status *ateapipb.ActorStatus) *ateapipb.Snapshot {
+	var best *ateapipb.Snapshot
+	for _, snap := range status.GetSnapshots() {
+		for _, st := range snap.GetStorage() {
+			if st.GetDurability() == ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE &&
+				st.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+				st.GetObject().GetSnapshotUri() != "" {
+				if best == nil || snap.GetGeneration() > best.GetGeneration() {
+					best = snap
+				}
+			}
+		}
+	}
+	return best
+}
+
+func durableSnapshotURI(status *ateapipb.ActorStatus) string {
+	snap := durableSnapshot(status)
+	for _, st := range snap.GetStorage() {
+		if st.GetDurability() == ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE {
+			return st.GetObject().GetSnapshotUri()
+		}
+	}
+	return ""
+}
+
+func localSnapshot(status *ateapipb.ActorStatus) (*ateapipb.Snapshot, *ateapipb.LocalSnapshot) {
+	for _, snap := range status.GetSnapshots() {
+		for _, st := range snap.GetStorage() {
+			if st.GetDurability() == ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_LOCAL &&
+				st.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+				st.GetLocal().GetSnapshotName() != "" {
+				return snap, st.GetLocal()
+			}
+		}
+	}
+	return nil, nil
+}
+
+func tagSnapshotURI(tag *ateapipb.Tag) string {
+	for _, st := range tag.GetStatus().GetSnapshot().GetStorage() {
+		if st.GetDurability() == ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE {
+			return st.GetObject().GetSnapshotUri()
+		}
+	}
+	return ""
 }
 
 // testPauseImage is the pause image the default test SandboxConfig carries;

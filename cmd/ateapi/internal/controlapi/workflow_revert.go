@@ -204,7 +204,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 	ctx, done := stepSpan(ctx, "DiscardInProgressSnapshot")
 	defer func() { err = done(err) }()
 
-	inProgress := actor.GetStatus().GetInProgressSnapshotUri()
+	inProgress := inProgressDurableSnapshotURI(actor.GetStatus())
 	switch {
 	case w.objectStore == nil:
 		markSkipped(ctx, "no object store configured")
@@ -250,9 +250,7 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
 		toUpdate.Status.WorkerAssignment = nil
 		toUpdate.Status.AssignedNode = ""
-		toUpdate.Status.InProgressSnapshotUri = ""
-		toUpdate.Status.InProgressLocalSnapshotName = ""
-		toUpdate.Status.LocalSnapshot = nil
+		retainLatestCompletedDurableSnapshot(toUpdate.Status)
 		toUpdate.Status.Crash = nil
 		return nil
 	})

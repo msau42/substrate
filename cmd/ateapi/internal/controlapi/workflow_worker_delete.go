@@ -231,7 +231,7 @@ func (w *WorkerWorkflow) crashBoundActor(ctx context.Context, worker *ateapipb.W
 		// Local in-progress checkpoint dies with the sandbox that was writing
 		// it. The external in-progress checkpoint is kept so delete or revert
 		// can delete it.
-		toUpdate.Status.InProgressLocalSnapshotName = ""
+		clearInProgressLocalSnapshot(toUpdate.Status)
 		return nil
 	})
 	switch {

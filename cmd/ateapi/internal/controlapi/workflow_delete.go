@@ -289,8 +289,7 @@ func (w *ActorWorkflow) ensureWorkerReleased(ctx context.Context, actorRef resou
 
 		updatedActor, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(latestActor), func(dbActor *ateapipb.Actor) error {
 			if dbActor.Status != nil {
-				dbActor.Status.LocalSnapshot = nil
-				dbActor.Status.AssignedNode = ""
+				clearLocalSnapshots(dbActor.Status)
 				dbActor.Status.WorkerAssignment = nil
 			}
 			return nil
@@ -397,7 +396,8 @@ func (w *ActorWorkflow) ensureExternalSnapshotsReleased(ctx context.Context, act
 // wrote anything.
 func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix, error) {
 	actorOwner := actorSnapshotOwner(actor)
-	if snapshotURI := actor.GetStatus().GetExternalSnapshot().GetSnapshotUri(); snapshotURI != "" {
+	if _, obj := latestCompletedDurableSnapshot(actor.GetStatus()); obj.GetSnapshotUri() != "" {
+		snapshotURI := obj.GetSnapshotUri()
 		uri, err := resources.ParseSnapshotURI(snapshotURI)
 		if err != nil {
 			return resources.StoragePrefix{}, fmt.Errorf("while parsing the external snapshot %q: %w", snapshotURI, err)
@@ -412,7 +412,7 @@ func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix,
 	// Nothing of the actor's own is recorded. Unless a suspend died partway,
 	// nothing was ever written under its prefix: the in-progress URI is
 	// recorded before atelet uploads the first object.
-	inProgress := actor.GetStatus().GetInProgressSnapshotUri()
+	inProgress := inProgressDurableSnapshotURI(actor.GetStatus())
 	if inProgress == "" {
 		return resources.StoragePrefix{}, nil
 	}

@@ -261,8 +261,10 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 			// The actor's prefix is keyed on the UID the store just assigned, so
 			// its snapshots can only be placed now.
 			current := mustActorSnapshotURI(t, template, actor, "current")
+			currentType := ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR
 			if tt.tagOwnedSnapshot {
 				current = mustTagSnapshotURI(t, template, "team-a", "v1-snapshot")
+				currentType = ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG
 			}
 			objects.PutSnapshot(t, current, "manifest.json")
 			inFlight := mustActorSnapshotURI(t, template, actor, inFlightSnapshotName)
@@ -270,8 +272,11 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 				objects.PutSnapshot(t, inFlight, "manifest.json")
 			}
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-				s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: current.String()}
-				s.InProgressSnapshotUri = inFlight.String()
+				s.LatestSnapshotGeneration = 2
+				s.Snapshots = []*ateapipb.Snapshot{
+					newDurableSnapshot(1, currentType, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", current.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+					newDurableSnapshot(2, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", inFlight.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+				}
 			})
 
 			if err := w.ensureExternalSnapshotsReleased(ctx, actor); err != nil {
@@ -316,7 +321,10 @@ func TestEnsureExternalSnapshotsReleased_CollectsStrandedSnapshots(t *testing.T)
 		objects.PutSnapshot(t, uri, "manifest.json")
 	}
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: currentSnapshot.String()}
+		s.LatestSnapshotGeneration = 1
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", currentSnapshot.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+		}
 	})
 
 	if err := w.ensureExternalSnapshotsReleased(ctx, actor); err != nil {
@@ -353,7 +361,10 @@ func TestDeleteActor_CollectsInFlightSnapshotWithoutTemplate(t *testing.T) {
 	}, actor, "abandoned")
 	objects.PutSnapshot(t, inFlight, "manifest.json")
 	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.InProgressSnapshotUri = inFlight.String()
+		s.LatestSnapshotGeneration = 1
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", inFlight.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+		}
 	})
 
 	if _, err := w.DeleteActor(ctx, actorRef, true, store.DeletePreconditions{}); err != nil {
@@ -383,7 +394,10 @@ func TestEnsureExternalSnapshotsReleased_DeletePrefixFailure(t *testing.T) {
 	current := mustActorSnapshotURI(t, template, actor, "current")
 	objects.PutSnapshot(t, current, "manifest.json", "memory.zst")
 	actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-		s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: current.String()}
+		s.LatestSnapshotGeneration = 1
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", current.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+		}
 	})
 
 	errTransient := errors.New("simulated transient delete failure")
@@ -414,8 +428,8 @@ func TestEnsureExternalSnapshotsReleased_DeletePrefixFailure(t *testing.T) {
 // TestDeleteActor_CollectsSnapshotsAfterWorkerDelete verifies that
 // deleting an actor whose suspend a worker delete crashed mid-finalize deletes
 // every object that suspend wrote. When an actor crashes mid-suspend, only
-// DeleteActor or RevertActor can delete the in-progress snapshot
-// (in_progress_snapshot_uri): whatever they cannot name is leaked for good.
+// DeleteActor or RevertActor can delete the in-progress snapshot:
+// whatever they cannot name is leaked for good.
 func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 	tests := []struct {
 		name string
@@ -477,7 +491,10 @@ func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 				previous := mustActorSnapshotURI(t, template, actor, "old")
 				objects.PutSnapshot(t, previous, "manifest.json")
 				actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-					s.ExternalSnapshot = &ateapipb.ExternalSnapshot{SnapshotUri: previous.String()}
+					s.LatestSnapshotGeneration = 1
+					s.Snapshots = []*ateapipb.Snapshot{
+						newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", previous.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+					}
 				})
 			}
 
@@ -488,7 +505,7 @@ func TestDeleteActor_CollectsSnapshotsAfterWorkerDelete(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ensureMarkedSuspending: %v", err)
 			}
-			fresh := mustParseSnapshotURI(t, actor.GetStatus().GetInProgressSnapshotUri())
+			fresh := mustParseSnapshotURI(t, inProgressDurableSnapshotURI(actor.GetStatus()))
 			objects.PutSnapshot(t, fresh, "manifest.json")
 
 			// The worker's pod goes away with the commit still outstanding, so

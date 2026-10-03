@@ -60,7 +60,10 @@ func seedActor(t *testing.T, ctx context.Context, st store.Interface, actorRef r
 				WorkerPodUid:    "uid",
 				WorkerPodIps:    []string{"1.2.3.4"},
 			},
-			InProgressSnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot",
+			LatestSnapshotGeneration: 1,
+			Snapshots: []*ateapipb.Snapshot{
+				newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+			},
 		},
 	})
 }
@@ -103,8 +106,11 @@ func seedUnboundActor(t *testing.T, ctx context.Context, st store.Interface, act
 	storetest.MustCreateActor(t, ctx, st, &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Name: actorRef.Name, Atespace: actorRef.Atespace},
 		Status: &ateapipb.ActorStatus{
-			State:                 ateapipb.ActorState_ACTOR_STATE_RUNNING,
-			InProgressSnapshotUri: "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot",
+			State:                    ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			LatestSnapshotGeneration: 1,
+			Snapshots: []*ateapipb.Snapshot{
+				newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL, "", "gs://bucket/atespaces/as/actors/uid/snapshots/reserved-snapshot", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_IN_PROGRESS),
+			},
 		},
 	})
 }
@@ -121,8 +127,8 @@ func assertCrashed(t *testing.T, ctx context.Context, st store.Interface, actorR
 		t.Errorf("status = %v, want %v", got.GetStatus().GetState(), ateapipb.ActorState_ACTOR_STATE_CRASHED)
 	}
 	// Keep the snapshot uri for debugging.
-	if got.GetStatus().GetInProgressSnapshotUri() == "" {
-		t.Error(`InProgressSnapshotUri = "", want preserved`)
+	if inProgressDurableSnapshotURI(got.GetStatus()) == "" {
+		t.Error(`inProgressDurableSnapshotURI = "", want preserved`)
 	}
 	if got.GetStatus().GetWorkerAssignment() != nil {
 		t.Errorf("WorkerAssignment = %v, want cleared", got.GetStatus().GetWorkerAssignment())

@@ -136,16 +136,17 @@ func (w *ActorWorkflow) ResumeActor(ctx context.Context, actorRef resources.Acto
 // commit Full (commitSnapshotScope), so this only trips on golden snapshots
 // taken before that rule existed — surface a clear error instead of shipping
 // a restore request atelet would reject (or that would boot an empty guest).
-func validateGoldenSnapshotScope(snapshot *ateapipb.ExternalSnapshot) error {
+func validateGoldenSnapshotScope(snapshot *ateapipb.Snapshot) error {
 	scope := snapshot.GetContentScope()
 	switch scope {
 	case ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_UNSPECIFIED,
 		ateapipb.SnapshotContentScope_SNAPSHOT_CONTENT_SCOPE_FULL:
 		return nil
 	default:
+		uri := findSnapshotStorage(snapshot, ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE).GetObject().GetSnapshotUri()
 		return status.Errorf(codes.FailedPrecondition,
 			"ActorTemplate golden snapshot %q was taken with scope %s, not Full; regenerate the golden snapshot",
-			snapshot.GetSnapshotUri(), scope)
+			uri, scope)
 	}
 }
 
@@ -175,12 +176,12 @@ func (w *ActorWorkflow) loadActorForResume(ctx context.Context, actorRef resourc
 	if err != nil {
 		return nil, nil, src, err
 	}
-	if uri := actor.GetStatus().GetExternalSnapshot().GetSnapshotUri(); uri != "" {
-		if src.SnapshotURI, err = resources.ParseSnapshotURI(uri); err != nil {
+	if snap, obj := latestCompletedDurableSnapshot(actor.GetStatus()); obj.GetSnapshotUri() != "" {
+		if src.SnapshotURI, err = resources.ParseSnapshotURI(obj.GetSnapshotUri()); err != nil {
 			return nil, nil, src, status.Errorf(codes.DataLoss, "Actor %s external snapshot: %v", actorRef, err)
 		}
-		src.Scope = actor.GetStatus().GetExternalSnapshot().GetContentScope()
-		capturedUnder := actor.GetStatus().GetExternalSnapshot().GetActorTemplateUid()
+		src.Scope = snap.GetContentScope()
+		capturedUnder := snap.GetActorTemplateUid()
 		src.TemplateReplaced = capturedUnder != "" && capturedUnder != actorTemplate.GetMetadata().GetUid()
 	}
 
@@ -642,7 +643,7 @@ func (w *ActorWorkflow) ensureAteletRestored(ctx context.Context, actorRef resou
 		return tele, fmt.Errorf("while resolving sandbox assets: %w", err)
 	}
 
-	if local := actor.GetStatus().GetLocalSnapshot(); local != nil {
+	if _, local := completedLocalSnapshot(actor.GetStatus()); local != nil {
 		slog.InfoContext(ctx, "Actor has snapshot; Restoring from snapshot")
 		tele.SnapshotKind = ateattr.SnapshotKindLocal
 
