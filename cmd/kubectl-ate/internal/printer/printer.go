@@ -340,8 +340,9 @@ func PrintTagsTo(out io.Writer, tags []*ateapipb.Tag, format string) error {
 			// A pending tag has no snapshot yet, so neither its URI nor its
 			// content scope says anything.
 			snapshotURI, contentScope := "<none>", "<none>"
-			if snapshot := tag.GetStatus().GetSnapshot(); snapshot.GetSnapshotUri() != "" {
-				snapshotURI = snapshot.GetSnapshotUri()
+			snapshot := tag.GetStatus().GetSnapshot()
+			if uri := durableSnapshotURI(snapshot); uri != "" {
+				snapshotURI = uri
 				contentScope = snapshot.GetContentScope().String()
 			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
@@ -355,11 +356,21 @@ func PrintTagsTo(out io.Writer, tags []*ateapipb.Tag, format string) error {
 	}
 }
 
+func durableSnapshotURI(snapshot *ateapipb.Snapshot) string {
+	for _, st := range snapshot.GetStorage() {
+		if st.GetDurability() == ateapipb.SnapshotDurability_SNAPSHOT_DURABILITY_DURABLE &&
+			st.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED {
+			return st.GetObject().GetSnapshotUri()
+		}
+	}
+	return ""
+}
+
 // tagState reports whether a tag is usable. A tag is Pending until
 // the copy of its own snapshot lands; until then it names nothing an Actor can
 // be created from, and deleting it collects whatever the create stranded.
 func tagState(tag *ateapipb.Tag) string {
-	if tag.GetStatus().GetSnapshot().GetSnapshotUri() == "" {
+	if durableSnapshotURI(tag.GetStatus().GetSnapshot()) == "" {
 		return "Pending"
 	}
 	return "Ready"

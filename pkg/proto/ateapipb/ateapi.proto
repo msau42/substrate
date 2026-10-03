@@ -145,27 +145,13 @@ service Control {
   rpc DeleteActorTemplate(DeleteActorTemplateRequest) returns (ActorTemplate) {}
 }
 
-// ExternalSnapshot addresses a snapshot held in object storage.
-message ExternalSnapshot {
+// ObjectSnapshot addresses a snapshot held in object storage.
+message ObjectSnapshot {
   // snapshot_uri addresses the snapshot's prefix in object storage.
   //
   // +k8s:required
   // +k8s:maxLength=2048 # the template's storage_location bound plus the owner prefix and snapshot name
   string snapshot_uri = 1;
-
-  // content_scope is what the snapshot captured.
-  //
-  // +k8s:optional
-  // +k8s:minimum=1
-  // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
-  SnapshotContentScope content_scope = 2;
-
-  // UID of the ActorTemplate whose sandbox this snapshot's guest state was
-  // captured from.
-  //
-  // +k8s:optional
-  // +k8s:format=k8s-uuid
-  string actor_template_uid = 3;
 }
 
 // LocalSnapshot records information about a node-local snapshot.
@@ -173,20 +159,124 @@ message LocalSnapshot {
   // The name of the local checkpoint on the node. Checkpoint names are
   // server-generated UUIDs, but any resource name is valid here.
   //
-  // +k8s:optional
+  // TODO: consider removing this since it's the same as the snapshot_id
+  //
+  // +k8s:required
   // +k8s:format=k8s-short-name
   string snapshot_name = 1;
 
-  // Scope the pause checkpoint captured (the template's onPause at pause
-  // time). UNSPECIFIED is tolerated for compatibility and reads as FULL.
+  reserved 2, 3;
+  reserved "node_vms_with_local_snapshots", "content_scope";
+}
+
+// SnapshotOwner indicates the owner of a snapshot.
+enum SnapshotOwner {
+  SNAPSHOT_OWNER_UNSPECIFIED = 0;
+  // Snapshot captured directly from this Actor.
+  SNAPSHOT_OWNER_ACTOR = 1;
+  // Borrowed reference to an ActorTemplate's golden snapshot.
+  SNAPSHOT_OWNER_GOLDEN = 2;
+  // Borrowed reference to a Tag's snapshot.
+  SNAPSHOT_OWNER_TAG = 3;
+  // Keep this in sync with Snapshot.owner's maximum.
+}
+
+// SnapshotDurability indicates the durability level of the snapshot.
+// TODO: potentially rename this to survivability level. Is it at the actor or snapshot level?
+enum SnapshotDurability {
+  SNAPSHOT_DURABILITY_UNSPECIFIED = 0;
+  // In-memory resident state on the worker.
+  // Does not survive node reboot.
+  SNAPSHOT_DURABILITY_RESIDENT = 1;
+  // Node-local checkpoint on the worker node
+  // Survives node reboot.
+  SNAPSHOT_DURABILITY_LOCAL = 2;
+  // Durable snapshot in external storage.
+  // Survives node crash and deletion.
+  SNAPSHOT_DURABILITY_DURABLE = 3;
+  // Keep this in sync with SnapshotStorage.durability's maximum.
+}
+
+// SnapshotStorageStatus indicates the lifecycle stage of a snapshot storage entry.
+enum SnapshotStorageStatus {
+  SNAPSHOT_STORAGE_STATUS_UNSPECIFIED = 0;
+  // Snapshot creation or promotion is in progress.
+  SNAPSHOT_STORAGE_STATUS_IN_PROGRESS = 1;
+  // Snapshot is complete and ready for use.
+  SNAPSHOT_STORAGE_STATUS_COMPLETED = 2;
+  // Snapshot is being garbage-collected.
+  SNAPSHOT_STORAGE_STATUS_DELETING = 3;
+  // Keep this in sync with SnapshotStorage.status's maximum.
+}
+
+// SnapshotStorage records the physical storage representation of a Snapshot.
+message SnapshotStorage {
+  // durability is the durability tier of this storage entry.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotDurability enum
+  SnapshotDurability durability = 1;
+
+  // status is the lifecycle status of this storage representation.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotStorageStatus enum
+  SnapshotStorageStatus status = 2;
+
+  // Exactly one of local or object must be set.
+  //
+  // local snapshot is stored on the node where the actor was suspended.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  LocalSnapshot local = 3;
+
+  // object snapshot is stored in object storage.
+  //
+  // +k8s:optional
+  // +k8s:unionMember
+  ObjectSnapshot object = 4;
+}
+
+// Snapshot represents one generation of an Actor's or Tag's snapshot state.
+message Snapshot {
+  // generation is the monotonically increasing generation number of this
+  // snapshot on the Actor (0 for a borrowed golden or tag snapshot).
+  //
+  // +k8s:optional
+  // +k8s:minimum=0
+  int32 generation = 1;
+
+  // owner identifies the origin and ownership of this snapshot.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  // +k8s:maximum=3 # keep this in sync with the SnapshotOwner enum
+  SnapshotOwner owner = 2;
+
+  // content_scope is what the snapshot captured.
   //
   // +k8s:optional
   // +k8s:minimum=1
   // +k8s:maximum=2 # keep this in sync with the SnapshotContentScope enum
   SnapshotContentScope content_scope = 3;
 
-  reserved 2;
-  reserved "node_vms_with_local_snapshots";
+  // UID of the ActorTemplate whose sandbox this snapshot's guest state was
+  // captured from.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-uuid
+  string actor_template_uid = 4;
+
+  // storage lists the storage representations of this snapshot by durability.
+  //
+  // +k8s:required
+  // +k8s:maxItems=3
+  // +k8s:listType=map
+  // +k8s:listMapKey=durability
+  repeated SnapshotStorage storage = 5;
 }
 
 enum SnapshotContentScope {
@@ -680,25 +770,6 @@ message ActorStatus {
   // +k8s:update=NoModify # can be set and cleared, but not changed in place
   WorkerAssignment worker_assignment = 2;
 
-  // in_progress_snapshot_uri is the URI in object storage of the durable
-  // snapshot the Actor is currently taking.
-  //
-  // +k8s:optional
-  // +k8s:maxLength=2048 # the template's storage_location bound plus the owner prefix and snapshot name
-  string in_progress_snapshot_uri = 3;
-
-  // external_snapshot is the Actor's current external snapshot.
-  // If the Actor was created from a Tag this is the tag's snapshot, borrowed
-  // until the Actor's first suspend writes one of its own. Otherwise it is
-  // unset until the Actor is first suspended.
-  // +k8s:optional
-  ExternalSnapshot external_snapshot = 4;
-
-  // Node-local state used only while the Actor is paused.
-  //
-  // +k8s:optional
-  LocalSnapshot local_snapshot = 5;
-
   // Volumes attached to the actor. These volumes only live as long as the actor.
   // They are deleted when the actor is deleted. Each template volume
   // appears at most once.
@@ -708,13 +779,6 @@ message ActorStatus {
   // +k8s:listType=map
   // +k8s:listMapKey=volume_name
   repeated ExternalVolume actor_volumes = 7;
-
-  // The name of the in-progress node-local checkpoint. Like durable snapshot
-  // names, these are server-generated UUIDs.
-  //
-  // +k8s:optional
-  // +k8s:format=k8s-short-name
-  string in_progress_local_snapshot_name = 8;
 
   // crash records why and when the Actor entered CRASHED. It is set with the
   // CRASHED state and cleared when a revert returns the Actor to SUSPENDED.
@@ -729,6 +793,27 @@ message ActorStatus {
   // +k8s:optional
   // +k8s:format=k8s-long-name
   string assigned_node = 10;
+
+  // snapshots holds the Actor's active and in-progress snapshot generations.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=16
+  // +k8s:listType=atomic
+  // +k8s:unique=map
+  // +k8s:listMapKey=generation
+  repeated Snapshot snapshots = 11;
+
+  // latest_snapshot_generation is the highest snapshot generation created for
+  // this Actor.
+  //
+  // +k8s:optional
+  // +k8s:alpha(since: "0.0")=+k8s:monotonic # TODO: get rid of alpha prefix
+  // +k8s:minimum=0
+  // +k8s:update=NoUnset
+  int32 latest_snapshot_generation = 12;
+
+  reserved 3 to 6, 8;
+  reserved "in_progress_snapshot_uri", "external_snapshot", "local_snapshot", "in_progress_local_snapshot_name";
 }
 
 // ActorCrash describes the failure that moved an Actor to CRASHED.
@@ -815,13 +900,6 @@ message WorkerAssignment {
 // The tag is fixed to one external snapshot once its creation completes, so
 // the rest is immutable provenance.
 message TagStatus {
-  // snapshot is the external snapshot this tag points at. Unset while the tag
-  // is still being created, and immutable once set: a tag never moves between
-  // snapshots. A tag is usable only once this is set.
-  //
-  // +k8s:optional
-  ExternalSnapshot snapshot = 1;
-
   // UID of the ActorTemplate the snapshot was taken under. Actors can only be
   // seeded from a tag under the same template.
   //
@@ -829,14 +907,16 @@ message TagStatus {
   // +k8s:format=k8s-uuid
   string actor_template_uid = 2;
 
-  // storage_location is the base object-storage URI for this tag's snapshot.
-  // Set by the server from the source actor's template when the tag is created
-  // and immutable thereafter. The full snapshot URI is available in
-  // snapshot.snapshot_uri once tag creation completes.
+  // snapshot is the external snapshot this tag points at. Its storage entry is
+  // IN_PROGRESS while the tag is being created and transitions to COMPLETED
+  // once the copy finishes: a tag never moves between snapshots and is usable
+  // only once COMPLETED.
   //
   // +k8s:required
-  // +k8s:maxLength=1024
-  string storage_location = 3;
+  Snapshot snapshot = 4;
+
+  reserved 1, 3;
+  reserved "storage_location";
 }
 
 // Tag is an Atespace-owned, stable name for one external snapshot. The
