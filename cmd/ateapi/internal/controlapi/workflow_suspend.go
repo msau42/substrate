@@ -35,7 +35,7 @@ import (
 // snapshot is uploaded. Idempotent: a re-entered workflow fast-forwards past
 // the steps a previous attempt completed, deriving progress from the
 // persisted actor alone.
-func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.ActorRef, detach bool) (_ *ateapipb.Actor, err error) {
 	start := time.Now()
 	var actor *ateapipb.Actor
 	var actorTemplate *ateapipb.ActorTemplate
@@ -78,21 +78,23 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 	}
 	actor = marked
 	if fromPaused {
-		wireFidelity, err = w.ensurePausedSnapshotUploaded(leaseCtx, actorRef, actor, actorTemplate)
+		wireFidelity, err = w.ensurePausedSnapshotUploaded(leaseCtx, actorRef, actor, actorTemplate, detach)
 	} else {
-		wireFidelity, err = w.ensureAteletSuspended(leaseCtx, actorRef, actor, actorTemplate)
+		wireFidelity, err = w.ensureAteletSuspended(leaseCtx, actorRef, actor, actorTemplate, detach)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err = w.ensureVolumesDetached(leaseCtx, actor, actorTemplate, "DetachVolumes", ateattr.OperationSuspend); err != nil {
-		return nil, err
+	if detach {
+		if err = w.ensureVolumesDetached(leaseCtx, actor, actorTemplate, "DetachVolumes", ateattr.OperationSuspend); err != nil {
+			return nil, err
+		}
 	}
 	// FinalizeSuspended clears the WorkerAssignment the labels read, so snapshot
 	// them here, as crash.go does for the crash counter.
 	finalAttrs = lifecycleOpAttrs(actor, actorTemplate, "", wireFidelity)
 	var finalized *ateapipb.Actor
-	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef); err != nil {
+	if finalized, err = w.ensureSuspendedFinalized(leaseCtx, actorRef, detach); err != nil {
 		return nil, err
 	}
 	actor = finalized
@@ -226,7 +228,7 @@ func isPausedOriginSuspend(actor *ateapipb.Actor) bool {
 // once-minted snapshot location, so a re-entered workflow re-sends the same
 // semantic request; once atelet's Checkpoint is idempotent on those keys this
 // step becomes fully reentrant with no changes here.
-func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (wireFidelity string, err error) {
+func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate, detach bool) (wireFidelity string, err error) {
 	ctx, done := stepSpan(ctx, "CallAteletSuspend")
 	defer func() { err = done(err) }()
 
@@ -254,6 +256,8 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 	// actor is currently running (recorded on-node at Run/Restore) and pins it
 	// into the snapshot manifest.
 	inProgressSnap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+	destURI := inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri()
+	fidelity := fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate))
 	req := &ateletpb.CheckpointRequest{
 		WorkerPodUid:          assignment.GetWorkerPodUid(),
 		Atespace:              actor.GetMetadata().GetAtespace(),
@@ -261,21 +265,31 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 		ActorTemplateAtespace: actor.GetActorTemplate().GetAtespace(),
 		ActorTemplateName:     actor.GetActorTemplate().GetName(),
 		Spec:                  workloadSpec,
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
-		Config: &ateletpb.CheckpointRequest_ExternalConfig{
-			ExternalConfig: &ateletpb.ExternalCheckpointConfiguration{
-				SnapshotUri: inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotIDFromURI(destURI),
+			Fidelity:     fidelity,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: destURI,
+				},
 			},
 		},
-		Fidelity: fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate)),
-		ActorUid: actor.GetMetadata().Uid,
+		StoreOption: suspendStoreOption(detach),
+		ActorUid:    actor.GetMetadata().Uid,
 	}
-	wireFidelity = ateattr.SnapshotFidelityValue(req.Fidelity)
+	wireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
 	if _, err = client.Checkpoint(ctx, req); err != nil {
 		return wireFidelity, handleAteletError(ctx, w.store, actorRef, ateattr.OperationSuspend, "Checkpoint", false, err)
 	}
 	return wireFidelity, nil
+}
+
+func suspendStoreOption(detach bool) ateletpb.SnapshotStoreOption {
+	if detach {
+		return ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY
+	}
+	return ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE
 }
 
 // ensurePausedSnapshotUploaded suspends a PAUSED actor by telling the atelet
@@ -284,8 +298,8 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 // ateom to checkpoint. Retries re-send the same semantic request: the
 // destination is minted once and the upload overwrites deterministic object
 // names, with the remote manifest as the commit marker.
-func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate) (wireFidelity string, err error) {
-	ctx, done := stepSpan(ctx, "UploadPausedCheckpoint")
+func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor, actorTemplate *ateapipb.ActorTemplate, detach bool) (wireFidelity string, err error) {
+	ctx, done := stepSpan(ctx, "PromoteSnapshot")
 	defer func() { err = done(err) }()
 
 	localSnap := findLatestLocalSnapshot(actor.GetStatus())
@@ -309,22 +323,32 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 	client := ateletpb.NewAteomHerderClient(ateletConn)
 
 	inProgressSnap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
-	req := &ateletpb.UploadPausedCheckpointRequest{
-		Atespace:               actor.GetMetadata().GetAtespace(),
-		ActorName:              actor.GetMetadata().GetName(),
-		ActorUid:               actor.GetMetadata().GetUid(),
-		ActorTemplateAtespace:  actor.GetActorTemplate().GetAtespace(),
-		ActorTemplateName:      actor.GetActorTemplate().GetName(),
-		LocalSnapshotName:      localSnap.GetUuid(),
-		DestinationSnapshotUri: inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri(),
-		// The commit scope, like a running-origin suspend; atelet converts
-		// from the captured scope in the snapshot's manifest where possible.
-		DesiredFidelity: fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate)),
+	localName := localSnap.GetUuid()
+	destURI := inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri()
+	// The commit scope, like a running-origin suspend; atelet converts
+	// from the captured scope in the snapshot's manifest where possible.
+	fidelity := fidelityToAtelet(preferredFidelity(actor.GetMetadata().GetAtespace(), actorTemplate))
+	req := &ateletpb.PromoteSnapshotRequest{
+		Atespace:              actor.GetMetadata().GetAtespace(),
+		ActorName:             actor.GetMetadata().GetName(),
+		ActorUid:              actor.GetMetadata().GetUid(),
+		ActorTemplateAtespace: actor.GetActorTemplate().GetAtespace(),
+		ActorTemplateName:     actor.GetActorTemplate().GetName(),
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: localName,
+			Fidelity:     fidelity,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: destURI,
+				},
+			},
+		},
+		StoreOption: suspendStoreOption(detach),
 	}
-	wireFidelity = ateattr.SnapshotFidelityValue(req.DesiredFidelity)
+	wireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
-	if _, err = client.UploadPausedCheckpoint(ctx, req); err != nil {
-		return wireFidelity, handleAteletError(ctx, w.store, actorRef, ateattr.OperationSuspend, "UploadPausedCheckpoint", false, err)
+	if _, err = client.PromoteSnapshot(ctx, req); err != nil {
+		return wireFidelity, handleAteletError(ctx, w.store, actorRef, ateattr.OperationSuspend, "PromoteSnapshot", false, err)
 	}
 	return wireFidelity, nil
 }
@@ -359,7 +383,7 @@ func (w *ActorWorkflow) ensureVolumesDetached(ctx context.Context, actor *ateapi
 // It re-reads the actor first so an out-of-band transition (e.g. the syncer
 // crashing the actor after its worker died) is not overwritten: with no
 // assignment left there is nothing to finalize.
-func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
+func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef resources.ActorRef, detach bool) (_ *ateapipb.Actor, err error) {
 	ctx, done := stepSpan(ctx, "FinalizeSuspended")
 	defer func() { err = done(err) }()
 
@@ -385,6 +409,11 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	dGetActor = time.Since(t)
 	if err != nil {
 		return nil, err
+	}
+
+	nodeName := latestActor.GetStatus().GetAssignedNode()
+	if nodeName == "" {
+		nodeName = latestActor.GetStatus().GetWorkerAssignment().GetNodeName()
 	}
 
 	// 1. Free the worker (if it hasn't been freed yet)
@@ -418,16 +447,27 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		if snap == nil {
 			return fmt.Errorf("actor %s has no latest snapshot", actorRef)
 		}
-		if inProgressSt := snap.GetDurableSnapshot(); inProgressSt.GetObject().GetSnapshotUri() != "" {
+		inProgressSt := snap.GetDurableSnapshot()
+		inProgressSnapshotURI := inProgressSt.GetObject().GetSnapshotUri()
+		if inProgressSnapshotURI != "" {
 			inProgressSt.Status = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 		}
-		// Remove all local snapshots since they are superseded by the new durable snapshot.
-		// TODO: This will change when we merge pause and suspend and allow for both local
-		// and durable snapshots to be kept.
-		clearLocalSnapshots(toUpdate.Status)
+		if detach {
+			clearLocalSnapshots(toUpdate.Status)
+			toUpdate.Status.AssignedNode = ""
+		} else {
+			locality := snap.GetLocality()
+			if locality == "" && inProgressSnapshotURI != "" {
+				locality = nodeName
+			}
+			clearLocalSnapshots(toUpdate.Status)
+			snap.Locality = locality
+			if toUpdate.Status.AssignedNode == "" {
+				toUpdate.Status.AssignedNode = nodeName
+			}
+		}
 		pruneSnapshots(toUpdate.Status)
 		toUpdate.Status.WorkerAssignment = nil
-		toUpdate.Status.AssignedNode = ""
 		return nil
 	})
 	dUpdateActor = time.Since(t)

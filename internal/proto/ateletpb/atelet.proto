@@ -250,11 +250,11 @@ service AteomHerder {
   // Restore restores a workload from checkpoint onto an ateom.
   rpc Restore(RestoreRequest) returns (RestoreResponse) {}
 
-  // UploadPausedCheckpoint copies a local (pause) checkpoint from this node's
-  // disk to object storage. Unlike Checkpoint it drives no ateom: the actor is
-  // paused, its sandbox is gone; the checkpoint files plus their manifest
-  // already sit under the actor's local-checkpoints directory.
-  rpc UploadPausedCheckpoint(UploadPausedCheckpointRequest) returns (UploadPausedCheckpointResponse) {}
+  // PromoteSnapshot copies a local checkpoint from this node's disk to object
+  // storage. Unlike Checkpoint it drives no ateom: the actor is paused, its
+  // sandbox is gone; the checkpoint files plus their manifest already sit under
+  // the actor's local-checkpoints directory.
+  rpc PromoteSnapshot(PromoteSnapshotRequest) returns (PromoteSnapshotResponse) {}
 
   // Terminate tells atelet to terminate/kill any running workload for an actor,
   // unmount its volumes, and clean up actor state on the node.
@@ -486,29 +486,6 @@ message HTTPGetAction {
 message RunResponse {
 }
 
-message LocalCheckpointConfiguration {
-  // Names a sub-directory on the local filesystem below which the checkpoint
-  // data will be stored. atelet decides where that directory lives, from the
-  // actor's UID, so this is a bare name and must not contain a path separator.
-  // The structure of the checkpoint should generally be treated as opaque.
-  string snapshot_name = 1;
-}
-
-message ExternalCheckpointConfiguration {
-  // The object storage URI of the snapshot to write. Object names are appended
-  // to it, so it addresses the snapshot as a whole rather than any one object.
-  string snapshot_uri = 1;
-}
-
-enum CheckpointType {
-  // Should never happen
-  CHECKPOINT_TYPE_UNSPECIFIED = 0;
-  // Save snapshot only in local filesystem
-  CHECKPOINT_TYPE_LOCAL = 1;
-  // Save snapshot to object storage
-  CHECKPOINT_TYPE_EXTERNAL = 2;
-}
-
 // SnapshotFidelity mirrors the public ateapi enum: the state layers a
 // snapshot holds, lowest to highest, each including the ones below it.
 enum SnapshotFidelity {
@@ -526,14 +503,45 @@ enum SnapshotFidelity {
   SNAPSHOT_FIDELITY_MEMORY = 3;
 }
 
-// ExternalRestoreConfiguration is an external snapshot a restore reads.
-// Split from the checkpoint-side ExternalCheckpointConfiguration (a write
-// destination) so read-side attributes of a restore source have a home.
-message ExternalRestoreConfiguration {
-  // The object storage URI of the snapshot to read. Object names are
-  // appended to it, so it addresses the snapshot as a whole rather than any
-  // one object.
+message ObjectStorage {
+  // The object storage URI of the snapshot. Object names are appended to it,
+  // so it addresses the snapshot as a whole rather than any one object.
   string snapshot_uri = 1;
+}
+
+message Snapshot {
+  // Unique identifier for this snapshot (Snapshot.uuid). Names the
+  // sub-directory under the actor's local-checkpoint directory on disk, so this
+  // is a bare name and must not contain a path separator.
+  string snapshot_uuid = 1;
+
+  // On Checkpoint / PromoteSnapshot: the target fidelity for durable storage
+  // (local checkpoints always capture MEMORY).
+  // On Restore: the fidelity to restore the actor with.
+  SnapshotFidelity fidelity = 2;
+
+  oneof durable_storage {
+    ObjectStorage object = 3;
+  }
+}
+
+enum SnapshotStoreOption {
+  SNAPSHOT_STORE_OPTION_UNSPECIFIED = 0;
+
+  // Store only on node-local disk (`local-checkpoint/<snapshot_uuid>`).
+  // Always captures MEMORY fidelity.
+  SNAPSHOT_STORE_OPTION_LOCAL_ONLY = 1;
+
+  // Store both on node-local disk (`local-checkpoint/<snapshot_uuid>`, at
+  // MEMORY fidelity) and in durable storage (`snapshot.object`, at
+  // `snapshot.fidelity`). Keeps the local checkpoint cached on disk.
+  SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE = 2;
+
+  // Store only in durable storage (`snapshot.object`, at `snapshot.fidelity`).
+  // On Checkpoint, does not cache a local checkpoint (and prunes any existing
+  // local checkpoints). On PromoteSnapshot, prunes the actor's local
+  // checkpoints after uploading to durable storage.
+  SNAPSHOT_STORE_OPTION_DURABLE_ONLY = 3;
 }
 
 message CheckpointRequest {
@@ -551,22 +559,17 @@ message CheckpointRequest {
   // Run/Restore) and records it into the snapshot manifest.
   WorkloadSpec spec = 7;
 
-  CheckpointType type = 8;
+  // Snapshot metadata and optional durable storage destination.
+  Snapshot snapshot = 8;
 
-  // The checkpoint configuration, depending on the type.
-  oneof config {
-    LocalCheckpointConfiguration local_config = 9;
-    ExternalCheckpointConfiguration external_config = 10;
-  }
-
-  // Fidelity the checkpoint captures.
-  SnapshotFidelity fidelity = 11;
+  // Which snapshot stores to populate.
+  SnapshotStoreOption store_option = 9;
 }
 
 message CheckpointResponse {
 }
 
-message UploadPausedCheckpointRequest {
+message PromoteSnapshotRequest {
   string atespace = 1;
   string actor_name = 2;
   string actor_uid = 3;
@@ -575,22 +578,17 @@ message UploadPausedCheckpointRequest {
   string actor_template_atespace = 4;
   string actor_template_name = 5;
 
-  // The local checkpoint to upload: LocalSnapshot.snapshot_name recorded
-  // at pause time.
-  string local_snapshot_name = 6;
+  // Identifies the local checkpoint (`snapshot_uuid`) to promote and its
+  // durable destination (`object`) and target `fidelity`.
+  Snapshot snapshot = 6;
 
-  // Destination object-storage URI (the actor's in-progress snapshot URI).
-  string destination_snapshot_uri = 7;
-
-  // Fidelity the uploaded snapshot must have (MEMORY or VOLUMES). The
-  // fidelity the pause checkpoint captured is not sent: atelet reads it from
-  // the local snapshot's own manifest, which is authoritative. When they
-  // differ, atelet converts where possible (a MEMORY capture to a VOLUMES
-  // upload of the volume files ateom reported) and rejects otherwise.
-  SnapshotFidelity desired_fidelity = 8;
+  // Must be `SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE` (keep local checkpoint
+  // cached after uploading) or `SNAPSHOT_STORE_OPTION_DURABLE_ONLY` (prune
+  // local checkpoints after uploading).
+  SnapshotStoreOption store_option = 7;
 }
 
-message UploadPausedCheckpointResponse {
+message PromoteSnapshotResponse {
 }
 
 message RestoreRequest {
@@ -605,16 +603,9 @@ message RestoreRequest {
 
   WorkloadSpec spec = 7;
 
-  CheckpointType type = 8;
-
-  // The checkpoint configuration, depending on the type.
-  oneof config {
-    LocalCheckpointConfiguration local_config = 9;
-    ExternalRestoreConfiguration external_config = 10;
-  }
-
-  // Fidelity to restore from the checkpoint.
-  SnapshotFidelity fidelity = 11;
+  // Snapshot to restore from. atelet checks `local-checkpoint/<snapshot_uuid>`
+  // first and falls back to `snapshot.object` if not present on local disk.
+  Snapshot snapshot = 8;
 
   // When absent the actor has no egress: its TCP is captured and refused.
   optional EgressGateway egress_gateway = 13;

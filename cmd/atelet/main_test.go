@@ -561,13 +561,16 @@ func validCheckpointRequest() *ateletpb.CheckpointRequest {
 		WorkerPodUid:          "422938ba-8860-4983-a25d-d6bcb0a69d4e",
 		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
 		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker"}}},
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
-		Config: &ateletpb.CheckpointRequest_ExternalConfig{
-			ExternalConfig: &ateletpb.ExternalCheckpointConfiguration{
-				SnapshotUri: testSnapshotURI,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: "counter-1-snap",
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: testSnapshotURI,
+				},
 			},
 		},
-		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
 	}
 }
 
@@ -580,13 +583,15 @@ func validRestoreRequest() *ateletpb.RestoreRequest {
 		WorkerPodUid:          "422938ba-8860-4983-a25d-d6bcb0a69d4e",
 		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
 		Spec:                  &ateletpb.WorkloadSpec{Containers: []*ateletpb.Container{{Name: "worker"}}},
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_EXTERNAL,
-		Config: &ateletpb.RestoreRequest_ExternalConfig{
-			ExternalConfig: &ateletpb.ExternalRestoreConfiguration{
-				SnapshotUri: testSnapshotURI,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: "counter-1-snap",
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: testSnapshotURI,
+				},
 			},
 		},
-		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		SandboxAssets: &ateletpb.SandboxAssets{
 			SandboxClass: "gvisor",
 			PauseImage:   testPauseImage,
@@ -638,9 +643,29 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		req     *ateletpb.CheckpointRequest
 		wantErr bool
 	}{
-		{"valid", makeReq(), false},
-		{"empty snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) { r.GetExternalConfig().SnapshotUri = "" }), true},
-		{"bucketless snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) { r.GetExternalConfig().SnapshotUri = "relative/path" }), true},
+		{"valid durable only", makeReq(), false},
+		{"valid local and durable", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE
+		}), false},
+		{"valid local only", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY
+			r.Snapshot.DurableStorage = nil
+		}), false},
+		{"local only with volumes fidelity rejected", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		}), true},
+		{"unspecified store option rejected", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_UNSPECIFIED
+		}), true},
+		{"empty snapshot uuid", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = "" }), true},
+		{"invalid snapshot uuid", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = "../escape" }), true},
+		{"nested snapshot uuid", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = "pause/2" }), true},
+		{"traversal snapshot uuid", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = ".." }), true},
+		{"empty snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) { r.GetSnapshot().GetObject().SnapshotUri = "" }), true},
+		{"bucketless snapshot uri", makeReq(func(r *ateletpb.CheckpointRequest) {
+			r.GetSnapshot().GetObject().SnapshotUri = "relative/path"
+		}), true},
 		{"invalid worker pod uid", makeReq(func(r *ateletpb.CheckpointRequest) { r.WorkerPodUid = "../escape" }), true},
 		{"invalid atespace", makeReq(func(r *ateletpb.CheckpointRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.CheckpointRequest) { r.ActorName = "../escape" }), true},
@@ -652,29 +677,13 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		{"invalid container name", makeReq(func(r *ateletpb.CheckpointRequest) {
 			r.Spec.Containers = []*ateletpb.Container{{Name: "../escape"}}
 		}), true},
-		{"invalid local snapshot prefix", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.CheckpointRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: ""}}
-		}), true},
-		{"local snapshot name escapes its directory", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.CheckpointRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: "../escape"}}
-		}), true},
-		{"nested local snapshot prefix", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.CheckpointRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: "pause/2"}}
-		}), true},
-		{"traversal local snapshot prefix", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.CheckpointRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: ".."}}
-		}), true},
-		{"unspecified snapshot type", makeReq(func(r *ateletpb.CheckpointRequest) { r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_UNSPECIFIED }), true},
+		{"missing snapshot", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot = nil }), true},
 		{"unspecified snapshot fidelity", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 		}), true},
-		{"invalid snapshot fidelity", makeReq(func(r *ateletpb.CheckpointRequest) { r.Fidelity = ateletpb.SnapshotFidelity(23) }), true},
+		{"invalid snapshot fidelity", makeReq(func(r *ateletpb.CheckpointRequest) { r.Snapshot.Fidelity = ateletpb.SnapshotFidelity(23) }), true},
 		{"rootfs fidelity not supported yet", makeReq(func(r *ateletpb.CheckpointRequest) {
-			r.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		}), true},
 	}
 	for _, tc := range tests {
@@ -700,10 +709,19 @@ func TestValidateRestoreRequest(t *testing.T) {
 		req     *ateletpb.RestoreRequest
 		wantErr bool
 	}{
-		{"valid", makeReq(), false},
+		{"valid with object storage", makeReq(), false},
+		{"valid local only without object storage", makeReq(func(r *ateletpb.RestoreRequest) {
+			r.Snapshot.DurableStorage = nil
+		}), false},
 		{"missing sandbox assets", makeReq(func(r *ateletpb.RestoreRequest) { r.SandboxAssets = nil }), true},
-		{"empty snapshot uri", makeReq(func(r *ateletpb.RestoreRequest) { r.GetExternalConfig().SnapshotUri = "" }), true},
-		{"bucketless snapshot uri", makeReq(func(r *ateletpb.RestoreRequest) { r.GetExternalConfig().SnapshotUri = "relative/path" }), true},
+		{"empty snapshot uuid", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot.SnapshotUuid = "" }), true},
+		{"invalid snapshot uuid", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot.SnapshotUuid = "../escape" }), true},
+		{"nested snapshot uuid", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot.SnapshotUuid = "pause/2" }), true},
+		{"traversal snapshot uuid", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot.SnapshotUuid = ".." }), true},
+		{"empty snapshot uri when object is set", makeReq(func(r *ateletpb.RestoreRequest) { r.GetSnapshot().GetObject().SnapshotUri = "" }), true},
+		{"bucketless snapshot uri", makeReq(func(r *ateletpb.RestoreRequest) {
+			r.GetSnapshot().GetObject().SnapshotUri = "relative/path"
+		}), true},
 		{"invalid worker pod uid", makeReq(func(r *ateletpb.RestoreRequest) { r.WorkerPodUid = "../escape" }), true},
 		{"invalid atespace", makeReq(func(r *ateletpb.RestoreRequest) { r.Atespace = "../escape" }), true},
 		{"invalid actor name", makeReq(func(r *ateletpb.RestoreRequest) { r.ActorName = "../escape" }), true},
@@ -715,27 +733,13 @@ func TestValidateRestoreRequest(t *testing.T) {
 		{"invalid container name", makeReq(func(r *ateletpb.RestoreRequest) {
 			r.Spec.Containers = []*ateletpb.Container{{Name: "../escape"}}
 		}), true},
-		{"invalid local snapshot prefix", makeReq(func(r *ateletpb.RestoreRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.RestoreRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: ""}}
+		{"missing snapshot", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot = nil }), true},
+		{"unspecified snapshot fidelity", makeReq(func(r *ateletpb.RestoreRequest) {
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
 		}), true},
-		{"local snapshot name escapes its directory", makeReq(func(r *ateletpb.RestoreRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.RestoreRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: "../escape"}}
-		}), true},
-		{"nested local snapshot prefix", makeReq(func(r *ateletpb.RestoreRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.RestoreRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: "pause/2"}}
-		}), true},
-		{"traversal local snapshot prefix", makeReq(func(r *ateletpb.RestoreRequest) {
-			r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL
-			r.Config = &ateletpb.RestoreRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: ".."}}
-		}), true},
-		{"unspecified snapshot type", makeReq(func(r *ateletpb.RestoreRequest) { r.Type = ateletpb.CheckpointType_CHECKPOINT_TYPE_UNSPECIFIED }), true},
-		{"unspecified snapshot fidelity", makeReq(func(r *ateletpb.RestoreRequest) { r.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED }), true},
-		{"invalid snapshot fidelity", makeReq(func(r *ateletpb.RestoreRequest) { r.Fidelity = ateletpb.SnapshotFidelity(23) }), true},
+		{"invalid snapshot fidelity", makeReq(func(r *ateletpb.RestoreRequest) { r.Snapshot.Fidelity = ateletpb.SnapshotFidelity(23) }), true},
 		{"rootfs fidelity not supported yet", makeReq(func(r *ateletpb.RestoreRequest) {
-			r.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		}), true},
 	}
 	for _, tc := range tests {
@@ -1507,16 +1511,21 @@ func writeLocalSnapshot(t *testing.T, dir string, rec sandboxAssetsRecord, conte
 	}
 }
 
-func validUploadPausedCheckpointRequest() *ateletpb.UploadPausedCheckpointRequest {
-	return &ateletpb.UploadPausedCheckpointRequest{
-		Atespace:               "ate-demo",
-		ActorName:              "counter-1",
-		ActorUid:               "123e4567-e89b-12d3-a456-426614174000",
-		ActorTemplateAtespace:  "ate-demo",
-		ActorTemplateName:      "counter",
-		LocalSnapshotName:      "pause-snap-1",
-		DestinationSnapshotUri: pausedSnapshotURI,
-		DesiredFidelity:        ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+func validPromoteSnapshotRequest() *ateletpb.PromoteSnapshotRequest {
+	return &ateletpb.PromoteSnapshotRequest{
+		Atespace:              "ate-demo",
+		ActorName:             "counter-1",
+		ActorUid:              "123e4567-e89b-12d3-a456-426614174000",
+		ActorTemplateAtespace: "ate-demo",
+		ActorTemplateName:     "counter",
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: "pause-snap-1",
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{SnapshotUri: pausedSnapshotURI},
+			},
+		},
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
 	}
 }
 
@@ -1557,7 +1566,7 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			"config.json": "cfg", "memory-ranges": "mem", "data.tar": "data",
 		})
 
-		if _, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), dir, uri); err != nil {
+		if _, err := s.uploadLocalCheckpointDir(ctx, validPromoteSnapshotRequest(), dir, uri); err != nil {
 			t.Fatalf("uploadLocalCheckpointDir: %v", err)
 		}
 		want := []string{
@@ -1582,8 +1591,8 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			"config.json": "cfg", "memory-ranges": "mem", "data.tar": "data",
 		})
 
-		req := validUploadPausedCheckpointRequest()
-		req.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		req := validPromoteSnapshotRequest()
+		req.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 		if _, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri); err != nil {
 			t.Fatalf("uploadLocalCheckpointDir: %v", err)
 		}
@@ -1613,8 +1622,8 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			"config.json": "cfg", "memory-ranges": "mem", "data.tar": "data",
 		})
 
-		req := validUploadPausedCheckpointRequest()
-		req.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		req := validPromoteSnapshotRequest()
+		req.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 		_, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri)
 		if got := apierror.Code(err); got != codes.FailedPrecondition {
 			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
@@ -1634,7 +1643,7 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			Fidelity:      ateattr.SnapshotFidelityVolumes,
 		}, map[string]string{"data.tar": "data"})
 
-		_, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), dir, uri)
+		_, err := s.uploadLocalCheckpointDir(ctx, validPromoteSnapshotRequest(), dir, uri)
 		if got := apierror.Code(err); got != codes.FailedPrecondition {
 			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition", got, err)
 		}
@@ -1650,8 +1659,8 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			SnapshotFiles: []string{"data.tar"},
 		}, map[string]string{"data.tar": "data"})
 
-		req := validUploadPausedCheckpointRequest()
-		req.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		req := validPromoteSnapshotRequest()
+		req.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
 		_, err := s.uploadLocalCheckpointDir(ctx, req, dir, uri)
 		if got := apierror.Code(err); got != codes.FailedPrecondition {
 			t.Fatalf("status.Code = %v (err %v), want FailedPrecondition for a scope-less manifest", got, err)
@@ -1667,7 +1676,7 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 		}}
 		s := newPluginHerder(t, store)
 
-		if _, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), filepath.Join(t.TempDir(), "never-created"), uri); err != nil {
+		if _, err := s.uploadLocalCheckpointDir(ctx, validPromoteSnapshotRequest(), filepath.Join(t.TempDir(), "never-created"), uri); err != nil {
 			t.Fatalf("uploadLocalCheckpointDir: %v", err)
 		}
 	})
@@ -1675,7 +1684,7 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 	t.Run("gone locally and remotely crashes the actor", func(t *testing.T) {
 		s := newPluginHerder(t, &recordingObjectStorage{})
 
-		_, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), filepath.Join(t.TempDir(), "never-created"), uri)
+		_, err := s.uploadLocalCheckpointDir(ctx, validPromoteSnapshotRequest(), filepath.Join(t.TempDir(), "never-created"), uri)
 		if err == nil {
 			t.Fatal("uploadLocalCheckpointDir succeeded, want error")
 		}
@@ -1691,46 +1700,102 @@ func TestUploadLocalCheckpointDir(t *testing.T) {
 			"config.json": "cfg", "memory-ranges": "mem", "data.tar": "data",
 		})
 
-		_, err := s.uploadLocalCheckpointDir(ctx, validUploadPausedCheckpointRequest(), dir, uri)
+		_, err := s.uploadLocalCheckpointDir(ctx, validPromoteSnapshotRequest(), dir, uri)
 		if err == nil {
 			t.Fatal("uploadLocalCheckpointDir succeeded, want error")
 		}
 	})
 }
 
-func TestValidateUploadPausedCheckpointRequest(t *testing.T) {
+func TestPromoteSnapshot_StoreOption(t *testing.T) {
+	for _, tc := range []struct {
+		storeOption ateletpb.SnapshotStoreOption
+		wantPruned  bool
+	}{
+		{ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE, false},
+		{ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY, true},
+	} {
+		t.Run(tc.storeOption.String(), func(t *testing.T) {
+			useTempNodeDirs(t)
+			ctx := context.Background()
+			store := &recordingObjectStorage{}
+			s := newPluginHerder(t, store)
+
+			req := validPromoteSnapshotRequest()
+			req.StoreOption = tc.storeOption
+			localDir := ateletpath.LocalSnapshotDir(req.GetActorUid(), req.GetSnapshot().GetSnapshotUuid())
+			writeLocalSnapshot(t, localDir, sandboxAssetsRecord{
+				SandboxClass:  "microvm",
+				PauseImage:    testPauseImage,
+				SnapshotFiles: []string{"config.json", "memory-ranges"},
+				Fidelity:      ateattr.SnapshotFidelityMemory,
+			}, map[string]string{"config.json": "cfg", "memory-ranges": "mem"})
+
+			if _, err := s.PromoteSnapshot(ctx, req); err != nil {
+				t.Fatalf("PromoteSnapshot: %v", err)
+			}
+
+			_, statErr := os.Stat(localDir)
+			if tc.wantPruned && !os.IsNotExist(statErr) {
+				t.Errorf("localDir still exists after PromoteSnapshot(%s): statErr = %v", tc.storeOption, statErr)
+			}
+			if !tc.wantPruned && statErr != nil {
+				t.Errorf("localDir missing after PromoteSnapshot(%s): statErr = %v", tc.storeOption, statErr)
+			}
+		})
+	}
+}
+
+func TestValidatePromoteSnapshotRequest(t *testing.T) {
 	tests := []struct {
 		name    string
-		mutate  func(*ateletpb.UploadPausedCheckpointRequest)
+		mutate  func(*ateletpb.PromoteSnapshotRequest)
 		wantErr bool
 	}{
-		{"valid", func(*ateletpb.UploadPausedCheckpointRequest) {}, false},
-		{"valid volumes fidelity", func(r *ateletpb.UploadPausedCheckpointRequest) {
-			r.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		{"valid durable only", func(*ateletpb.PromoteSnapshotRequest) {}, false},
+		{"valid local and durable", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE
 		}, false},
-		{"invalid atespace", func(r *ateletpb.UploadPausedCheckpointRequest) { r.Atespace = "../escape" }, true},
-		{"golden atespace rejected", func(r *ateletpb.UploadPausedCheckpointRequest) { r.Atespace = resources.GoldenActorAtespace }, true},
-		{"invalid actor name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorName = "UPPER" }, true},
-		{"invalid actor uid", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorUid = "" }, true},
-		{"any actor template identity accepted", func(r *ateletpb.UploadPausedCheckpointRequest) { r.ActorTemplateAtespace = "no/slashes" }, false},
-		{"empty actor template identity accepted", func(r *ateletpb.UploadPausedCheckpointRequest) {
+		{"local only rejected", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY
+		}, true},
+		{"unspecified store option rejected", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.StoreOption = ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_UNSPECIFIED
+		}, true},
+		{"valid volumes fidelity", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+		}, false},
+		{"invalid atespace", func(r *ateletpb.PromoteSnapshotRequest) { r.Atespace = "../escape" }, true},
+		{"golden atespace rejected", func(r *ateletpb.PromoteSnapshotRequest) { r.Atespace = resources.GoldenActorAtespace }, true},
+		{"invalid actor name", func(r *ateletpb.PromoteSnapshotRequest) { r.ActorName = "UPPER" }, true},
+		{"invalid actor uid", func(r *ateletpb.PromoteSnapshotRequest) { r.ActorUid = "" }, true},
+		{"any actor template identity accepted", func(r *ateletpb.PromoteSnapshotRequest) { r.ActorTemplateAtespace = "no/slashes" }, false},
+		{"empty actor template identity accepted", func(r *ateletpb.PromoteSnapshotRequest) {
 			r.ActorTemplateAtespace, r.ActorTemplateName = "", ""
 		}, false},
-		{"invalid snapshot name", func(r *ateletpb.UploadPausedCheckpointRequest) { r.LocalSnapshotName = "../escape" }, true},
-		{"invalid snapshot uri", func(r *ateletpb.UploadPausedCheckpointRequest) { r.DestinationSnapshotUri = "not-a-uri" }, true},
-		{"unspecified fidelity", func(r *ateletpb.UploadPausedCheckpointRequest) {
-			r.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+		{"missing snapshot", func(r *ateletpb.PromoteSnapshotRequest) { r.Snapshot = nil }, true},
+		{"invalid snapshot uuid", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.SnapshotUuid = "../escape"
 		}, true},
-		{"rootfs fidelity not supported yet", func(r *ateletpb.UploadPausedCheckpointRequest) {
-			r.DesiredFidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
+		{"missing object storage", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.DurableStorage = nil
+		}, true},
+		{"invalid snapshot uri", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.GetObject().SnapshotUri = "not-a-uri"
+		}, true},
+		{"unspecified fidelity", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED
+		}, true},
+		{"rootfs fidelity not supported yet", func(r *ateletpb.PromoteSnapshotRequest) {
+			r.Snapshot.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS
 		}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			req := validUploadPausedCheckpointRequest()
+			req := validPromoteSnapshotRequest()
 			tc.mutate(req)
-			if err := validateUploadPausedCheckpointRequest(req); (err != nil) != tc.wantErr {
-				t.Errorf("validateUploadPausedCheckpointRequest err = %v, wantErr %v", err, tc.wantErr)
+			if err := validatePromoteSnapshotRequest(req); (err != nil) != tc.wantErr {
+				t.Errorf("validatePromoteSnapshotRequest err = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
 	}
@@ -1745,14 +1810,25 @@ func TestShouldHaveSnapshots(t *testing.T) {
 		{
 			name: "full scope always expects snapshots",
 			req: &ateletpb.CheckpointRequest{
-				Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY},
+			},
+			want: true,
+		},
+		{
+			name: "local and durable with volumes fidelity still captures memory locally so expects snapshots",
+			req: &ateletpb.CheckpointRequest{
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
+				Spec:        &ateletpb.WorkloadSpec{},
 			},
 			want: true,
 		},
 		{
 			name: "data scope with durable volumes expects snapshots",
 			req: &ateletpb.CheckpointRequest{
-				Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
 				Spec: &ateletpb.WorkloadSpec{
 					Volumes: []*ateletpb.Volume{
 						{Name: "durable", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
@@ -1764,7 +1840,8 @@ func TestShouldHaveSnapshots(t *testing.T) {
 		{
 			name: "data scope with only CSI volumes does not expect snapshots",
 			req: &ateletpb.CheckpointRequest{
-				Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
 				Spec: &ateletpb.WorkloadSpec{
 					Volumes: []*ateletpb.Volume{
 						{Name: "csi", Source: &ateletpb.Volume_External{External: &ateletpb.ExternalVolumeSource{}}},
@@ -1776,7 +1853,8 @@ func TestShouldHaveSnapshots(t *testing.T) {
 		{
 			name: "data scope with both durable and CSI volumes expects snapshots",
 			req: &ateletpb.CheckpointRequest{
-				Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
 				Spec: &ateletpb.WorkloadSpec{
 					Volumes: []*ateletpb.Volume{
 						{Name: "durable", Source: &ateletpb.Volume_DurableDir{DurableDir: &ateletpb.DurableDirVolume{}}},
@@ -1789,8 +1867,9 @@ func TestShouldHaveSnapshots(t *testing.T) {
 		{
 			name: "data scope with no volumes does not expect snapshots",
 			req: &ateletpb.CheckpointRequest{
-				Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
-				Spec:     &ateletpb.WorkloadSpec{},
+				StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+				Snapshot:    &ateletpb.Snapshot{Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES},
+				Spec:        &ateletpb.WorkloadSpec{},
 			},
 			want: false,
 		},

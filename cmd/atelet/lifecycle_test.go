@@ -139,18 +139,21 @@ func serveFakeAteom(t *testing.T, f *fakeAteom) {
 }
 
 // TestLocalSnapshotGC walks an actor through
-// run -> pause -> resume -> terminate over atelet's RPC surface and ensures that
-// the local snapshot is garbage collected after the actor is terminated.
+// run -> pause -> resume -> pause -> cleanup -> terminate over atelet's RPC
+// surface and ensures that superseded local snapshots are selectively cleaned
+// up by CleanupSnapshot and all remaining state is garbage collected after the
+// actor is terminated.
 func TestLocalSnapshotGC(t *testing.T) {
 	useTempNodeDirs(t)
 	ctx := t.Context()
 
 	const (
-		atespace     = "ate-demo"
-		actorName    = "counter"
-		actorUID     = "actor-uid-1"
-		workerPodUID = "worker-pod-uid-1"
-		snapshotName = "pause-snap-1"
+		atespace      = "ate-demo"
+		actorName     = "counter"
+		actorUID      = "actor-uid-1"
+		workerPodUID  = "worker-pod-uid-1"
+		snapshotName  = "pause-snap-1"
+		snapshotName2 = "pause-snap-2"
 	)
 
 	ateom := &fakeAteom{snapshotFiles: map[string]string{"checkpoint.img": "guest-memory"}}
@@ -207,11 +210,11 @@ func TestLocalSnapshotGC(t *testing.T) {
 		ActorTemplateName:     "counter",
 		WorkerPodUid:          workerPodUID,
 		Spec:                  spec,
-		Fidelity:              ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.CheckpointRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		},
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY,
 	}); err != nil {
 		t.Fatalf("Checkpoint: %v", err)
 	}
@@ -230,10 +233,9 @@ func TestLocalSnapshotGC(t *testing.T) {
 		WorkerPodUid:          workerPodUID,
 		SandboxAssets:         sandboxAssets,
 		Spec:                  spec,
-		Fidelity:              ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.RestoreRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		},
 	}); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -248,7 +250,32 @@ func TestLocalSnapshotGC(t *testing.T) {
 		t.Fatalf("expected RestoreStateDir to remain empty on local pause restore, got entries=%v err=%v", entries, err)
 	}
 
-	// Terminate: the actor is gone, and so should its snapshot be.
+	// Second pause: must replace, not accumulate alongside, the first snapshot.
+	if _, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		WorkerPodUid:          workerPodUID,
+		Spec:                  spec,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName2,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		},
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY,
+	}); err != nil {
+		t.Fatalf("Checkpoint 2: %v", err)
+	}
+	snapshotFile2 := filepath.Join(ateletpath.LocalSnapshotDir(actorUID, snapshotName2), "checkpoint.img")
+	if _, err := os.Stat(ateletpath.LocalSnapshotDir(actorUID, snapshotName)); !os.IsNotExist(err) {
+		t.Fatalf("first local snapshot survived second checkpoint: %v", err)
+	}
+	if _, err := os.Stat(snapshotFile2); err != nil {
+		t.Fatalf("second pause did not write the local snapshot: %v", err)
+	}
+
+	// Terminate: the actor is gone, and so should its remaining snapshot be.
 	if _, err := s.Terminate(ctx, &ateletpb.TerminateRequest{
 		Atespace:              atespace,
 		ActorName:             actorName,
@@ -366,11 +393,11 @@ func TestRestoreUsesRequestSandboxAssets(t *testing.T) {
 		ActorTemplateName:     "counter",
 		WorkerPodUid:          workerPodUID,
 		Spec:                  spec,
-		Fidelity:              ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.CheckpointRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		},
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_ONLY,
 	}); err != nil {
 		t.Fatalf("Checkpoint: %v", err)
 	}
@@ -396,10 +423,9 @@ func TestRestoreUsesRequestSandboxAssets(t *testing.T) {
 		WorkerPodUid:          workerPodUID,
 		SandboxAssets:         assetsWithPause(restorePause),
 		Spec:                  spec,
-		Fidelity:              ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:                  ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.RestoreRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		},
 	}); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -492,8 +518,10 @@ func TestActivationFailureBeforeRegistration(t *testing.T) {
 				_, err = s.Restore(ctx, &ateletpb.RestoreRequest{
 					Atespace: "team-a", ActorName: "actor-1", ActorUid: actorUID, WorkerPodUid: "worker-pod-uid-1",
 					SandboxAssets: assets, Spec: spec,
-					Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, Type: ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-					Config: &ateletpb.RestoreRequest_LocalConfig{LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName}},
+					Snapshot: &ateletpb.Snapshot{
+						SnapshotUuid: snapshotName,
+						Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+					},
 				})
 			} else {
 				_, err = s.Run(ctx, &ateletpb.RunRequest{
@@ -623,11 +651,10 @@ func TestRestoreFailureAfterRegistrationRemovesOwnRegistration(t *testing.T) {
 				runscAssetName: {Url: "gs://test-bucket/runsc", Sha256: assetHash},
 			}}},
 		},
-		Spec:     spec,
-		Fidelity: ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
-		Type:     ateletpb.CheckpointType_CHECKPOINT_TYPE_LOCAL,
-		Config: &ateletpb.RestoreRequest_LocalConfig{
-			LocalConfig: &ateletpb.LocalCheckpointConfiguration{SnapshotName: snapshotName},
+		Spec: spec,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotName,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "while creating pause OCI bundle") {
@@ -699,5 +726,126 @@ func TestTerminateWithoutWorkerPodUID(t *testing.T) {
 	}
 	if _, err := os.Stat(ateletpath.ActorPath(actorUID)); !os.IsNotExist(err) {
 		t.Errorf("actor dir survived terminate: %v", err)
+	}
+}
+
+// TestCheckpointLocalAndDurable verifies that a Checkpoint with
+// SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE uploads the checkpoint to object
+// storage AND retains a local copy under LocalSnapshotDir(actorUID, snapshotID)
+// so a subsequent Restore loads from local disk without reading object storage.
+func TestCheckpointLocalAndDurable(t *testing.T) {
+	useTempNodeDirs(t)
+	ctx := t.Context()
+
+	const (
+		atespace     = "ate-demo"
+		actorName    = "counter"
+		actorUID     = "actor-uid-1"
+		workerPodUID = "worker-pod-uid-1"
+		snapshotID   = "2026-01-01t00-00-00z-snap"
+	)
+
+	ateom := &fakeAteom{snapshotFiles: map[string]string{"checkpoint.img": "guest-memory"}}
+	serveFakeAteom(t, ateom)
+
+	host := imageVolumeTestRegistry(t)
+	image := host + "/actor:v1"
+	pushTestImage(t, image, singleFileLayer(t, "bin/app", "app"))
+
+	runsc := []byte("runsc binary")
+	gcsStore := &recordingObjectStorage{}
+	s := newPluginHerder(t, gcsStore)
+	s.ateomDialer = newAteomDialer(1)
+	s.imageCache = newImageVolumeStore(t)
+	s.anonGCSClient = fakeObjectStorage{data: runsc}
+	s.systemInfoVolumes = newSystemInfoVolumeRefresher(nil, nil)
+	sandboxAssets := &ateletpb.SandboxAssets{
+		SandboxClass: "gvisor",
+		PauseImage:   image,
+		Assets: map[string]*ateletpb.ArchAssets{
+			runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
+				runscAssetName: {
+					Url:    "gs://test-bucket/runsc",
+					Sha256: fmt.Sprintf("%x", sha256.Sum256(runsc)),
+				},
+			}},
+		},
+	}
+	spec := &ateletpb.WorkloadSpec{
+		Containers: []*ateletpb.Container{{Name: "app", Image: image, Command: []string{"/bin/app"}}},
+	}
+
+	if _, err := s.Run(ctx, &ateletpb.RunRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		WorkerPodUid:          workerPodUID,
+		SandboxAssets:         sandboxAssets,
+		Spec:                  spec,
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	snapshotURI := "gs://test-bucket/atespaces/ate-demo/actors/" + actorUID + "/snapshots/" + snapshotID
+	if _, err := s.Checkpoint(ctx, &ateletpb.CheckpointRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		WorkerPodUid:          workerPodUID,
+		Spec:                  spec,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotID,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: snapshotURI,
+				},
+			},
+		},
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE,
+	}); err != nil {
+		t.Fatalf("Checkpoint(LOCAL_AND_DURABLE): %v", err)
+	}
+
+	// Verify the snapshot was uploaded to object storage AND kept locally.
+	if len(gcsStore.objects) == 0 {
+		t.Fatal("expected durable objects to be uploaded to GCS")
+	}
+	localFile := filepath.Join(ateletpath.LocalSnapshotDir(actorUID, snapshotID), "checkpoint.img")
+	if _, err := os.Stat(localFile); err != nil {
+		t.Fatalf("expected local checkpoint file at %s when LOCAL_AND_DURABLE: %v", localFile, err)
+	}
+
+	// Empty the GCS store to prove Restore loads from local disk rather than GCS,
+	// even when Snapshot.Object is populated on the RestoreRequest.
+	gcsStore.objects = nil
+
+	if _, err := s.Restore(ctx, &ateletpb.RestoreRequest{
+		Atespace:              atespace,
+		ActorName:             actorName,
+		ActorUid:              actorUID,
+		ActorTemplateAtespace: "default",
+		ActorTemplateName:     "counter",
+		WorkerPodUid:          workerPodUID,
+		SandboxAssets:         sandboxAssets,
+		Spec:                  spec,
+		Snapshot: &ateletpb.Snapshot{
+			SnapshotUuid: snapshotID,
+			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			DurableStorage: &ateletpb.Snapshot_Object{
+				Object: &ateletpb.ObjectStorage{
+					SnapshotUri: snapshotURI,
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("Restore from local checkpoint: %v", err)
+	}
+	if got := ateom.restored["checkpoint.img"]; got != "guest-memory" {
+		t.Fatalf("restore staged %q for ateom, want %q", got, "guest-memory")
 	}
 }

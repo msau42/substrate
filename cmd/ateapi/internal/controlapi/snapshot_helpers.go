@@ -15,8 +15,19 @@
 package controlapi
 
 import (
+	"github.com/agent-substrate/substrate/internal/resources"
 	"github.com/agent-substrate/substrate/pkg/proto/ateapipb"
 )
+
+// snapshotIDFromURI returns the snapshot's resource name from a SnapshotURI
+// string, or "" if uri is not a valid SnapshotURI.
+func snapshotIDFromURI(uri string) string {
+	u, err := resources.ParseSnapshotURI(uri)
+	if err != nil {
+		return ""
+	}
+	return u.Name()
+}
 
 // findSnapshotByGeneration returns the Snapshot in snapshots with the given
 // generation, or nil if none exists.
