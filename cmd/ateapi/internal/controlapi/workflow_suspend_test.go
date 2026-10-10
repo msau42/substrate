@@ -165,7 +165,7 @@ func TestEnsureMarkedSuspending_StateMatrix(t *testing.T) {
 		if seedState == ateapipb.ActorState_ACTOR_STATE_PAUSED {
 			actorStatus.LastAssignedGeneration = 1
 			actorStatus.Snapshots = []*ateapipb.Snapshot{
-				newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap-1", "node-1", someActorSnapshotURI(t, testStorageLocation, "team-a", "snap-1")),
+				newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap-1", "node-1"),
 			}
 		}
 		actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
@@ -180,6 +180,16 @@ func TestEnsureMarkedSuspending_StateMatrix(t *testing.T) {
 		assertPrerequisiteResult(t, seedState, err, allowed[seedState])
 		if err == nil && marked.GetStatus().GetState() != ateapipb.ActorState_ACTOR_STATE_SUSPENDING {
 			t.Errorf("state %v: ensureMarkedSuspending returned actor in %v, want SUSPENDING", seedState, marked.GetStatus().GetState())
+		}
+		if seedState == ateapipb.ActorState_ACTOR_STATE_PAUSED && err == nil {
+			wantURI, err := resources.NewActorSnapshotURI("gs://snapshots", actorRef.Atespace, actor.GetMetadata().GetUid(), "snap-1")
+			if err != nil {
+				t.Fatalf("NewActorSnapshotURI: %v", err)
+			}
+			gotURI := findLatestDurableSnapshot(marked.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING).GetDurableSnapshot().GetObject().GetSnapshotUri()
+			if gotURI != wantURI.String() {
+				t.Errorf("paused-origin in-progress SnapshotUri = %q, want %q (derived from local snapshot uuid)", gotURI, wantURI.String())
+			}
 		}
 	}
 }
@@ -307,7 +317,8 @@ func TestEnsureSuspendedFinalized_NoAssignment(t *testing.T) {
 	persistence := newTestPersistence(t)
 
 	snapshotURI := someActorSnapshotURI(t, testStorageLocation, "team-a", "2026-01-01t00-00-00z-abc")
-	snap := newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-uid-1", "actor-1-pause-snapshot", "node1", snapshotURI)
+	snap := newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-uid-1", "actor-1-pause-snapshot", snapshotURI, ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+	snap.Locality = "node1"
 	actor := &ateapipb.Actor{
 		Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 		Status: &ateapipb.ActorStatus{
@@ -660,7 +671,7 @@ func TestPreferredFidelity(t *testing.T) {
 func TestIsPausedOriginSuspend(t *testing.T) {
 	assignment := &ateapipb.WorkerAssignment{WorkerNamespace: "ns", WorkerPool: "pool", WorkerPod: "pod-1"}
 	localSnaps := []*ateapipb.Snapshot{
-		newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", "node1", someActorSnapshotURI(t, testStorageLocation, "team-a", "snap")),
+		newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", "node1"),
 	}
 	tests := []struct {
 		name  string
@@ -697,7 +708,7 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 				State:                  ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
 				LastAssignedGeneration: 1,
 				Snapshots: []*ateapipb.Snapshot{
-					newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", "node1", someActorSnapshotURI(t, testStorageLocation, "team-a", "snap")),
+					newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", "node1"),
 				},
 			},
 		})
@@ -720,7 +731,8 @@ func TestEnsurePausedSnapshotUploaded_Preconditions(t *testing.T) {
 		persistence := newTestPersistence(t)
 		w := &ActorWorkflow{store: persistence, dialer: newDanglingDialer()}
 
-		snap := newLocalSnapshot(1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", "node1", someActorSnapshotURI(t, testStorageLocation, "team-a", "snap-dest"))
+		snap := newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", "snap", someActorSnapshotURI(t, testStorageLocation, "team-a", "snap-dest"), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
+		snap.Locality = "node1"
 		created := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
 			Metadata: &ateapipb.ResourceMetadata{Atespace: "team-a", Name: "actor-1"},
 			Status: &ateapipb.ActorStatus{

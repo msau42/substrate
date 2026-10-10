@@ -131,6 +131,7 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 	if got := actor.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_RUNNING && got != ateapipb.ActorState_ACTOR_STATE_PAUSED {
 		return nil, apierror.FailedPrecondition("MarkSuspending prerequisite not met for Actor: %s (got: %v, want %s or %s)", actorRef, got, ateapipb.ActorState_ACTOR_STATE_RUNNING, ateapipb.ActorState_ACTOR_STATE_PAUSED)
 	}
+	snapshotName := resources.NewSnapshotName()
 	if actor.GetStatus().GetState() == ateapipb.ActorState_ACTOR_STATE_PAUSED {
 		localSnap := findLatestLocalSnapshot(actor.GetStatus())
 		if localSnap == nil {
@@ -139,11 +140,12 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 			}
 			return nil, fmt.Errorf("actor is CRASHED because it was in PAUSED state with no completed local snapshot")
 		}
+		snapshotName = localSnap.GetUuid()
 	}
 
 	// Fail here rather than at checkpoint time if the template's location
 	// cannot produce a usable URI: nothing has been written yet.
-	uri, err := newInProgressSnapshotURI(actorTemplate, actor)
+	uri, err := newInProgressSnapshotURI(actorTemplate, actor, snapshotName)
 	if err != nil {
 		return nil, err
 	}
@@ -157,14 +159,10 @@ func (w *ActorWorkflow) ensureMarkedSuspending(ctx context.Context, actorRef res
 				return fmt.Errorf("actor %s is PAUSED but has no completed local snapshot", actorRef)
 			}
 			snap.ActorTemplateUid = actorTemplate.GetMetadata().GetUid()
-			snapURI := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
-			if snapURI == "" {
-				snapURI = uri.String()
-			}
+			snap.Fidelity = preferredFidelity(actorRef.Atespace, actorTemplate)
 			snap.DurableSnapshot = &ateapipb.SnapshotStorage{
-				Status:   ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
-				Fidelity: preferredFidelity(actorRef.Atespace, actorTemplate),
-				Object:   &ateapipb.ObjectSnapshot{SnapshotUri: snapURI},
+				Status: ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING,
+				Object: &ateapipb.ObjectSnapshot{SnapshotUri: uri.String()},
 			}
 			return nil
 		}
@@ -333,9 +331,9 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 
 // newInProgressSnapshotURI is where the snapshot an actor is currently taking is
 // written: under the actor's own prefix, so the objects name their owner.
-func newInProgressSnapshotURI(actorTemplate *ateapipb.ActorTemplate, actor *ateapipb.Actor) (resources.SnapshotURI, error) {
+func newInProgressSnapshotURI(actorTemplate *ateapipb.ActorTemplate, actor *ateapipb.Actor, snapshotName string) (resources.SnapshotURI, error) {
 	atespace := actor.GetMetadata().GetAtespace()
-	uri, err := resources.NewActorSnapshotURI(actorTemplate.GetSnapshotConfig().GetStorageLocation(), atespace, actor.GetMetadata().GetUid(), resources.NewSnapshotName())
+	uri, err := resources.NewActorSnapshotURI(actorTemplate.GetSnapshotConfig().GetStorageLocation(), atespace, actor.GetMetadata().GetUid(), snapshotName)
 	if err != nil {
 		return resources.SnapshotURI{}, fmt.Errorf("while building the snapshot URI for actor %s/%s: %w", atespace, actor.GetMetadata().GetName(), err)
 	}
