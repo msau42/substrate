@@ -733,9 +733,15 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 		t.Fatalf("failed to suspend Actor: %v", err)
 	}
 	waitForActorState(ctx, t, clients, actorID, ateapipb.ActorState_ACTOR_STATE_SUSPENDED)
-	// A suspend keeps its snapshot in durable storage only, so every local
-	// snapshot of the actor must be gone from the node.
-	inspector.WaitForLocalCheckpoints(t, firstPause.actorUID, nil, nodeDiskTimeout)
+	// TEMP: a LOCAL_AND_DURABLE suspend keeps its snapshot on the node too, so
+	// exactly that snapshot remains.
+	suspendedForTemp, err := clients.SubstrateAPI.GetActor(ctx, &ateapipb.GetActorRequest{
+		Actor: &ateapipb.ObjectRef{Atespace: demoAtespace, Name: actorID},
+	})
+	if err != nil {
+		t.Fatalf("failed to get suspended Actor: %v", err)
+	}
+	inspector.WaitForLocalCheckpoints(t, firstPause.actorUID, []string{durableSnapshot(suspendedForTemp.GetStatus()).GetUuid()}, nodeDiskTimeout)
 
 	if tc.suspendWhilePaused {
 		// The suspend must end the node pinning: a suspended actor's snapshot
@@ -764,10 +770,10 @@ func runActorLifecycleTestCase(t *testing.T, prefix string, createTemplate func(
 		t.Fatalf("failed to resume Actor again: %v", err)
 	}
 	waitForActorState(ctx, t, clients, actorID, ateapipb.ActorState_ACTOR_STATE_RUNNING)
-	// The suspend kept no local snapshot, so the resume downloads the
-	// actor's snapshot from object storage.
+	// TEMP: the LOCAL_AND_DURABLE suspend kept its snapshot on the node, and
+	// the suspended actor stays pinned there, so the resume restores it.
 	resumedOn = getActorOnNode(ctx, t, clients, actorID)
-	e2e.WaitForActorRestore(t, ctx, resumedOn.node, resumedOn.actorUID, resumed, ateattr.SnapshotKindLatest, restoreLogTimeout)
+	e2e.WaitForActorRestore(t, ctx, resumedOn.node, resumedOn.actorUID, resumed, ateattr.SnapshotKindLocal, restoreLogTimeout)
 
 	resp, err = callActor(t, resources.ActorRef{Atespace: demoAtespace, Name: actorID})
 	if err != nil {

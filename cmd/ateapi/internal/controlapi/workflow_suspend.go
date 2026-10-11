@@ -269,9 +269,9 @@ func (w *ActorWorkflow) ensureAteletSuspended(ctx context.Context, actorRef reso
 				SnapshotUri: destURI,
 			},
 		},
-		// Upload during Checkpoint and keep no local copy.
+		// TEMP: keep a local copy as well, to test LOCAL_AND_DURABLE.
 		PromotionPolicy: &ateletpb.SnapshotPromotionPolicy{
-			DurableOnly: &ateletpb.SnapshotPromotionStep{TtlSeconds: 0},
+			LocalAndDurable: &ateletpb.SnapshotPromotionStep{TtlSeconds: 0},
 		},
 		ActorUid: actor.GetMetadata().Uid,
 	}
@@ -333,7 +333,8 @@ func (w *ActorWorkflow) ensurePausedSnapshotUploaded(ctx context.Context, actorR
 				SnapshotUri: destURI,
 			},
 		},
-		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_DURABLE_ONLY,
+		// TEMP: keep the local copy as well, to test LOCAL_AND_DURABLE.
+		StoreOption: ateletpb.SnapshotStoreOption_SNAPSHOT_STORE_OPTION_LOCAL_AND_DURABLE,
 	}
 	wireFidelity = ateattr.SnapshotFidelityValue(fidelity)
 
@@ -430,7 +431,9 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		// and durable snapshots to be kept.
 		pruneSnapshots(toUpdate.Status, nil)
 		toUpdate.Status.WorkerAssignment = nil
-		toUpdate.Status.AssignedNode = ""
+		// TEMP: AssignedNode is kept, so the actor resumes on the node
+		// holding its LOCAL_AND_DURABLE copy, and a delete or revert
+		// terminates it there, removing the copy.
 		return nil
 	})
 	dUpdateActor = time.Since(t)
