@@ -65,7 +65,7 @@
 #                  real nodes restore. The keys tune fake-atelet, through
 #                  workloads/deploy.sh --fake-atelet-env: delay (default 0s),
 #                  delayRun, delayRestore, delayCheckpoint,
-#                  delayPromoteSnapshot, and delayTerminate, which
+#                  delayDetachActor, and delayTerminate, which
 #                  override delay for one call, and mintActorCertificate
 #                  (default true). A bare `isolate:` selects the mode with
 #                  the defaults. Actors do not exist, so the entry's user

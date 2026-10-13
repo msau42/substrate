@@ -30,7 +30,7 @@ var tuningFlags = []string{
 	"delay-run",
 	"delay-restore",
 	"delay-checkpoint",
-	"delay-promote-snapshot",
+	"delay-detach-actor",
 	"delay-terminate",
 	"mint-actor-certificate",
 }
@@ -61,7 +61,7 @@ func applyTuningEnv(fs *pflag.FlagSet, lookup func(string) (string, bool)) error
 
 // resolveDelays applies each per-call override over the default delay. A
 // negative override means "use the default".
-func resolveDelays(def, run, restore, checkpoint, promoteSnapshot, terminate time.Duration) (delays, error) {
+func resolveDelays(def, run, restore, checkpoint, detachActor, terminate time.Duration) (delays, error) {
 	if def < 0 {
 		return delays{}, fmt.Errorf("delay must not be negative, got %v", def)
 	}
@@ -72,10 +72,10 @@ func resolveDelays(def, run, restore, checkpoint, promoteSnapshot, terminate tim
 		return d
 	}
 	return delays{
-		run:             pick(run),
-		restore:         pick(restore),
-		checkpoint:      pick(checkpoint),
-		promoteSnapshot: pick(promoteSnapshot),
-		terminate:       pick(terminate),
+		run:         pick(run),
+		restore:     pick(restore),
+		checkpoint:  pick(checkpoint),
+		detachActor: pick(detachActor),
+		terminate:   pick(terminate),
 	}, nil
 }

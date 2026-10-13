@@ -70,7 +70,7 @@ var (
 	delayRun             = pflag.Duration("delay-run", -1, "Override --delay for Run. Negative uses --delay.")
 	delayRestore         = pflag.Duration("delay-restore", -1, "Override --delay for Restore. Negative uses --delay.")
 	delayCheckpoint      = pflag.Duration("delay-checkpoint", -1, "Override --delay for Checkpoint. Negative uses --delay.")
-	delayPromoteSnapshot = pflag.Duration("delay-promote-snapshot", -1, "Override --delay for PromoteSnapshot. Negative uses --delay.")
+	delayDetachActor     = pflag.Duration("delay-detach-actor", -1, "Override --delay for DetachActor. Negative uses --delay.")
 	delayTerminate       = pflag.Duration("delay-terminate", -1, "Override --delay for Terminate. Negative uses --delay.")
 	mintActorCertificate = pflag.Bool("mint-actor-certificate", true, "On each Run and Restore that names an egress gateway, mint the actor's certificate from ate-api-server before the delay, as ateom does before starting the workload.")
 
@@ -93,7 +93,7 @@ func main() {
 	if err := applyTuningEnv(pflag.CommandLine, os.LookupEnv); err != nil {
 		serverboot.Fatal(ctx, "Invalid tuning environment", err)
 	}
-	callDelays, err := resolveDelays(*delay, *delayRun, *delayRestore, *delayCheckpoint, *delayPromoteSnapshot, *delayTerminate)
+	callDelays, err := resolveDelays(*delay, *delayRun, *delayRestore, *delayCheckpoint, *delayDetachActor, *delayTerminate)
 	if err != nil {
 		serverboot.Fatal(ctx, "Invalid --delay", err)
 	}

@@ -74,7 +74,7 @@ ISOLATE_TUNING = {
     "delayRun": "FAKE_ATELET_DELAY_RUN",
     "delayRestore": "FAKE_ATELET_DELAY_RESTORE",
     "delayCheckpoint": "FAKE_ATELET_DELAY_CHECKPOINT",
-    "delayPromoteSnapshot": "FAKE_ATELET_DELAY_PROMOTE_SNAPSHOT",
+    "delayDetachActor": "FAKE_ATELET_DELAY_DETACH_ACTOR",
     "delayTerminate": "FAKE_ATELET_DELAY_TERMINATE",
     "mintActorCertificate": "FAKE_ATELET_MINT_ACTOR_CERTIFICATE",
 }

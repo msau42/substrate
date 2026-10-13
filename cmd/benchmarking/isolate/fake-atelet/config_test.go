@@ -29,7 +29,7 @@ func TestResolveDelays(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveDelays: %v", err)
 	}
-	want := delays{run: time.Second, restore: 2 * time.Second, checkpoint: 0, promoteSnapshot: time.Second, terminate: time.Second}
+	want := delays{run: time.Second, restore: 2 * time.Second, checkpoint: 0, detachActor: time.Second, terminate: time.Second}
 	if got != want {
 		t.Errorf("resolveDelays = %+v, want %+v", got, want)
 	}
@@ -45,7 +45,7 @@ func TestApplyTuningEnv(t *testing.T) {
 		fs := pflag.NewFlagSet("fake-atelet", pflag.ContinueOnError)
 		d := fs.Duration("delay", 0, "")
 		run := fs.Duration("delay-run", -1, "")
-		for _, name := range []string{"delay-restore", "delay-checkpoint", "delay-promote-snapshot", "delay-terminate"} {
+		for _, name := range []string{"delay-restore", "delay-checkpoint", "delay-detach-actor", "delay-terminate"} {
 			fs.Duration(name, -1, "")
 		}
 		mint := fs.Bool("mint-actor-certificate", true, "")
