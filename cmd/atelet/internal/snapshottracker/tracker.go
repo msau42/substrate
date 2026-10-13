@@ -67,7 +67,9 @@ type Workloads interface {
 }
 
 // Tracker tracks each actor's snapshots on this node, and uploads and
-// detaches them in the background.
+// detaches them in the background. It keeps each actor's state in the actor's
+// snapshot state file, so a restarted atelet carries on with pending uploads
+// and detaches: see Load.
 //
 // Background work runs off a workqueue of actor UIDs. Each change to an
 // actor's state queues the actor for when its next upload or detach is due:
@@ -264,6 +266,7 @@ func (t *Tracker) endOpLocked(a *actorSnapshots) {
 	a.op = nil
 	if t.tracksLocked(a) {
 		t.requeueLocked(a)
+		t.saveLocked(a)
 	}
 }
 

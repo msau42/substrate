@@ -137,7 +137,8 @@ func useTempNodeDirs(t *testing.T) {
 
 // newTestTracker returns a tracker over store, with its workers running, that
 // measures time on a fake clock: background work starts only once a test
-// advances the clock to when it is due (see stepTo).
+// advances the clock to when it is due (see stepTo). The tracked actor has a
+// directory, where the tracker saves its state.
 func newTestTracker(t *testing.T, store Store) *Tracker {
 	t.Helper()
 	tr := newIdleTestTracker(t, store)
@@ -146,11 +147,22 @@ func newTestTracker(t *testing.T, store Store) *Tracker {
 }
 
 // newIdleTestTracker returns a tracker like newTestTracker's whose workers
-// have not started. Its workers stop once the test ends, before the node
-// directories are restored.
+// have not started.
 func newIdleTestTracker(t *testing.T, store Store) *Tracker {
 	t.Helper()
 	useTempNodeDirs(t)
+	if err := os.MkdirAll(ateletpath.ActorPath(trackedActorUID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return newTestTrackerOnNode(t, store)
+}
+
+// newTestTrackerOnNode returns a tracker like newIdleTestTracker's, over the
+// node directories already in use: as a restarted atelet builds before it
+// loads and starts. Its workers stop once the test ends, before the node
+// directories are restored.
+func newTestTrackerOnNode(t *testing.T, store Store) *Tracker {
+	t.Helper()
 	tr := New(t.Context(), store, &fakeWorkloads{}, testingclock.NewFakeClock(time.Now()))
 	tr.uploadDelay, tr.detachDelay = testUploadDelay, testDetachDelay
 	tr.retries = workqueue.NewTypedItemExponentialFailureRateLimiter[string](testRetryDelay, testMaxRetryDelay)
@@ -1081,8 +1093,9 @@ func TestTrackerFailedDetach(t *testing.T) {
 	}
 }
 
-// Forget waits for an upload in progress to end, then drops the actor. A
-// Forget that gives up waiting keeps the actor, so a retry waits again.
+// Forget waits for an upload in progress to end, then drops the actor and its
+// state file. A Forget that gives up waiting keeps the actor, so a retry waits
+// again.
 func TestTrackerForgetWaitsForUpload(t *testing.T) {
 	store := newFakeSnapshotStore()
 	store.setBlocking(true)
@@ -1112,6 +1125,9 @@ func TestTrackerForgetWaitsForUpload(t *testing.T) {
 	}
 	if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
 		t.Errorf("state after forget = %v, want empty", st)
+	}
+	if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
+		t.Errorf("state file after forget: stat = %v, want it deleted", err)
 	}
 	if !detachDueOf(tr, trackedActorUID).IsZero() {
 		t.Error("a detach is scheduled after forget")

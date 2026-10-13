@@ -527,6 +527,9 @@ func NewService(
 		systemInfoVolumes:     systemInfoVolumes,
 	}
 	wms.snapshots = snapshottracker.New(ctx, trackerStore{wms}, newAteomWorkloads(), clock.RealClock{})
+	if err := wms.snapshots.Load(); err != nil {
+		slog.WarnContext(ctx, "Failed to load actors' snapshot state; pending uploads and detaches are lost", slog.Any("err", err))
+	}
 	wms.snapshots.Start()
 	return wms
 }
@@ -1788,30 +1791,6 @@ func (d *AteomDialer) DialAteomPod(ctx context.Context, podUID string) (*grpc.Cl
 	d.conns.Add(key, conn)
 
 	return conn, nil
-}
-
-// writeFileAtomic writes data to path by writing a temp file in the same
-// directory and renaming it over the target so readers never observe a
-// truncated or partially written value.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name()) // no-op once the rename succeeds
-
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
 }
 
 // resetActorDirs empties the actor's directories and leaves them in place for

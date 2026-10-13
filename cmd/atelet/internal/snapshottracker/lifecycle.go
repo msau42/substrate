@@ -40,6 +40,7 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) ([]string, *ate
 		keep = append(keep, up.UUID)
 	}
 	t.requeueLocked(a)
+	t.saveLocked(a)
 	return keep, t.stateLocked(a)
 }
 
@@ -62,6 +63,7 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) ([]string, *a
 	if up := a.uploading(); up != nil {
 		keep = append(keep, up.UUID)
 	}
+	t.saveLocked(a)
 	return keep, t.stateLocked(a)
 }
 
@@ -104,9 +106,9 @@ func (t *Tracker) hold(ctx context.Context, actorUID string) (release func(), er
 }
 
 // Forget waits, as long as ctx allows, for the actor's upload or detach in
-// progress to end, then drops the actor's state. An operation thus never
-// finds its actor dropped, and a worker that takes the actor from the queue
-// afterwards finds nothing to do.
+// progress to end, then drops the actor's state, in memory and on disk. An
+// operation thus never finds its actor dropped, and a worker that takes the
+// actor from the queue afterwards finds nothing to do.
 func (t *Tracker) Forget(ctx context.Context, actorUID string) error {
 	t.mu.Lock()
 	if _, err := t.waitIdleLocked(ctx, actorUID, nil); err != nil {
@@ -116,5 +118,5 @@ func (t *Tracker) Forget(ctx context.Context, actorUID string) error {
 	t.dropLocked(actorUID)
 	t.mu.Unlock()
 	t.retries.Forget(actorUID)
-	return nil
+	return removeSnapshotState(actorUID)
 }

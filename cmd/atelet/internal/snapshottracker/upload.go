@@ -65,9 +65,10 @@ func (t *Tracker) Promote(ctx context.Context, actorUID string, requested Snapsh
 		return nil, err
 	}
 
-	// atelet may keep nothing for this actor, as after a restart. The upload
-	// still needs an entry to record itself in, so other calls see it and
-	// wait for it: add an empty one, and remove it again if the upload fails.
+	// atelet may keep nothing for this actor, as after a restart without its
+	// state file. The upload still needs an entry to record itself in, so
+	// other calls see it and wait for it: add an empty one, and remove it
+	// again if the upload fails.
 	created := a == nil
 	a = t.findOrAddLocked(actorUID)
 

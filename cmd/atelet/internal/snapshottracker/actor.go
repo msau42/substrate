@@ -23,17 +23,18 @@ import (
 )
 
 // SnapshotRef is one snapshot of an actor that atelet holds or has uploaded.
+// The snapshot state file keeps it as JSON, with Fidelity as its enum number.
 type SnapshotRef struct {
-	UUID       string
-	Generation int32
-	Fidelity   ateletpb.SnapshotFidelity
-	URI        string
+	UUID       string                    `json:"uuid"`
+	Generation int32                     `json:"generation"`
+	Fidelity   ateletpb.SnapshotFidelity `json:"fidelity,omitempty"`
+	URI        string                    `json:"uri"`
 	// CommitTime is when the checkpoint that produced the snapshot committed
 	// on this node. Zero when this atelet did not take it.
-	CommitTime time.Time
+	CommitTime time.Time `json:"commitTime,omitzero"`
 	// UploadTime is when this atelet committed the snapshot's manifest to
 	// object storage. Zero unless it did.
-	UploadTime time.Time
+	UploadTime time.Time `json:"uploadTime,omitzero"`
 }
 
 // SnapshotRefFrom returns the SnapshotRef snap names, with no commit or upload
@@ -107,42 +108,57 @@ type actorOp struct {
 	done chan struct{}
 }
 
-// actorSnapshots is what atelet tracks of one actor's snapshots on this node.
-// Its fields are guarded by Tracker.mu.
-type actorSnapshots struct {
-	actorUID string
-
+// actorSnapshotsRecord is the part of actorSnapshots that the actor's snapshot
+// state file keeps, so it outlives an atelet restart. An upload or detach in
+// flight is not part of it: one changes the file only once it ends, and a
+// restart ends it.
+type actorSnapshotsRecord struct {
 	// LatestLocal is the newest snapshot currently stored in the actor's
-	// node-local checkpoint directory. Nil once detached or after an
-	// UPLOAD_MODE_IMMEDIATE checkpoint.
-	LatestLocal *SnapshotRef
-	// LatestDurable is the newest snapshot confirmed in object storage.
-	LatestDurable *SnapshotRef
+	// node-local checkpoint directory, which a restarted atelet goes on to
+	// upload and detach. Nil once detached or after an UPLOAD_MODE_IMMEDIATE
+	// checkpoint.
+	LatestLocal *SnapshotRef `json:"latestLocal,omitempty"`
+	// LatestDurable is the newest snapshot confirmed in object storage, so a
+	// restarted atelet still reports it and does not upload it again.
+	LatestDurable *SnapshotRef `json:"latestDurable,omitempty"`
 
 	// UndurableSince is what uploadDelay is measured from: the CommitTime of
 	// the oldest local checkpoint taken since the last durable snapshot, or,
 	// for one taken while an upload ran, when that upload succeeded. Zero
-	// when LatestLocal is nil or already durable.
+	// when LatestLocal is nil or already durable. Saving it keeps a restart
+	// from postponing the next upload.
 	//
 	// Measuring from UndurableSince rather than LatestLocal.CommitTime
 	// ensures an actor that pauses and resumes repeatedly still uploads
 	// within uploadDelay instead of postponing durability indefinitely. An
 	// upload changes UndurableSince only once it succeeds, and a failed or
 	// interrupted one leaves it as it was.
-	UndurableSince time.Time
+	UndurableSince time.Time `json:"undurableSince,omitzero"`
 	// DetachAt is when atelet next checks whether to detach the actor: it
 	// detaches it then unless a Run, Restore, or Checkpoint of the actor is
 	// in progress or it runs on this node. Zero when atelet holds no local
-	// snapshot of the actor.
-	DetachAt time.Time
+	// snapshot of the actor. Saving it keeps a restart from postponing the
+	// detach.
+	DetachAt time.Time `json:"detachAt,omitzero"`
+}
+
+// actorSnapshots is what atelet tracks of one actor's snapshots on this node.
+// Its fields are guarded by Tracker.mu.
+type actorSnapshots struct {
+	actorUID string
+
+	// actorSnapshotsRecord holds what the snapshot state file keeps. The
+	// fields after it live only in memory.
+	actorSnapshotsRecord
 
 	// retryAt holds the actor's next background upload or detach back after
-	// one failed.
+	// one failed. It is not saved: a restarted atelet tries an upload again
+	// as soon as it is due.
 	retryAt time.Time
 
 	// holds counts the Runs, Restores, and Checkpoints of the actor in
 	// progress on this node. While it is nonzero, atelet does not detach
-	// the actor.
+	// the actor. It is not saved: a restart ends them.
 	holds int
 
 	// op is the actor's upload or detach in progress, background or requested

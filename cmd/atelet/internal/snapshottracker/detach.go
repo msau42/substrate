@@ -41,6 +41,7 @@ func (t *Tracker) beginDetachLocked(a *actorSnapshots) (*actorOp, bool) {
 func (t *Tracker) postponeDetachLocked(a *actorSnapshots) {
 	a.DetachAt = t.clock.Now().Add(t.detachDelay)
 	t.requeueLocked(a)
+	t.saveLocked(a)
 }
 
 // Detach makes the actor's latest local snapshot durable, then deletes the
@@ -104,9 +105,10 @@ func (t *Tracker) finishDetach(ctx context.Context, a *actorSnapshots, op *actor
 		fidelity, uploaded, err = t.store.UploadLocalSnapshot(ctx, a.actorUID, target, ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED)
 	}
 
-	// Record durability and clear LatestLocal, then prune the actor's local
-	// snapshots. Callers waiting for the detach stay blocked until pruning
-	// finishes below.
+	// Record durability and clear LatestLocal before pruning disk so a crash
+	// during prune does not leave snapshot-state.json pointing at a partially
+	// deleted local checkpoint. Callers waiting for the detach stay blocked
+	// until pruning finishes below.
 	t.mu.Lock()
 	switch {
 	case err == nil:
@@ -122,6 +124,7 @@ func (t *Tracker) finishDetach(ctx context.Context, a *actorSnapshots, op *actor
 		// passed.
 		a.DetachAt = t.backOffLocked(a)
 	}
+	t.saveLocked(a)
 	t.mu.Unlock()
 
 	if err == nil {
