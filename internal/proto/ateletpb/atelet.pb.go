@@ -2792,8 +2792,7 @@ type Snapshot struct {
 	// usable local copy.
 	//
 	// TODO: Temporarily, this is optional while we haven't implemented deferred
-	// uploads. Restore also uses its presence to choose between the local copy
-	// and object storage; see RestoreRequest.snapshot.
+	// uploads.
 	//
 	// +k8s:optional
 	Object        *ObjectStorage `protobuf:"bytes,4,opt,name=object,proto3" json:"object,omitempty"`
@@ -3286,11 +3285,8 @@ type RestoreRequest struct {
 	// detaching the actor, it waits for the detach to finish and then reads
 	// `snapshot.object`. Fails if neither copy exists: that generation is lost.
 	//
-	// TODO: Temporarily, whether `snapshot.object` is set chooses the copy:
-	// atelet reads only the local copy when it is unset, and only
-	// `snapshot.object` when it is set, with no fallback either way.
-	//
 	// +k8s:required
+	// +k8s:subfield(object)=+k8s:required
 	Snapshot *Snapshot `protobuf:"bytes,8,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
 	// When absent the actor has no egress: its TCP is captured and refused.
 	//

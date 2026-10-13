@@ -244,7 +244,7 @@ func runLocalSnapshotGC(t *testing.T, fidelity ateletpb.SnapshotFidelity) {
 		t.Fatalf("pause did not write the local snapshot: %v", err)
 	}
 
-	// Resume: restores from that local snapshot.
+	// Resume: restores from that local snapshot even though Object is populated.
 	if _, err := s.Restore(ctx, &ateletpb.RestoreRequest{
 		Atespace:              atespace,
 		ActorName:             actorName,
@@ -257,6 +257,7 @@ func runLocalSnapshotGC(t *testing.T, fidelity ateletpb.SnapshotFidelity) {
 		Snapshot: &ateletpb.Snapshot{
 			SnapshotUuid: snapshotName,
 			Fidelity:     fidelity,
+			Object:       &ateletpb.ObjectStorage{SnapshotUri: pausedSnapshotURI},
 		},
 	}); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -425,6 +426,7 @@ func TestRestoreUsesRequestSandboxAssets(t *testing.T) {
 		Snapshot: &ateletpb.Snapshot{
 			SnapshotUuid: snapshotName,
 			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			Object:       &ateletpb.ObjectStorage{SnapshotUri: pausedSnapshotURI},
 		},
 	}); err != nil {
 		t.Fatalf("Restore: %v", err)
@@ -454,7 +456,7 @@ func TestActivationFailureBeforeRegistration(t *testing.T) {
 		{name: "Run partial reset removes registration", failure: "reset", wantErr: "while removing volume dir"},
 		{name: "Run record failure removes registration", failure: "record", wantErr: "while recording sandbox assets"},
 		{name: "Restore partial reset removes registration", restore: true, failure: "reset", wantErr: "while removing volume dir"},
-		{name: "Restore manifest failure removes registration", restore: true, failure: "manifest", wantErr: "while reading local snapshot manifest"},
+		{name: "Restore manifest failure removes registration", restore: true, failure: "manifest", wantErr: "has no usable local copy and no uploaded copy"},
 		{name: "Restore asset failure removes registration", restore: true, failure: "asset", wantErr: "asset unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -506,7 +508,10 @@ func TestActivationFailureBeforeRegistration(t *testing.T) {
 			if tc.failure == "asset" {
 				storage.err = fmt.Errorf("asset unavailable")
 			}
-			s := &AteomHerder{anonGCSClient: storage, systemInfoVolumes: refresher}
+			// The snapshot is in neither the node's nor this empty object
+			// store.
+			s := newPluginHerder(t, &recordingObjectStorage{})
+			s.anonGCSClient, s.systemInfoVolumes = storage, refresher
 			assets := &ateletpb.SandboxAssets{
 				SandboxClass: "gvisor", PauseImage: testPauseImage,
 				Assets: map[string]*ateletpb.ArchAssets{runtime.GOARCH: {Files: map[string]*ateletpb.AssetFile{
@@ -520,6 +525,7 @@ func TestActivationFailureBeforeRegistration(t *testing.T) {
 					Snapshot: &ateletpb.Snapshot{
 						SnapshotUuid: snapshotName,
 						Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+						Object:       &ateletpb.ObjectStorage{SnapshotUri: pausedSnapshotURI},
 					},
 				})
 			} else {
@@ -664,6 +670,7 @@ func TestRestoreFailureAfterRegistrationRemovesOwnRegistration(t *testing.T) {
 		Snapshot: &ateletpb.Snapshot{
 			SnapshotUuid: snapshotName,
 			Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+			Object:       &ateletpb.ObjectStorage{SnapshotUri: pausedSnapshotURI},
 		},
 	})
 	if err == nil || !strings.Contains(err.Error(), "while creating pause OCI bundle") {
