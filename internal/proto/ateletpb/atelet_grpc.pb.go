@@ -255,6 +255,7 @@ const (
 	AteomHerder_Checkpoint_FullMethodName      = "/atelet.AteomHerder/Checkpoint"
 	AteomHerder_Restore_FullMethodName         = "/atelet.AteomHerder/Restore"
 	AteomHerder_PromoteSnapshot_FullMethodName = "/atelet.AteomHerder/PromoteSnapshot"
+	AteomHerder_DetachActor_FullMethodName     = "/atelet.AteomHerder/DetachActor"
 	AteomHerder_Terminate_FullMethodName       = "/atelet.AteomHerder/Terminate"
 )
 
@@ -283,16 +284,21 @@ type AteomHerderClient interface {
 	// PromoteSnapshot makes `snapshot` durable in object storage while keeping
 	// its local copy on this node. Used when a snapshot needs to be in object
 	// storage (e.g. for tagging) without evicting the paused actor from the
-	// node. Waits for an in-flight detach, and fails for an actor running on
-	// this node.
+	// node. Waits for an in-flight detach.
 	//
 	// Idempotent: once the snapshot is durable, atelet answers from the
 	// manifest at `snapshot.object`, and fails if there is none.
-	//
-	// TODO: Temporarily, this deletes all of the actor's local snapshots after
-	// the upload and does not check whether the actor is running. Its only
-	// caller, the suspend of a paused actor, relies on the deletion.
 	PromoteSnapshot(ctx context.Context, in *PromoteSnapshotRequest, opts ...grpc.CallOption) (*PromoteSnapshotResponse, error)
+	// DetachActor releases a suspended actor from this node: atelet uploads its
+	// latest local snapshot unless it is already durable, then deletes the
+	// actor's local snapshots. atelet starts the same detach on its own once the
+	// actor has stayed suspended on this node for its detach delay. It waits for
+	// a detach already in progress, is a no-op when atelet holds no local
+	// snapshot for the actor, and fails with ABORTED for an actor that runs or
+	// is starting on this node, or UNAVAILABLE when atelet cannot tell.
+	//
+	// TODO: report each detach to the control plane.
+	DetachActor(ctx context.Context, in *DetachActorRequest, opts ...grpc.CallOption) (*DetachActorResponse, error)
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error)
@@ -346,6 +352,16 @@ func (c *ateomHerderClient) PromoteSnapshot(ctx context.Context, in *PromoteSnap
 	return out, nil
 }
 
+func (c *ateomHerderClient) DetachActor(ctx context.Context, in *DetachActorRequest, opts ...grpc.CallOption) (*DetachActorResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DetachActorResponse)
+	err := c.cc.Invoke(ctx, AteomHerder_DetachActor_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *ateomHerderClient) Terminate(ctx context.Context, in *TerminateRequest, opts ...grpc.CallOption) (*TerminateResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TerminateResponse)
@@ -381,16 +397,21 @@ type AteomHerderServer interface {
 	// PromoteSnapshot makes `snapshot` durable in object storage while keeping
 	// its local copy on this node. Used when a snapshot needs to be in object
 	// storage (e.g. for tagging) without evicting the paused actor from the
-	// node. Waits for an in-flight detach, and fails for an actor running on
-	// this node.
+	// node. Waits for an in-flight detach.
 	//
 	// Idempotent: once the snapshot is durable, atelet answers from the
 	// manifest at `snapshot.object`, and fails if there is none.
-	//
-	// TODO: Temporarily, this deletes all of the actor's local snapshots after
-	// the upload and does not check whether the actor is running. Its only
-	// caller, the suspend of a paused actor, relies on the deletion.
 	PromoteSnapshot(context.Context, *PromoteSnapshotRequest) (*PromoteSnapshotResponse, error)
+	// DetachActor releases a suspended actor from this node: atelet uploads its
+	// latest local snapshot unless it is already durable, then deletes the
+	// actor's local snapshots. atelet starts the same detach on its own once the
+	// actor has stayed suspended on this node for its detach delay. It waits for
+	// a detach already in progress, is a no-op when atelet holds no local
+	// snapshot for the actor, and fails with ABORTED for an actor that runs or
+	// is starting on this node, or UNAVAILABLE when atelet cannot tell.
+	//
+	// TODO: report each detach to the control plane.
+	DetachActor(context.Context, *DetachActorRequest) (*DetachActorResponse, error)
 	// Terminate tells atelet to terminate/kill any running workload for an actor,
 	// unmount its volumes, and clean up actor state on the node.
 	Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error)
@@ -415,6 +436,9 @@ func (UnimplementedAteomHerderServer) Restore(context.Context, *RestoreRequest) 
 }
 func (UnimplementedAteomHerderServer) PromoteSnapshot(context.Context, *PromoteSnapshotRequest) (*PromoteSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PromoteSnapshot not implemented")
+}
+func (UnimplementedAteomHerderServer) DetachActor(context.Context, *DetachActorRequest) (*DetachActorResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DetachActor not implemented")
 }
 func (UnimplementedAteomHerderServer) Terminate(context.Context, *TerminateRequest) (*TerminateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Terminate not implemented")
@@ -512,6 +536,24 @@ func _AteomHerder_PromoteSnapshot_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AteomHerder_DetachActor_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DetachActorRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AteomHerderServer).DetachActor(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AteomHerder_DetachActor_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AteomHerderServer).DetachActor(ctx, req.(*DetachActorRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _AteomHerder_Terminate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(TerminateRequest)
 	if err := dec(in); err != nil {
@@ -552,6 +594,10 @@ var AteomHerder_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PromoteSnapshot",
 			Handler:    _AteomHerder_PromoteSnapshot_Handler,
+		},
+		{
+			MethodName: "DetachActor",
+			Handler:    _AteomHerder_DetachActor_Handler,
 		},
 		{
 			MethodName: "Terminate",

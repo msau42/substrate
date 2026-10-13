@@ -60,6 +60,11 @@ func ValidatePromoteSnapshotRequest(ctx context.Context, req *ateletpb.PromoteSn
 	return Validate_PromoteSnapshotRequest(ctx, operation.Operation{Type: operation.Create}, nil, req, nil)
 }
 
+// ValidateDetachActorRequest runs the generated validation for req.
+func ValidateDetachActorRequest(ctx context.Context, req *ateletpb.DetachActorRequest) field.ErrorList {
+	return Validate_DetachActorRequest(ctx, operation.Operation{Type: operation.Create}, nil, req, nil)
+}
+
 // ValidateRegisterWorkerRequest runs the generated validation for req.
 func ValidateRegisterWorkerRequest(ctx context.Context, req *ateletpb.RegisterWorkerRequest) field.ErrorList {
 	return Validate_RegisterWorkerRequest(ctx, operation.Operation{Type: operation.Create}, nil, req, nil)
@@ -109,11 +114,12 @@ func ValidateCustom_PromoteSnapshotRequest_Atespace(_ context.Context, _ operati
 	return nil
 }
 
-// ValidateCustom_CheckpointRequest requires snapshot.object when
-// upload_config.mode is UPLOAD_MODE_IMMEDIATE.
-func ValidateCustom_CheckpointRequest(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *ateletpb.CheckpointRequest) field.ErrorList {
-	if value.GetUploadConfig().GetMode() == ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE && value.GetSnapshot() != nil && value.GetSnapshot().GetObject() == nil {
-		return field.ErrorList{field.Required(fldPath.Child("snapshot", "object"), "required when upload_config.mode is UPLOAD_MODE_IMMEDIATE")}
+// ValidateCustom_DetachActorRequest_Atespace rejects the golden atespace:
+// golden actors are committed running, with UPLOAD_MODE_IMMEDIATE, so a golden
+// snapshot never comes from a local one.
+func ValidateCustom_DetachActorRequest_Atespace(_ context.Context, _ operation.Operation, fldPath *field.Path, value, _ *string) field.ErrorList {
+	if *value == resources.GoldenActorAtespace {
+		return field.ErrorList{field.Forbidden(fldPath, fmt.Sprintf("atespace %q holds golden actors, which are never detached", *value))}
 	}
 	return nil
 }

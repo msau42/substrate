@@ -606,13 +606,13 @@ func startStatsPoller(ctx context.Context, interval time.Duration, inst *statsIn
 	go poller.run(ctx)
 }
 
-// dialAteomStats opens the poller's short-lived connection: one per probe,
-// closed by the caller, never the lifecycle RPCs' cached AteomDialer.
-// grpc.NewClient is lazy, so this cannot block; the caller's deadline bounds
-// the actual connect inside the RPC.
+// dialAteomStats opens a short-lived connection to an ateom for the poller or
+// ateomWorkloads: one per call, closed by the caller, never the lifecycle RPCs'
+// cached AteomDialer. grpc.NewClient is lazy, so this cannot block; the
+// caller's deadline bounds the actual connect inside the RPC.
 func dialAteomStats(podUID string) (*grpc.ClientConn, io.Closer, error) {
 	conn, err := grpc.NewClient(
-		"unix://"+nodepath.AteomSocketPath(podUID),
+		"unix://"+ateomSocketPath(podUID),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)

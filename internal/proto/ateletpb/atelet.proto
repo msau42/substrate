@@ -259,16 +259,22 @@ service AteomHerder {
   // PromoteSnapshot makes `snapshot` durable in object storage while keeping
   // its local copy on this node. Used when a snapshot needs to be in object
   // storage (e.g. for tagging) without evicting the paused actor from the
-  // node. Waits for an in-flight detach, and fails for an actor running on
-  // this node.
+  // node. Waits for an in-flight detach.
   //
   // Idempotent: once the snapshot is durable, atelet answers from the
   // manifest at `snapshot.object`, and fails if there is none.
-  //
-  // TODO: Temporarily, this deletes all of the actor's local snapshots after
-  // the upload and does not check whether the actor is running. Its only
-  // caller, the suspend of a paused actor, relies on the deletion.
   rpc PromoteSnapshot(PromoteSnapshotRequest) returns (PromoteSnapshotResponse) {}
+
+  // DetachActor releases a suspended actor from this node: atelet uploads its
+  // latest local snapshot unless it is already durable, then deletes the
+  // actor's local snapshots. atelet starts the same detach on its own once the
+  // actor has stayed suspended on this node for its detach delay. It waits for
+  // a detach already in progress, is a no-op when atelet holds no local
+  // snapshot for the actor, and fails with ABORTED for an actor that runs or
+  // is starting on this node, or UNAVAILABLE when atelet cannot tell.
+  //
+  // TODO: report each detach to the control plane.
+  rpc DetachActor(DetachActorRequest) returns (DetachActorResponse) {}
 
   // Terminate tells atelet to terminate/kill any running workload for an actor,
   // unmount its volumes, and clean up actor state on the node.
@@ -811,10 +817,10 @@ message Snapshot {
   // for the actor, or for its newest under another snapshot_uuid: the
   // caller's view is stale.
   //
-  // TODO: Temporarily, the control plane does not set this and atelet does
-  // not check it.
+  // TODO: Temporarily, atelet does not reject stale requests.
   //
-  // +k8s:optional
+  // +k8s:required
+  // +k8s:minimum=1
   int32 generation = 2;
 
   // On Checkpoint: the fidelity to capture.
@@ -822,10 +828,6 @@ message Snapshot {
   // On PromoteSnapshot: the lowest fidelity the snapshot may hold. The call
   // fails if its manifest records a lower one.
   // In SnapshotReport: the fidelity the snapshot holds.
-  //
-  // TODO: Open question: should PromoteSnapshot accept a manifest that records
-  // a higher fidelity than this? Until that is decided, atelet requires the
-  // two to be equal.
   //
   // +k8s:required
   // +k8s:minimum=1
@@ -836,10 +838,7 @@ message Snapshot {
   // request: atelet uploads there, or reads from there when it holds no
   // usable local copy.
   //
-  // TODO: Temporarily, this is optional while we haven't implemented deferred
-  // uploads.
-  //
-  // +k8s:optional
+  // +k8s:required
   ObjectStorage object = 4;
 }
 
@@ -857,7 +856,7 @@ message SnapshotReport {
 }
 
 // ActorSnapshotState is what atelet holds for one actor on this node.
-// Returned by Checkpoint, PromoteSnapshot.
+// Returned by Checkpoint, PromoteSnapshot, and DetachActor.
 message ActorSnapshotState {
   // The snapshot atelet restores the actor from locally. Unset when the
   // latest checkpoint kept no local copy, and once a detach has made the
@@ -904,19 +903,14 @@ enum UploadMode {
   //
   // Once the actor has stayed suspended on this node for
   // atelet's detach-delay, atelet detaches it (deletes all the local snapshots).
-  //
-  // TODO: Temporarily the deferred upload and detach are unimplemented. Only a local
-  // copy is taken.
   UPLOAD_MODE_DEFERRED = 1;
 
-  // Upload the snapshot synchronously before Checkpoint returns, while keeping the local copy.
-  //
-  // TODO: Temporarily this deletes the local snapshot after the upload.
+  // Upload before Checkpoint returns, and keep no local copy. Used by
+  // SuspendActor, which also commits golden actors.
   UPLOAD_MODE_IMMEDIATE = 2;
   // Keep this in sync with the maximums on fields of this type.
 }
 
-// +k8s:customValidation # immediate upload requires snapshot.object
 message CheckpointRequest {
   // The UID of the worker pod whose ateom hosts the actor.
   //
@@ -977,9 +971,6 @@ message CheckpointResponse {
   // snapshot, unless UPLOAD_MODE_IMMEDIATE kept no local copy. The control
   // plane can drop its entries for any local-only generation not named here:
   // atelet has deleted it, and will never upload it.
-  //
-  // TODO: Temporarily, atelet leaves this unset. An unset state says nothing
-  // about which snapshots atelet holds.
   ActorSnapshotState state = 1;
 }
 
@@ -1022,7 +1013,6 @@ message RestoreRequest {
   // `snapshot.object`. Fails if neither copy exists: that generation is lost.
   //
   // +k8s:required
-  // +k8s:subfield(object)=+k8s:required
   Snapshot snapshot = 8;
 
   // When absent the actor has no egress: its TCP is captured and refused.
@@ -1084,15 +1074,44 @@ message PromoteSnapshotRequest {
   // it is, or will be, uploaded.
   //
   // +k8s:required
-  // +k8s:subfield(object)=+k8s:required
   Snapshot snapshot = 6;
 }
 
 message PromoteSnapshotResponse {
   // The actor's state once promoted: latest_durable is its latest snapshot,
   // and latest_local remains set if atelet still holds the local copy.
+  ActorSnapshotState state = 1;
+}
+
+message DetachActorRequest {
+  // Golden actors are never paused, so the golden atespace is rejected.
   //
-  // TODO: Temporarily, atelet leaves this unset. An unset state says nothing
-  // about which snapshots atelet holds.
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  // +k8s:customValidation # not the golden atespace
+  string atespace = 1;
+
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  string actor_name = 2;
+
+  // +k8s:required
+  // +k8s:format=k8s-uuid
+  string actor_uid = 3;
+
+  // For metrics attribution, like on CheckpointRequest.
+  //
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
+  string actor_template_atespace = 4;
+
+  // +k8s:optional
+  // +k8s:format=k8s-short-name
+  string actor_template_name = 5;
+}
+
+message DetachActorResponse {
+  // The actor's state once detached: latest_durable is its latest snapshot,
+  // and latest_local is unset.
   ActorSnapshotState state = 1;
 }

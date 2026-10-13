@@ -465,6 +465,7 @@ func TestValidateCheckpointRequest(t *testing.T) {
 			Spec:                  &ateletpb.WorkloadSpec{},
 			Snapshot: &ateletpb.Snapshot{
 				SnapshotUuid: "snap-1",
+				Generation:   1,
 				Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 				Object:       &ateletpb.ObjectStorage{SnapshotUri: snapshotURI},
 			},
@@ -475,13 +476,6 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		}
 		return r
 	}
-	deferred := func(name string) func(*ateletpb.CheckpointRequest) {
-		return func(r *ateletpb.CheckpointRequest) {
-			r.Snapshot.SnapshotUuid = name
-			r.Snapshot.Object = nil
-			r.UploadConfig = &ateletpb.UploadConfig{Mode: ateletpb.UploadMode_UPLOAD_MODE_DEFERRED}
-		}
-	}
 
 	tests := []struct {
 		name string
@@ -491,10 +485,7 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		name: "valid immediate",
 		obj:  valid(),
 	}, {
-		name: "valid deferred local only",
-		obj:  valid(deferred("pause-snap-1")),
-	}, {
-		name: "valid deferred with object storage",
+		name: "valid deferred",
 		obj: valid(func(r *ateletpb.CheckpointRequest) {
 			r.UploadConfig = &ateletpb.UploadConfig{Mode: ateletpb.UploadMode_UPLOAD_MODE_DEFERRED}
 		}),
@@ -566,16 +557,31 @@ func TestValidateCheckpointRequest(t *testing.T) {
 		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.UploadConfig.Mode = ateletpb.UploadMode(3) }),
 		want: field.ErrorList{field.Invalid(field.NewPath("upload_config", "mode"), nil, "").WithOrigin("maximum")},
 	}, {
+		name: "deferred upload without object storage",
+		obj: valid(func(r *ateletpb.CheckpointRequest) {
+			r.UploadConfig = &ateletpb.UploadConfig{Mode: ateletpb.UploadMode_UPLOAD_MODE_DEFERRED}
+			r.Snapshot.Object = nil
+		}),
+		want: field.ErrorList{field.Required(field.NewPath("snapshot", "object"), "")},
+	}, {
 		name: "immediate upload without object storage",
 		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.Snapshot.Object = nil }),
 		want: field.ErrorList{field.Required(field.NewPath("snapshot", "object"), "")},
 	}, {
+		name: "zero generation",
+		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.Snapshot.Generation = 0 }),
+		want: field.ErrorList{field.Required(field.NewPath("snapshot", "generation"), "")},
+	}, {
+		name: "negative generation",
+		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.Snapshot.Generation = -1 }),
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot", "generation"), nil, "").WithOrigin("minimum")},
+	}, {
 		name: "missing snapshot_uuid",
-		obj:  valid(deferred("")),
+		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = "" }),
 		want: field.ErrorList{field.Required(field.NewPath("snapshot", "snapshot_uuid"), "")},
 	}, {
 		name: "invalid snapshot_uuid: path escape",
-		obj:  valid(deferred("../escape")),
+		obj:  valid(func(r *ateletpb.CheckpointRequest) { r.Snapshot.SnapshotUuid = "../escape" }),
 		want: field.ErrorList{field.Invalid(field.NewPath("snapshot", "snapshot_uuid"), nil, "").WithOrigin("format=k8s-short-name")},
 	}, {
 		name: "missing snapshot_uri",
@@ -630,6 +636,7 @@ func TestValidateRestoreRequest(t *testing.T) {
 			Spec:                  &ateletpb.WorkloadSpec{},
 			Snapshot: &ateletpb.Snapshot{
 				SnapshotUuid: "snap-1",
+				Generation:   1,
 				Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 				Object:       &ateletpb.ObjectStorage{SnapshotUri: snapshotURI},
 			},
@@ -707,6 +714,14 @@ func TestValidateRestoreRequest(t *testing.T) {
 		name: "missing snapshot",
 		obj:  valid(func(r *ateletpb.RestoreRequest) { r.Snapshot = nil }),
 		want: field.ErrorList{field.Required(field.NewPath("snapshot"), "")},
+	}, {
+		name: "zero generation",
+		obj:  valid(func(r *ateletpb.RestoreRequest) { r.Snapshot.Generation = 0 }),
+		want: field.ErrorList{field.Required(field.NewPath("snapshot", "generation"), "")},
+	}, {
+		name: "negative generation",
+		obj:  valid(func(r *ateletpb.RestoreRequest) { r.Snapshot.Generation = -1 }),
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot", "generation"), nil, "").WithOrigin("minimum")},
 	}, {
 		name: "missing snapshot_uuid",
 		obj:  valid(func(r *ateletpb.RestoreRequest) { r.Snapshot.SnapshotUuid = "" }),
@@ -786,6 +801,7 @@ func TestValidatePromoteSnapshotRequest(t *testing.T) {
 			ActorTemplateName:     "tmpl-1",
 			Snapshot: &ateletpb.Snapshot{
 				SnapshotUuid: "pause-snap-1",
+				Generation:   1,
 				Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
 				Object: &ateletpb.ObjectStorage{
 					SnapshotUri: "gs://bucket/root/atespaces/team-a/actors/01234567-89ab-cdef-0123-456789abcdef/snapshots/snap-1",
@@ -849,6 +865,14 @@ func TestValidatePromoteSnapshotRequest(t *testing.T) {
 		obj:  valid(func(r *ateletpb.PromoteSnapshotRequest) { r.Snapshot = nil }),
 		want: field.ErrorList{field.Required(field.NewPath("snapshot"), "")},
 	}, {
+		name: "zero generation",
+		obj:  valid(func(r *ateletpb.PromoteSnapshotRequest) { r.Snapshot.Generation = 0 }),
+		want: field.ErrorList{field.Required(field.NewPath("snapshot", "generation"), "")},
+	}, {
+		name: "negative generation",
+		obj:  valid(func(r *ateletpb.PromoteSnapshotRequest) { r.Snapshot.Generation = -1 }),
+		want: field.ErrorList{field.Invalid(field.NewPath("snapshot", "generation"), nil, "").WithOrigin("minimum")},
+	}, {
 		name: "missing snapshot_uuid",
 		obj:  valid(func(r *ateletpb.PromoteSnapshotRequest) { r.Snapshot.SnapshotUuid = "" }),
 		want: field.ErrorList{field.Required(field.NewPath("snapshot", "snapshot_uuid"), "")},
@@ -898,6 +922,70 @@ func TestValidatePromoteSnapshotRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assertValidateErr(t, ValidatePromoteSnapshotRequest(context.Background(), tt.obj), tt.want)
+		})
+	}
+}
+
+func TestValidateDetachActorRequest(t *testing.T) {
+	valid := func(mutate ...func(*ateletpb.DetachActorRequest)) *ateletpb.DetachActorRequest {
+		r := &ateletpb.DetachActorRequest{
+			Atespace:              "team-a",
+			ActorName:             "actor-1",
+			ActorUid:              "01234567-89ab-cdef-0123-456789abcdef",
+			ActorTemplateAtespace: "team-a",
+			ActorTemplateName:     "tmpl-1",
+		}
+		for _, m := range mutate {
+			m(r)
+		}
+		return r
+	}
+
+	tests := []struct {
+		name string
+		obj  *ateletpb.DetachActorRequest
+		want field.ErrorList
+	}{{
+		name: "valid",
+		obj:  valid(),
+	}, {
+		name: "missing atespace",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.Atespace = "" }),
+		want: field.ErrorList{field.Required(field.NewPath("atespace"), "")},
+	}, {
+		name: "invalid atespace: path escape",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.Atespace = "../escape" }),
+		want: field.ErrorList{field.Invalid(field.NewPath("atespace"), nil, "").WithOrigin("format=k8s-short-name")},
+	}, {
+		name: "golden atespace",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.Atespace = resources.GoldenActorAtespace }),
+		want: field.ErrorList{field.Forbidden(field.NewPath("atespace"), "")},
+	}, {
+		name: "invalid actor_name: uppercase",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.ActorName = "UPPER" }),
+		want: field.ErrorList{field.Invalid(field.NewPath("actor_name"), nil, "").WithOrigin("format=k8s-short-name")},
+	}, {
+		name: "missing actor_uid",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.ActorUid = "" }),
+		want: field.ErrorList{field.Required(field.NewPath("actor_uid"), "")},
+	}, {
+		name: "invalid actor_uid: not a UUID",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.ActorUid = "actor-uid-1" }),
+		want: field.ErrorList{field.Invalid(field.NewPath("actor_uid"), nil, "").WithOrigin("format=k8s-uuid")},
+	}, {
+		name: "invalid actor_template_atespace: slash",
+		obj:  valid(func(r *ateletpb.DetachActorRequest) { r.ActorTemplateAtespace = "no/slashes" }),
+		want: field.ErrorList{field.Invalid(field.NewPath("actor_template_atespace"), nil, "").WithOrigin("format=k8s-short-name")},
+	}, {
+		name: "unset template identity is allowed",
+		obj: valid(func(r *ateletpb.DetachActorRequest) {
+			r.ActorTemplateAtespace = ""
+			r.ActorTemplateName = ""
+		}),
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertValidateErr(t, ValidateDetachActorRequest(context.Background(), tt.obj), tt.want)
 		})
 	}
 }
