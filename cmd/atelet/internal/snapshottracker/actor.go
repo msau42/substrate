@@ -85,7 +85,8 @@ func FidelityFromLabel(label string) ateletpb.SnapshotFidelity {
 	}
 }
 
-// actorOp is a background upload of an actor's snapshot in progress.
+// actorOp is an upload of an actor's snapshot in progress: a background
+// upload, or a PromoteSnapshot call.
 type actorOp struct {
 	// target is the snapshot it uploads.
 	target SnapshotRef
@@ -122,9 +123,10 @@ type actorSnapshots struct {
 	// failed.
 	retryAt time.Time
 
-	// op is the actor's background upload in progress, or nil: an actor has at
-	// most one at a time, and nothing cancels it. Forget waits for it to end
-	// via waitIdleLocked.
+	// op is the actor's upload in progress, background or requested by
+	// PromoteSnapshot, or nil: an actor has at most one at a time, and nothing
+	// cancels it. PromoteSnapshot and Forget wait for it to end via
+	// waitIdleLocked.
 	op *actorOp
 }
 

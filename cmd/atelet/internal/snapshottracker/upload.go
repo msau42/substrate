@@ -52,6 +52,60 @@ func (t *Tracker) backgroundUpload(ctx context.Context, a *actorSnapshots, op *a
 	t.endUploadAndUnlock(a, op, true)
 }
 
+// Promote makes requested, the snapshot a PromoteSnapshot call names, durable
+// in object storage while keeping its local copy on this node. requested need
+// not be atelet's latest local snapshot: as after a restart, the upload then
+// reads its local copy on disk if there is one, or answers from its manifest.
+// It runs in the calling goroutine rather than on a worker.
+func (t *Tracker) Promote(ctx context.Context, actorUID string, requested SnapshotRef) (*ateletpb.ActorSnapshotState, error) {
+	t.mu.Lock()
+	a, err := t.waitIdleLocked(ctx, actorUID)
+	if err != nil {
+		t.mu.Unlock()
+		return nil, err
+	}
+
+	// atelet may keep nothing for this actor, as after a restart. The upload
+	// still needs an entry to record itself in, so other calls see it and
+	// wait for it: add an empty one, and remove it again if the upload fails.
+	created := a == nil
+	a = t.findOrAddLocked(actorUID)
+
+	// Upload the requested snapshot. The request carries only the lowest
+	// fidelity the caller accepts, and no commit time: when the snapshot is
+	// the latest local one, take both from LatestLocal.
+	target := requested
+	wasLatestLocal := a.isLatestLocal(requested.UUID)
+	if wasLatestLocal {
+		target.Fidelity = a.LatestLocal.Fidelity
+		target.CommitTime = a.LatestLocal.CommitTime
+	}
+	op := t.beginOpLocked(a, target)
+	t.mu.Unlock()
+
+	start := t.clock.Now()
+	fidelity, uploaded, err := t.store.UploadLocalSnapshot(ctx, actorUID, target, requested.Fidelity)
+
+	t.mu.Lock()
+	switch {
+	case err == nil:
+		t.recordUploadLocked(a, target, fidelity, uploaded)
+	case created:
+		t.dropLocked(actorUID)
+	}
+	st := t.endUploadAndUnlock(a, op, wasLatestLocal)
+	if err != nil {
+		return nil, err
+	}
+	slog.InfoContext(ctx, "Promoted snapshot",
+		slog.String("actorUID", actorUID),
+		slog.String("snapshot", target.UUID),
+		slog.Int("generation", int(target.Generation)),
+		slog.Bool("uploaded", uploaded),
+		slog.Duration("elapsed", t.clock.Since(start)))
+	return st, nil
+}
+
 // recordUploadLocked records that an upload of target succeeded. fidelity is
 // what the durable copy's manifest records, or UNSPECIFIED if it records none,
 // and uploaded reports whether the upload wrote the manifest rather than

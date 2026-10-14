@@ -432,6 +432,189 @@ func TestTrackerState(t *testing.T) {
 	}
 }
 
+// PromoteSnapshot makes the named snapshot durable while keeping its local
+// copy, and checks its minimum fidelity.
+func TestTrackerPromote(t *testing.T) {
+	t.Run("local snapshot kept after promote", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		tr := newTestTracker(t, store)
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		want := testRef("s1", 1, time.Time{})
+		want.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+
+		st, err := tr.Promote(t.Context(), trackedActorUID, want)
+		if err != nil {
+			t.Fatalf("promote: %v", err)
+		}
+		if got, wantCalls := store.uploads(), []uploadCall{{"s1", ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES}}; !slices.Equal(got, wantCalls) {
+			t.Errorf("uploads = %v, want %v", got, wantCalls)
+		}
+		if uuidOf(st.GetLatestLocal()) != "s1" || st.GetUploadDueTime() != nil {
+			t.Errorf("state = %v, want s1 kept locally and no upload due", st)
+		}
+		durable := st.GetLatestDurable()
+		if got := durable.GetSnapshot().GetFidelity(); got != ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			t.Errorf("latest_durable fidelity = %v, want the MEMORY it holds", got)
+		}
+		if durable.GetDurableCompleteTime() == nil || durable.GetLocalCommitTime() == nil {
+			t.Errorf("latest_durable = %v, want its commit and upload times", durable)
+		}
+	})
+
+	t.Run("untracked, as after a restart", func(t *testing.T) {
+		tr := newTestTracker(t, newFakeSnapshotStore())
+		want := testRef("s2", 2, time.Time{})
+		st, err := tr.Promote(t.Context(), trackedActorUID, want)
+		if err != nil {
+			t.Fatalf("promote: %v", err)
+		}
+		if got := uuidOf(st.GetLatestDurable()); got != "s2" {
+			t.Errorf("latest_durable = %q, want s2", got)
+		}
+	})
+}
+
+// A PromoteSnapshot for a newer snapshot than the one being uploaded waits for
+// that upload to end, which deletes the superseded snapshot's local copy, and
+// then uploads the newer one.
+func TestTrackerPromoteWaitsForOlderUpload(t *testing.T) {
+	store := newFakeSnapshotStore()
+	store.setBlocking(true)
+	tr := newIdleTestTracker(t, store)
+	for _, name := range []string{"s1", "s2"} {
+		if err := os.MkdirAll(ateletpath.LocalSnapshotDir(trackedActorUID, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t0 := tr.clock.Now()
+	tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	stepTo(tr, t0.Add(testUploadDelay))
+	// Upload s1 as a worker would, with none running to take the actor
+	// once the upload ends.
+	go tr.syncActor(trackedActorUID)
+	if got := waitStarted(t, store); got != "s1" {
+		t.Fatalf("started = %q, want s1", got)
+	}
+	tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
+
+	store.setBlocking(false)
+	promoted := make(chan error, 1)
+	go func() {
+		_, err := tr.Promote(t.Context(), trackedActorUID, testRef("s2", 2, time.Time{}))
+		promoted <- err
+	}()
+	select {
+	case err := <-promoted:
+		t.Fatalf("promote returned (%v) during the upload of s1", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.release <- nil
+	if err := <-promoted; err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	wantCalls := []uploadCall{{"s1", noFidelity}, {"s2", ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY}}
+	if got := store.uploads(); !slices.Equal(got, wantCalls) {
+		t.Errorf("uploads = %v, want %v", got, wantCalls)
+	}
+	if _, err := os.Stat(ateletpath.LocalSnapshotDir(trackedActorUID, "s1")); !os.IsNotExist(err) {
+		t.Errorf("s1 after the promote of s2: stat = %v, want it deleted", err)
+	}
+	st := tr.State(trackedActorUID)
+	if uuidOf(st.GetLatestLocal()) != "s2" || uuidOf(st.GetLatestDurable()) != "s2" || st.GetUploadDueTime() != nil {
+		t.Errorf("state = %v, want s2 local and durable, and no upload due", st)
+	}
+}
+
+// A checkpoint taken during a PromoteSnapshot is due for upload an upload
+// delay after the promote made the older snapshot durable.
+func TestTrackerCheckpointDuringPromote(t *testing.T) {
+	store := newFakeSnapshotStore()
+	store.setBlocking(true)
+	tr := newTestTracker(t, store)
+	t0 := tr.clock.Now()
+	tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	promoted := make(chan error, 1)
+	go func() {
+		_, err := tr.Promote(t.Context(), trackedActorUID, testRef("s1", 1, time.Time{}))
+		promoted <- err
+	}()
+	waitStarted(t, store)
+
+	stepTo(tr, t0.Add(10*time.Minute))
+	tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
+	stepTo(tr, t0.Add(20*time.Minute))
+	store.release <- nil
+	if err := <-promoted; err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	if got, want := timeOf(tr.State(trackedActorUID).GetUploadDueTime()), t0.Add(20*time.Minute+testUploadDelay); !got.Equal(want) {
+		t.Errorf("upload_due_time = %v, want %v: an upload delay after the promote succeeded", got, want)
+	}
+}
+
+// A PromoteSnapshot that succeeds lifts the hold failed background uploads put
+// on the actor, even when a newer checkpoint was taken meanwhile: the next
+// failure waits the first retry delay again.
+func TestTrackerPromoteResetsRetryDelay(t *testing.T) {
+	store := newFakeSnapshotStore()
+	store.setBlocking(true)
+	tr := newTestTracker(t, store)
+	tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+	uploadNow(t, tr, store, errors.New("boom"))
+
+	promoted := make(chan error, 1)
+	go func() {
+		_, err := tr.Promote(t.Context(), trackedActorUID, testRef("s1", 1, time.Time{}))
+		promoted <- err
+	}()
+	waitStarted(t, store)
+	tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
+	store.release <- nil
+	if err := <-promoted; err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+
+	uploadNow(t, tr, store, errors.New("boom"))
+	if got, want := timeOf(tr.State(trackedActorUID).GetUploadDueTime()), tr.clock.Now().Add(testRetryDelay); !got.Equal(want) {
+		t.Errorf("upload_due_time = %v, want %v: the first retry delay after the failure", got, want)
+	}
+}
+
+// An immediate checkpoint during a PromoteSnapshot keeps the promoted snapshot
+// for the promote, which deletes the snapshot's local copy when it ends.
+func TestTrackerImmediateCheckpointDuringPromote(t *testing.T) {
+	store := newFakeSnapshotStore()
+	store.setBlocking(true)
+	tr := newTestTracker(t, store)
+	if err := os.MkdirAll(ateletpath.LocalSnapshotDir(trackedActorUID, "s1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t0 := tr.clock.Now()
+	tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	promoted := make(chan error, 1)
+	go func() {
+		_, err := tr.Promote(t.Context(), trackedActorUID, testRef("s1", 1, time.Time{}))
+		promoted <- err
+	}()
+	waitStarted(t, store)
+
+	keep, _ := tr.CommitDurable(trackedActorUID, testRef("s2", 2, t0.Add(time.Minute)))
+	if !slices.Equal(keep, []string{"s1"}) {
+		t.Errorf("keep = %v, want [s1]: the promote is uploading it", keep)
+	}
+	store.release <- nil
+	if err := <-promoted; err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	if _, err := os.Stat(ateletpath.LocalSnapshotDir(trackedActorUID, "s1")); !os.IsNotExist(err) {
+		t.Errorf("s1 after the promote: stat = %v, want it deleted", err)
+	}
+	if got := uuidOf(tr.State(trackedActorUID).GetLatestDurable()); got != "s2" {
+		t.Errorf("latest_durable = %q, want s2", got)
+	}
+}
+
 // A failed background upload is retried once the retry delay has passed, and
 // the delay doubles with each further failure.
 func TestTrackerRetriesFailedUpload(t *testing.T) {

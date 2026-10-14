@@ -68,11 +68,15 @@ type Store interface {
 //     superseded while the actor waits are never uploaded.
 //  4. The queue hands an actor to one worker at a time, and the number of
 //     workers bounds how many background uploads run at once.
-//  5. An upload leaves LatestLocal on disk so a same-node Restore still reads
-//     it.
+//  5. An upload, background or by PromoteSnapshot, leaves LatestLocal on disk
+//     so a same-node Restore still reads it.
 //
-// Nothing cancels an actor's upload in progress: Forget waits for it to end,
-// and CommitDurable lets it run on.
+// PromoteSnapshot runs in the calling goroutine rather than on a worker, so
+// an explicit control-plane call does not wait behind other actors'
+// background work. Nothing cancels an actor's upload in progress:
+// PromoteSnapshot and Forget wait for it to end, even an upload of an older
+// snapshot, and CommitDurable lets it run on. A worker leaves an actor with
+// an upload in progress to that upload's end, which queues the actor again.
 type Tracker struct {
 	// ctx bounds background uploads, and shuts the queue down when it ends.
 	ctx   context.Context
@@ -151,8 +155,9 @@ func (t *Tracker) runWorker() {
 func (t *Tracker) syncActor(actorUID string) {
 	t.mu.Lock()
 	a := t.findLocked(actorUID)
-	if a == nil || t.ctx.Err() != nil {
-		// Forgotten, or atelet is shutting down.
+	if a == nil || a.op != nil || t.ctx.Err() != nil {
+		// Forgotten, or an upload is in progress, whose end queues the actor
+		// again, or atelet is shutting down.
 		t.mu.Unlock()
 		return
 	}
@@ -260,7 +265,8 @@ func (t *Tracker) dropLocked(actorUID string) {
 }
 
 // tracksLocked reports whether a is still its actor's entry: false once
-// Forget has dropped the actor, even if a new entry has been added since.
+// Forget has dropped the actor, or a failed Promote the entry it added, even
+// if a new entry has been added since.
 func (t *Tracker) tracksLocked(a *actorSnapshots) bool {
 	return t.actors[a.actorUID] == a
 }
