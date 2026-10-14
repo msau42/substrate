@@ -33,6 +33,7 @@ import (
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/apivalidation"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/ateletpath"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/credentialprovider"
+	"github.com/agent-substrate/substrate/cmd/atelet/internal/snapshottracker"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/sparsefile"
 	"github.com/agent-substrate/substrate/cmd/atelet/internal/trustbundle"
 	"github.com/agent-substrate/substrate/internal/apierror"
@@ -759,7 +760,7 @@ func (s *AteomHerder) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRe
 	// pins it to this node, nothing clears the field).
 	//
 	// Best-effort: if this fail, the actor's terminate prunes again.
-	if err := pruneLocalCheckpoints(ctx, actorUID); err != nil {
+	if err := snapshottracker.PruneLocalCheckpoints(ctx, actorUID); err != nil {
 		slog.WarnContext(ctx, "failed to prune superseded local checkpoints", slog.Any("actor", actorRef), slog.Any("err", err))
 	}
 
@@ -989,7 +990,7 @@ func (s *AteomHerder) PromoteSnapshot(ctx context.Context, req *ateletpb.Promote
 	// Best-effort: the snapshot is in object storage now and the actor will
 	// not resume from this node's local copy. Kept outside the persist window
 	// so local disk deletion does not mix into the upload measurement.
-	if err := pruneLocalCheckpoints(ctx, req.GetActorUid()); err != nil {
+	if err := snapshottracker.PruneLocalCheckpoints(ctx, req.GetActorUid()); err != nil {
 		slog.WarnContext(ctx, "failed to prune uploaded local checkpoints", slog.String("actorUID", req.GetActorUid()), slog.Any("err", err))
 	}
 
@@ -1342,7 +1343,7 @@ func (s *AteomHerder) Terminate(ctx context.Context, req *ateletpb.TerminateRequ
 	// up the copies on any other NodeVmsWithLocalSnapshots. This is fine *as of
 	// the day this was written* because today NodeVmsWithLocalSnapshots has at
 	// most one item.
-	if err := pruneLocalCheckpoints(ctx, actorUID); err != nil {
+	if err := snapshottracker.PruneLocalCheckpoints(ctx, actorUID); err != nil {
 		return nil, fmt.Errorf("failed to prune local checkpoints during terminate (actor: %s, actorUID: %s): %w", actorRef, actorUID, err)
 	}
 

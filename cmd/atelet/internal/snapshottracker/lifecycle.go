@@ -15,24 +15,39 @@
 package snapshottracker
 
 import (
+	"context"
+	"time"
+
 	"github.com/agent-substrate/substrate/internal/proto/ateletpb"
 )
 
 // CommitLocal records snap, just stored locally under UPLOAD_MODE_DEFERRED, as
-// the actor's latest local snapshot, and returns the actor's state.
-func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.ActorSnapshotState {
+// the actor's latest local snapshot, and schedules its upload. It returns the
+// local snapshots to keep, snap and one still being uploaded, and the actor's
+// state.
+func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) ([]string, *ateletpb.ActorSnapshotState) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	a := t.findOrAddLocked(actorUID)
 	local := snap
 	a.LatestLocal = &local
-	return t.stateLocked(a)
+	if a.UndurableSince.IsZero() {
+		a.UndurableSince = snap.CommitTime
+	}
+	keep := []string{snap.UUID}
+	if up := a.uploading(); up != nil {
+		keep = append(keep, up.UUID)
+	}
+	t.requeueLocked(a)
+	return keep, t.stateLocked(a)
 }
 
 // CommitDurable records snap, uploaded during Checkpoint under
 // UPLOAD_MODE_IMMEDIATE, as the actor's latest snapshot. The actor keeps no
-// local snapshot. It returns the actor's state.
-func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.ActorSnapshotState {
+// local snapshot, but an older snapshot's upload in progress runs on, and
+// deletes that snapshot's local copy when it ends. It returns the local
+// snapshots to keep, that one if any, and the actor's state.
+func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) ([]string, *ateletpb.ActorSnapshotState) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	a := t.findOrAddLocked(actorUID)
@@ -40,12 +55,27 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.Act
 	a.LatestDurable = &durable
 	// TODO: change this when we add detach.
 	a.LatestLocal = nil
-	return t.stateLocked(a)
+	a.UndurableSince = time.Time{}
+	t.resetBackoffLocked(a)
+	var keep []string
+	if up := a.uploading(); up != nil {
+		keep = append(keep, up.UUID)
+	}
+	return keep, t.stateLocked(a)
 }
 
-// Forget drops the actor's state.
-func (t *Tracker) Forget(actorUID string) {
+// Forget waits, as long as ctx allows, for the actor's upload in progress to
+// end, then drops the actor's state. An upload thus never finds its actor
+// dropped, and a worker that takes the actor from the queue afterwards finds
+// nothing to do.
+func (t *Tracker) Forget(ctx context.Context, actorUID string) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
+	if _, err := t.waitIdleLocked(ctx, actorUID); err != nil {
+		t.mu.Unlock()
+		return err
+	}
 	t.dropLocked(actorUID)
+	t.mu.Unlock()
+	t.retries.Forget(actorUID)
+	return nil
 }
