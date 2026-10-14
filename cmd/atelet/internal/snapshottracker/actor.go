@@ -85,10 +85,22 @@ func FidelityFromLabel(label string) ateletpb.SnapshotFidelity {
 	}
 }
 
-// actorOp is an upload of an actor's snapshot in progress: a background
-// upload, or a PromoteSnapshot call.
+// opKind is what an operation on an actor's snapshots does.
+type opKind int
+
+const (
+	// opUpload makes a snapshot durable: a background upload, or a
+	// PromoteSnapshot call.
+	opUpload opKind = iota
+	// opDetach makes the latest local snapshot durable, then deletes the
+	// actor's local snapshots: a background detach, or a DetachActor call.
+	opDetach
+)
+
+// actorOp is an upload or detach of an actor's snapshot in progress.
 type actorOp struct {
-	// target is the snapshot it uploads.
+	kind opKind
+	// target is the snapshot it uploads or detaches.
 	target SnapshotRef
 	// done is closed once the operation has ended, and has deleted any local
 	// snapshot it superseded.
@@ -101,8 +113,8 @@ type actorSnapshots struct {
 	actorUID string
 
 	// LatestLocal is the newest snapshot currently stored in the actor's
-	// node-local checkpoint directory. Nil after an UPLOAD_MODE_IMMEDIATE
-	// checkpoint.
+	// node-local checkpoint directory. Nil once detached or after an
+	// UPLOAD_MODE_IMMEDIATE checkpoint.
 	LatestLocal *SnapshotRef
 	// LatestDurable is the newest snapshot confirmed in object storage.
 	LatestDurable *SnapshotRef
@@ -118,15 +130,27 @@ type actorSnapshots struct {
 	// upload changes UndurableSince only once it succeeds, and a failed or
 	// interrupted one leaves it as it was.
 	UndurableSince time.Time
+	// DetachAt is when atelet next checks whether to detach the actor: it
+	// detaches it then unless a Run, Restore, or Checkpoint of the actor is
+	// in progress or it runs on this node. Zero when atelet holds no local
+	// snapshot of the actor.
+	DetachAt time.Time
 
-	// retryAt holds the actor's next background upload back after one
-	// failed.
+	// retryAt holds the actor's next background upload or detach back after
+	// one failed.
 	retryAt time.Time
 
-	// op is the actor's upload in progress, background or requested by
-	// PromoteSnapshot, or nil: an actor has at most one at a time, and nothing
-	// cancels it. PromoteSnapshot and Forget wait for it to end via
-	// waitIdleLocked.
+	// holds counts the Runs, Restores, and Checkpoints of the actor in
+	// progress on this node. While it is nonzero, atelet does not detach
+	// the actor.
+	holds int
+
+	// op is the actor's upload or detach in progress, background or requested
+	// by an RPC, or nil: an actor has at most one at a time, and nothing
+	// cancels it. Run, Restore, and Checkpoint calls wait for a detach to end
+	// via waitForDetachLocked so local files are not pruned underneath them.
+	// PromoteSnapshot, DetachActor, and Forget wait for any operation to end
+	// via waitIdleLocked.
 	op *actorOp
 }
 
@@ -157,7 +181,7 @@ func (a *actorSnapshots) recordDurable(d SnapshotRef) {
 // uploading returns the snapshot an upload in progress is making durable, or
 // nil.
 func (a *actorSnapshots) uploading() *SnapshotRef {
-	if a.op == nil {
+	if a.op == nil || a.op.kind != opUpload {
 		return nil
 	}
 	return &a.op.target
@@ -191,6 +215,17 @@ func (a *actorSnapshots) uploadSucceeded(now time.Time) {
 	if a.LatestLocal != nil && a.uploadNeeded(*a.LatestLocal) {
 		a.UndurableSince = now
 	}
+}
+
+// detachDue returns when atelet next checks whether to detach the actor: at
+// DetachAt, or at retryAt if that is later. ok is false when there is nothing
+// to detach: no detach is scheduled, or atelet holds no local snapshot of the
+// actor.
+func (a *actorSnapshots) detachDue() (due time.Time, ok bool) {
+	if a.DetachAt.IsZero() || a.LatestLocal == nil {
+		return time.Time{}, false
+	}
+	return later(a.DetachAt, a.retryAt), true
 }
 
 func later(t, u time.Time) time.Time {

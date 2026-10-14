@@ -22,9 +22,9 @@ import (
 )
 
 // CommitLocal records snap, just stored locally under UPLOAD_MODE_DEFERRED, as
-// the actor's latest local snapshot, and schedules its upload. It returns the
-// local snapshots to keep, snap and one still being uploaded, and the actor's
-// state.
+// the actor's latest local snapshot, and schedules its upload and the actor's
+// detach. It returns the local snapshots to keep, snap and one still being
+// uploaded, and the actor's state.
 func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) ([]string, *ateletpb.ActorSnapshotState) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -34,6 +34,7 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) ([]string, *ate
 	if a.UndurableSince.IsZero() {
 		a.UndurableSince = snap.CommitTime
 	}
+	a.DetachAt = t.clock.Now().Add(t.detachDelay)
 	keep := []string{snap.UUID}
 	if up := a.uploading(); up != nil {
 		keep = append(keep, up.UUID)
@@ -55,7 +56,7 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) ([]string, *a
 	a.LatestDurable = &durable
 	// TODO: change this when we add detach.
 	a.LatestLocal = nil
-	a.UndurableSince = time.Time{}
+	a.UndurableSince, a.DetachAt = time.Time{}, time.Time{}
 	t.resetBackoffLocked(a)
 	var keep []string
 	if up := a.uploading(); up != nil {
@@ -64,13 +65,51 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) ([]string, *a
 	return keep, t.stateLocked(a)
 }
 
-// Forget waits, as long as ctx allows, for the actor's upload in progress to
-// end, then drops the actor's state. An upload thus never finds its actor
-// dropped, and a worker that takes the actor from the queue afterwards finds
-// nothing to do.
+// BeginStart records that a Run or Restore is starting the actor on this node,
+// once any detach in progress has finished, and returns the func to call when
+// the start ends, whether or not it succeeded. atelet does not detach the
+// actor in between.
+func (t *Tracker) BeginStart(ctx context.Context, actorUID string) (end func(), err error) {
+	return t.hold(ctx, actorUID)
+}
+
+// BeginCheckpoint records that a Checkpoint of the actor is in progress on this
+// node, once any detach in progress has finished, and returns the func to call
+// when the checkpoint ends, whether or not it succeeded. atelet does not
+// detach the actor in between, so a detach cannot delete the local snapshot
+// the checkpoint writes.
+func (t *Tracker) BeginCheckpoint(ctx context.Context, actorUID string) (end func(), err error) {
+	return t.hold(ctx, actorUID)
+}
+
+// hold waits for any detach of the actor to finish, holds detaches of it off,
+// and returns the func that releases the hold.
+func (t *Tracker) hold(ctx context.Context, actorUID string) (release func(), err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	a, err := t.waitForDetachLocked(ctx, actorUID)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		// atelet holds no snapshot of the actor to detach.
+		return func() {}, nil
+	}
+	a.holds++
+	return func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		a.holds--
+	}, nil
+}
+
+// Forget waits, as long as ctx allows, for the actor's upload or detach in
+// progress to end, then drops the actor's state. An operation thus never
+// finds its actor dropped, and a worker that takes the actor from the queue
+// afterwards finds nothing to do.
 func (t *Tracker) Forget(ctx context.Context, actorUID string) error {
 	t.mu.Lock()
-	if _, err := t.waitIdleLocked(ctx, actorUID); err != nil {
+	if _, err := t.waitIdleLocked(ctx, actorUID, nil); err != nil {
 		t.mu.Unlock()
 		return err
 	}

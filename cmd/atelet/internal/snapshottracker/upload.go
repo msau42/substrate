@@ -54,12 +54,12 @@ func (t *Tracker) backgroundUpload(ctx context.Context, a *actorSnapshots, op *a
 
 // Promote makes requested, the snapshot a PromoteSnapshot call names, durable
 // in object storage while keeping its local copy on this node. requested need
-// not be atelet's latest local snapshot: as after a restart, the upload then
-// reads its local copy on disk if there is one, or answers from its manifest.
-// It runs in the calling goroutine rather than on a worker.
+// not be atelet's latest local snapshot: as after a detach or restart, the
+// upload then reads its local copy on disk if there is one, or answers from
+// its manifest. It runs in the calling goroutine rather than on a worker.
 func (t *Tracker) Promote(ctx context.Context, actorUID string, requested SnapshotRef) (*ateletpb.ActorSnapshotState, error) {
 	t.mu.Lock()
-	a, err := t.waitIdleLocked(ctx, actorUID)
+	a, err := t.waitIdleLocked(ctx, actorUID, nil)
 	if err != nil {
 		t.mu.Unlock()
 		return nil, err
@@ -80,7 +80,7 @@ func (t *Tracker) Promote(ctx context.Context, actorUID string, requested Snapsh
 		target.Fidelity = a.LatestLocal.Fidelity
 		target.CommitTime = a.LatestLocal.CommitTime
 	}
-	op := t.beginOpLocked(a, target)
+	op := t.beginOpLocked(a, opUpload, target)
 	t.mu.Unlock()
 
 	start := t.clock.Now()
@@ -125,6 +125,11 @@ func (t *Tracker) recordUploadLocked(a *actorSnapshots, target SnapshotRef, fide
 		d.UploadTime = a.LatestDurable.UploadTime
 	}
 	a.recordDurable(d)
+	// Record where LatestLocal is durable, so a detach does not upload it
+	// again.
+	if a.isLatestLocal(d.UUID) {
+		a.LatestLocal.URI = d.URI
+	}
 	a.uploadSucceeded(now)
 	t.resetBackoffLocked(a)
 }
