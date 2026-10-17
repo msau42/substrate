@@ -121,9 +121,11 @@ type actorOp struct {
 
 // Start reads each actor's snapshot state file on this node, queues the actor
 // for when its next background upload or detach is due, so its background work
-// resumes after an atelet restart, and starts each queue's workers.
+// resumes after an atelet restart, and starts each queue's workers. With
+// instruments, it also adds each actor's undurable local snapshot to their
+// tally before any worker runs.
 func (t *Tracker) Start() {
-	if t.store != nil {
+	if t.store != nil || t.undurableActorsTally != nil {
 		actorUIDs, err := savedActorUIDs()
 		if err != nil {
 			// Best-effort: each actor's next commit queues it again.
@@ -134,6 +136,7 @@ func (t *Tracker) Start() {
 				break
 			}
 			if a := t.findLocked(actorUID); a != nil {
+				t.undurableActorsTally.observe(a)
 				t.requeueLocked(a)
 			}
 			t.unlock(actorUID)

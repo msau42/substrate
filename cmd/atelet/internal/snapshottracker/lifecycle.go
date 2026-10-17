@@ -265,6 +265,7 @@ func (t *Tracker) Forget(actorUID string) error {
 	// Start the actor's backoff over; its entry, and any hold, goes below.
 	t.retries.Forget(actorUID)
 	t.dropLocked(actorUID)
+	t.undurableActorsTally.forget(actorUID)
 	return removeSnapshotState(actorUID)
 }
 
