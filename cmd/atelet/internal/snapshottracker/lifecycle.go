@@ -241,11 +241,13 @@ func (t *Tracker) BeginPromote(ctx context.Context, actorUID string, snap Snapsh
 // holdLocked counts a Run, Restore, Checkpoint, or PromoteSnapshot of the
 // actor in progress on its entry a, which holds detaches and state reports of
 // the actor off (and background uploads when promote is true), and returns the
-// func that ends it and queues the actor again. When snap is non-nil
-// (Checkpoint and PromoteSnapshot), it stays in a.inFlight until end runs, so
-// newest includes it. An actor atelet tracks nothing of yet (a nil a) is held
-// too, so no detach or report can begin on a snapshot its first Checkpoint
-// commits before it ends.
+// func that ends it and queues the actor again. The end of the last call
+// holding the actor also deletes the superseded local copies left to it (see
+// removeSupersededLocalCopy). When snap is non-nil (Checkpoint and
+// PromoteSnapshot), it stays in a.inFlight until end runs, so newest includes
+// it. An actor atelet tracks nothing of yet (a nil a) is held too, so no
+// detach or report can begin on a snapshot its first Checkpoint commits before
+// it ends.
 func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots, snap *SnapshotRef, promote bool) (end func()) {
 	if a == nil {
 		a = &actorSnapshots{actorUID: actorUID}
@@ -273,11 +275,28 @@ func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots, snap *SnapshotR
 			// Checkpoint, or PromoteSnapshot was in progress.
 			return
 		}
+		if a.holds == 0 {
+			t.removeSupersededCopiesLocked(a)
+		}
 		if a.holds == 0 && a.reportDeferred {
 			t.queueReportLocked(a)
 		}
 		t.requeueLocked(a)
 	}
+}
+
+// removeSupersededCopiesLocked deletes the local copies that
+// removeSupersededLocalCopy left to the Runs, Restores, Checkpoints, and
+// PromoteSnapshots that held the actor, once the last of them has ended. It
+// keeps a copy the actor still needs.
+func (t *Tracker) removeSupersededCopiesLocked(a *actorSnapshots) {
+	for _, uuid := range a.supersededCopies {
+		if a.needsLocalCopy(uuid) {
+			continue
+		}
+		t.removeLocalCopyLocked(a.actorUID, uuid)
+	}
+	a.supersededCopies = nil
 }
 
 // Forget drops the actor's state, in memory and on disk. It does not wait for

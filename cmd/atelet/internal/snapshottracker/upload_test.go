@@ -888,8 +888,9 @@ func TestTrackerCommitLocalDropsFailedUploading(t *testing.T) {
 
 // A superseded local copy stays on disk while a Run, Restore, Checkpoint, or
 // PromoteSnapshot of the actor is in progress, since a Restore may be reading
-// it in place. It is left for the actor's next checkpoint to prune.
-func TestTrackerKeepsSupersededCopyWhileHeld(t *testing.T) {
+// it in place, and is deleted once the last of them ends: a restored actor may
+// run long before a checkpoint would prune it.
+func TestTrackerDeletesSupersededCopyOnceUnheld(t *testing.T) {
 	t.Run("upload ends", func(t *testing.T) {
 		store := newFakeSnapshotStore()
 		store.setBlocking(true)
@@ -908,12 +909,12 @@ func TestTrackerKeepsSupersededCopyWhileHeld(t *testing.T) {
 		}
 		store.release <- nil
 		waitClosed(t, done, "the upload of s1")
-		end()
 		if _, err := os.Stat(s1Dir); err != nil {
-			t.Errorf("s1 after its upload ended during a Restore: stat = %v, want it kept", err)
+			t.Errorf("s1 after its upload ended during a Restore: stat = %v, want it kept until the Restore ends", err)
 		}
-		if keep := tr.LocalSnapshotsToKeep(trackedActorUID); !slices.Equal(keep, []string{"s2"}) {
-			t.Errorf("LocalSnapshotsToKeep = %v, want [s2], so the next checkpoint prunes s1", keep)
+		end()
+		if _, err := os.Stat(s1Dir); !os.IsNotExist(err) {
+			t.Errorf("s1 after the Restore ended: stat = %v, want it deleted", err)
 		}
 	})
 
@@ -935,12 +936,36 @@ func TestTrackerKeepsSupersededCopyWhileHeld(t *testing.T) {
 			t.Fatalf("BeginStart: %v", err)
 		}
 		processNext(t, tr, opUpload)
-		end()
 		if rec := readSnapshotState(trackedActorUID); rec == nil || rec.Uploading != nil {
 			t.Errorf("state file = %+v, want Uploading cleared", rec)
 		}
 		if _, err := os.Stat(s1Dir); err != nil {
-			t.Errorf("s1 after a worker cleared it during a Restore: stat = %v, want it kept", err)
+			t.Errorf("s1 after a worker cleared it during a Restore: stat = %v, want it kept until the Restore ends", err)
+		}
+		end()
+		if _, err := os.Stat(s1Dir); !os.IsNotExist(err) {
+			t.Errorf("s1 after the Restore ended: stat = %v, want it deleted", err)
+		}
+	})
+
+	t.Run("copy still needed", func(t *testing.T) {
+		useActorDir(t)
+		tr := newTracker(t)
+		s1Dir := ateletpath.LocalSnapshotDir(trackedActorUID, "s1")
+		if err := os.MkdirAll(s1Dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		end, err := tr.BeginStart(t.Context(), trackedActorUID)
+		if err != nil {
+			t.Fatalf("BeginStart: %v", err)
+		}
+		// The end of the hold keeps a copy the actor needs, here its latest
+		// local snapshot.
+		tr.removeSupersededLocalCopy(trackedActorUID, testRef("s1", 1, time.Time{}))
+		end()
+		if _, err := os.Stat(s1Dir); err != nil {
+			t.Errorf("s1, the latest local snapshot, after the Restore ended: stat = %v, want it kept", err)
 		}
 	})
 }

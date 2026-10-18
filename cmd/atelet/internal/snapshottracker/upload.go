@@ -152,18 +152,28 @@ func (t *Tracker) recordUploadLocked(a *actorSnapshots, target SnapshotRef, uplo
 
 // removeSupersededLocalCopy deletes the local copy of target, an upload's
 // snapshot that a newer snapshot superseded, once no upload needs it: the copy
-// was kept only for the upload. It leaves the copy while a Run, Restore,
-// Checkpoint, or PromoteSnapshot of the actor is in progress, since a Restore
-// or PromoteSnapshot may be reading it, and deletes it under the actor's lock
-// so that none begins reading it meanwhile. Best-effort: the actor's next
-// checkpoint, detach, or terminate prunes a copy left behind.
+// was kept only for the upload. While a Run, Restore, Checkpoint, or
+// PromoteSnapshot of the actor is in progress, since a Restore or
+// PromoteSnapshot may be reading the copy, it leaves the copy for the last of
+// them to delete as it ends (see holdLocked). It deletes under the actor's
+// lock so that none begins reading the copy meanwhile. Best-effort: the
+// actor's next checkpoint, detach, or terminate prunes a copy left behind.
 func (t *Tracker) removeSupersededLocalCopy(actorUID string, target SnapshotRef) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
 	if t.heldLocked(actorUID) {
+		// A held entry is in memory.
+		a := t.findLocked(actorUID)
+		a.supersededCopies = append(a.supersededCopies, target.uuid())
 		return
 	}
-	if err := removeLocalCheckpoint(t.ctx, actorUID, target.uuid()); err != nil {
+	t.removeLocalCopyLocked(actorUID, target.uuid())
+}
+
+// removeLocalCopyLocked deletes the actor's local copy of the snapshot named
+// uuid, logging a failure.
+func (t *Tracker) removeLocalCopyLocked(actorUID, uuid string) {
+	if err := removeLocalCheckpoint(t.ctx, actorUID, uuid); err != nil {
 		slog.WarnContext(t.ctx, "Failed to delete a superseded local checkpoint", slog.String("actorUID", actorUID), slog.Any("err", err))
 	}
 }

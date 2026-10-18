@@ -208,6 +208,10 @@ type actorSnapshots struct {
 	// reportDeferred is set when a report of the actor's state is held back
 	// while holds is nonzero, so holdLocked queues it once holds reaches zero.
 	reportDeferred bool
+	// supersededCopies names the local copies removeSupersededLocalCopy left
+	// on disk while holds was nonzero, so holdLocked deletes them once holds
+	// reaches zero.
+	supersededCopies []string
 	// retryAt holds the actor's next background upload or detach back after
 	// one failed. The entry stays in memory while retryAt is set.
 	retryAt time.Time
@@ -299,6 +303,14 @@ func (a *actorSnapshots) keepUploading() bool {
 		return false
 	}
 	return true
+}
+
+// needsLocalCopy reports whether atelet still needs the local copy of the
+// snapshot named uuid, as LocalSnapshotsToKeep names them: it is LatestLocal,
+// or Uploading while kept.
+func (a *actorSnapshots) needsLocalCopy(uuid string) bool {
+	return (a.LatestLocal != nil && a.LatestLocal.uuid() == uuid) ||
+		(a.keepUploading() && a.Uploading.uuid() == uuid)
 }
 
 // clearSupersededUploading clears Uploading when keepUploading reports it is
