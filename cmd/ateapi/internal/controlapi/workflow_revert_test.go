@@ -251,9 +251,9 @@ func TestRevertActor_PausedSnapshotAlreadyUploaded(t *testing.T) {
 		paused := newPausedSnapshot(t, 2, memory, "", "pause-snap", "node-1")
 		paused.DurableSnapshot = &ateapipb.SnapshotStorage{Status: completed, Object: &ateapipb.ObjectSnapshot{SnapshotUri: uploaded.String()}}
 		s.LastAssignedGeneration = 2
-		s.Snapshots = []*ateapipb.Snapshot{
-			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", old.Name(), old.String(), completed),
-			paused,
+		s.Snapshots = []*ateapipb.Snapshot{paused}
+		s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+			{Uuid: old.Name(), Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: old.String()}},
 		}
 	})
 
@@ -369,6 +369,7 @@ func TestRevertActor_NoSnapshotToRevertTo(t *testing.T) {
 func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 	const inFlightSnapshotName = "2026-01-01t00-00-00z-abandoned"
 	const earlierPauseSnapshotName = "2025-12-31t00-00-00z-earlier-pause"
+	const pendingGCSnapshotName = "2025-12-30t00-00-00z-pending-gc"
 
 	tests := []struct {
 		name string
@@ -382,9 +383,15 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 		foreignInFlight bool
 		// earlierPause records an older PENDING snapshot: a pause whose upload
 		// atelet never reported before the actor resumed.
-		earlierPause              bool
+		earlierPause bool
+		// pendingGC records a superseded snapshot in PendingGcSnapshots.
+		pendingGC bool
+		// mismatchedPendingGCUUID records PendingGcSnapshots[0].Uuid as a name
+		// that does not match its URI.
+		mismatchedPendingGCUUID   bool
 		wantInFlightDiscarded     bool
 		wantEarlierPauseDiscarded bool
+		wantPendingGCDiscarded    bool
 		wantErr                   bool
 	}{
 		{
@@ -421,11 +428,25 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 			wantEarlierPauseDiscarded: true,
 		},
 		{
+			name:                      "discards pending GC snapshots along with earlier pause uploads",
+			earlierPause:              true,
+			pendingGC:                 true,
+			wantEarlierPauseDiscarded: true,
+			wantPendingGCDiscarded:    true,
+		},
+		{
 			name:            "discards nothing when any in-progress snapshot is not the actor's",
 			inFlight:        inFlightSnapshotName,
 			foreignInFlight: true,
 			earlierPause:    true,
 			wantErr:         true,
+		},
+		{
+			name:                    "discards nothing when a pending GC snapshot UUID does not match its URI",
+			earlierPause:            true,
+			pendingGC:               true,
+			mismatchedPendingGCUUID: true,
+			wantErr:                 true,
 		},
 	}
 
@@ -462,10 +483,24 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 			if tt.earlierPause {
 				objects.PutSnapshot(t, earlierPause, "manifest.json")
 			}
+			pendingGC := mustActorSnapshotURI(t, template, actor, pendingGCSnapshotName)
+			if tt.pendingGC {
+				objects.PutSnapshot(t, pendingGC, "manifest.json")
+			}
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
 				s.LastAssignedGeneration = 1
 				s.Snapshots = []*ateapipb.Snapshot{
 					newDurableSnapshot(1, currentType, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", current.Name(), current.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+				}
+				if tt.pendingGC {
+					s.LastAssignedGeneration++
+					uuid := pendingGC.Name()
+					if tt.mismatchedPendingGCUUID {
+						uuid = "wrong-uuid"
+					}
+					s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+						{Uuid: uuid, Generation: s.LastAssignedGeneration, Object: &ateapipb.ObjectSnapshot{SnapshotUri: pendingGC.String()}},
+					}
 				}
 				if tt.earlierPause {
 					s.LastAssignedGeneration++
@@ -480,13 +515,16 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 			err := w.ensureInProgressSnapshotDiscarded(ctx, actor)
 			if tt.wantErr {
 				if err == nil {
-					t.Fatal("ensureInProgressSnapshotDiscarded = nil, want an error for a snapshot the actor does not own")
+					t.Fatal("ensureInProgressSnapshotDiscarded = nil, want an error for a corrupted snapshot record")
 				}
-				if len(objects.Snapshot(t, inFlight)) == 0 {
+				if tt.inFlight != "" && len(objects.Snapshot(t, inFlight)) == 0 {
 					t.Errorf("snapshot %v was discarded, but it belongs to another owner", inFlight)
 				}
 				if tt.earlierPause && len(objects.Snapshot(t, earlierPause)) == 0 {
 					t.Errorf("snapshot %v was discarded, but a corrupted record must discard nothing", earlierPause)
+				}
+				if tt.pendingGC && len(objects.Snapshot(t, pendingGC)) == 0 {
+					t.Errorf("pending GC snapshot %v was discarded, but a corrupted record must discard nothing", pendingGC)
 				}
 				return
 			}
@@ -509,6 +547,12 @@ func TestEnsureInProgressSnapshotDiscarded(t *testing.T) {
 				discarded := len(objects.Snapshot(t, earlierPause)) == 0
 				if discarded != tt.wantEarlierPauseDiscarded {
 					t.Errorf("earlier pause snapshot discarded = %v, want %v", discarded, tt.wantEarlierPauseDiscarded)
+				}
+			}
+			if tt.pendingGC {
+				discarded := len(objects.Snapshot(t, pendingGC)) == 0
+				if discarded != tt.wantPendingGCDiscarded {
+					t.Errorf("pending GC snapshot discarded = %v, want %v", discarded, tt.wantPendingGCDiscarded)
 				}
 			}
 		})

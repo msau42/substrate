@@ -377,6 +377,27 @@ message Snapshot {
   SandboxRuntime sandbox_runtime = 8;
 }
 
+// PendingGCSnapshot records a superseded actor-owned snapshot whose prefix in
+// object storage still needs to be deleted.
+message PendingGCSnapshot {
+  // uuid is the server-generated unique identifier of the superseded snapshot.
+  //
+  // +k8s:required
+  // +k8s:format=k8s-short-name
+  string uuid = 1;
+
+  // generation is the generation number of the superseded snapshot.
+  //
+  // +k8s:required
+  // +k8s:minimum=1
+  int32 generation = 2;
+
+  // object addresses the snapshot in object storage.
+  //
+  // +k8s:required
+  ObjectSnapshot object = 3;
+}
+
 // SnapshotFidelity orders the state layers a snapshot can hold, lowest to
 // highest. Each level includes the ones below it.
 enum SnapshotFidelity {
@@ -917,6 +938,18 @@ message ActorStatus {
   // +k8s:minimum=0
   // +k8s:update=NoUnset
   int32 last_assigned_generation = 12;
+
+  // pending_gc_snapshots holds superseded actor-owned snapshots whose prefixes
+  // in object storage still need to be deleted. An entry is deleted once a
+  // newer generation is durable, or when RevertActor discards all actor-owned
+  // snapshots.
+  //
+  // +k8s:optional
+  // +k8s:maxItems=256
+  // +k8s:listType=atomic
+  // +k8s:unique=map
+  // +k8s:listMapKey=generation
+  repeated PendingGCSnapshot pending_gc_snapshots = 13;
 }
 
 // ActorCrash describes the failure that moved an Actor to CRASHED.

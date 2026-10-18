@@ -207,19 +207,35 @@ func (w *ActorWorkflow) ensureWorkerDiscarded(ctx context.Context, actorRef reso
 }
 
 // ensureInProgressSnapshotDiscarded deletes the objects of every PENDING
-// durable snapshot on the actor: the one a suspend was partway through writing
-// when the actor was reverted, and any earlier pause's whose upload was never
-// recorded. The revert keeps none of them. atelet's upload of them has already
-// been canceled when ensureWorkerDiscarded terminated the actor.
+// durable snapshot and pending GC snapshot on the actor: the one a suspend was
+// partway through writing when the actor was reverted, and any earlier pause's
+// whose upload was never recorded or superseded. The revert keeps none of them.
+// atelet's upload of them has already been canceled when ensureWorkerDiscarded
+// terminated the actor.
 func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, actor *ateapipb.Actor) (err error) {
 	ctx, done := stepSpan(ctx, "DiscardInProgressSnapshot")
 	defer func() { err = done(err) }()
 
-	var inProgress []string
+	type discardedSnapshot struct {
+		uuid string
+		uri  string
+	}
+	var inProgress []discardedSnapshot
 	for _, snap := range actor.GetStatus().GetSnapshots() {
 		storage := snap.GetDurableSnapshot()
 		if storage.GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING && storage.GetObject().GetSnapshotUri() != "" {
-			inProgress = append(inProgress, storage.GetObject().GetSnapshotUri())
+			inProgress = append(inProgress, discardedSnapshot{
+				uuid: snap.GetUuid(),
+				uri:  storage.GetObject().GetSnapshotUri(),
+			})
+		}
+	}
+	for _, pending := range actor.GetStatus().GetPendingGcSnapshots() {
+		if uri := pending.GetObject().GetSnapshotUri(); uri != "" {
+			inProgress = append(inProgress, discardedSnapshot{
+				uuid: pending.GetUuid(),
+				uri:  uri,
+			})
 		}
 	}
 	switch {
@@ -234,16 +250,19 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 	// Check every URI before deleting any, so a corrupted record deletes nothing.
 	owner := actorSnapshotOwner(actor)
 	prefixes := make([]resources.StoragePrefix, 0, len(inProgress))
-	for _, raw := range inProgress {
-		uri, err := resources.ParseSnapshotURI(raw)
+	for _, snap := range inProgress {
+		uri, err := resources.ParseSnapshotURI(snap.uri)
 		if err != nil {
-			return fmt.Errorf("while parsing the in-progress snapshot %q: %w", raw, err)
+			return fmt.Errorf("while parsing the in-progress snapshot %q: %w", snap.uri, err)
 		}
 		// A suspend records the in-progress URI under the actor's own prefix
 		// before atelet writes the first object, so a URI owned by anything
 		// else is a corrupted record.
 		if !uri.OwnedBy(owner) {
-			return fmt.Errorf("the in-progress snapshot %q is not owned by actor %s", raw, owner)
+			return fmt.Errorf("the in-progress snapshot %q is not owned by actor %s", snap.uri, owner)
+		}
+		if uri.Name() != snap.uuid {
+			return fmt.Errorf("the in-progress snapshot %q has name %q, want uuid %q", snap.uri, uri.Name(), snap.uuid)
 		}
 		prefixes = append(prefixes, uri.Prefix())
 	}
@@ -258,8 +277,7 @@ func (w *ActorWorkflow) ensureInProgressSnapshotDiscarded(ctx context.Context, a
 }
 
 // ensureRevertedFinalized commits SUSPENDED and drops every pointer to the
-// execution that was discarded, in a single update, then releases the
-// external snapshots the update dropped.
+// execution that was discarded, in a single update.
 // It re-reads the actor first so an out-of-band transition is not overwritten,
 // and so the version precondition guards what was actually observed.
 func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef resources.ActorRef) (_ *ateapipb.Actor, err error) {
@@ -278,13 +296,14 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
 		toUpdate.Status.WorkerAssignment = nil
 		toUpdate.Status.AssignedNode = ""
-		// We revert back to the latest durable snapshot, so all local snapshots
-		// and pending durable snapshots are removed.
+		// We revert back to the latest durable snapshot, so all local snapshots,
+		// pending durable snapshots, and pending GC snapshots are removed.
 		// We already cleaned up the node before this in ensureWorkerDiscarded,
-		// and any in-progress durable snapshot in ensureInProgressSnapshotDiscarded.
+		// and all pending snapshots in ensureInProgressSnapshotDiscarded.
 		// Even during revert, we do not decrease LastAssignedGeneration so that we
 		// can keep track of stale snapshots that need to be cleaned up.
-		pruneSnapshots(toUpdate.Status, nil)
+		pruneSnapshots(ctx, toUpdate.Status, nil)
+		toUpdate.Status.PendingGcSnapshots = nil
 		toUpdate.Status.Crash = nil
 		return nil
 	})
@@ -295,6 +314,5 @@ func (w *ActorWorkflow) ensureRevertedFinalized(ctx context.Context, actorRef re
 		return nil, err
 	}
 	logActorStateChanged(ctx, storedActor, ateattr.OperationRevert)
-	w.releaseDroppedSnapshots(ctx, latestActor, storedActor)
 	return storedActor, nil
 }

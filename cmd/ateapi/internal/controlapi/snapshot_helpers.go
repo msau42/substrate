@@ -15,8 +15,16 @@
 package controlapi
 
 import (
+	"context"
+	"log/slog"
+	"slices"
+
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 )
+
+// maxPendingGCSnapshots is the +k8s:maxItems cap on
+// ActorStatus.pending_gc_snapshots.
+const maxPendingGCSnapshots = 256
 
 // findSnapshotByGeneration returns the Snapshot in snapshots with the given
 // generation, or nil if none exists.
@@ -95,28 +103,22 @@ func clearLocalSnapshots(status *ateapipb.ActorStatus) {
 	}
 }
 
-// pruneSnapshots retains only local, the Snapshot whose local checkpoint the
-// actor keeps (nil if it keeps none), and the latest COMPLETED durable
-// snapshot, dropping all other (stale PENDING or superseded COMPLETED)
-// Snapshots. It clears Locality on every Snapshot other than local: it runs
-// in finalize steps that follow an atelet call that deleted the actor's other
-// local checkpoints from the node. Any older COMPLETED durable snapshots are
-// expected to have already been garbage collected (or captured for cleanup)
-// beforehand.
+// pruneSnapshots retains only local (the Snapshot whose local checkpoint the
+// actor keeps, or nil) and the latest COMPLETED durable snapshot, dropping all
+// other Snapshots.
 //
-// Dropping PENDING durable snapshots is safe because:
-//   - On pause finalization, the new snapshot is kept with its PENDING copy.
-//     An earlier pause's PENDING copy is dropped: whatever atelet uploaded of
-//     it stays under the actor's prefix until DeleteActor collects it.
-//   - On revert finalization, ensureInProgressSnapshotDiscarded has already
-//     deleted the objects of every PENDING durable snapshot.
-//   - On suspend finalization, the latest snapshot has already been marked
-//     COMPLETED.
+// It clears Locality on every Snapshot other than local, since callers run
+// after an atelet call that deleted the actor's other local checkpoints from
+// the node.
+//
+// Dropped actor-owned snapshots with an object storage URI are moved into
+// status.PendingGcSnapshots so their prefixes are deleted once a newer
+// generation is durable.
 //
 // status.LastAssignedGeneration is not decreased so that we can keep track of
 // stale snapshots that need to be cleaned up and discarded generation numbers
 // are never reused.
-func pruneSnapshots(status *ateapipb.ActorStatus, local *ateapipb.Snapshot) {
+func pruneSnapshots(ctx context.Context, status *ateapipb.ActorStatus, local *ateapipb.Snapshot) {
 	if status == nil {
 		return
 	}
@@ -128,9 +130,69 @@ func pruneSnapshots(status *ateapipb.ActorStatus, local *ateapipb.Snapshot) {
 		}
 		if snap == local || snap == latestDurable {
 			kept = append(kept, snap)
+			continue
 		}
+		addPendingGCSnapshot(ctx, status, snap)
 	}
 	status.Snapshots = kept
+}
+
+// pruneSupersededDurableSnapshots drops COMPLETED snapshots older than the
+// latest COMPLETED one and records actor-owned ones in
+// status.PendingGcSnapshots. It leaves local and PENDING snapshots intact.
+func pruneSupersededDurableSnapshots(ctx context.Context, status *ateapipb.ActorStatus) {
+	if status == nil {
+		return
+	}
+	latestDurable := findLatestDurableSnapshot(status, ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	if latestDurable == nil {
+		return
+	}
+	kept := status.Snapshots[:0]
+	for _, snap := range status.Snapshots {
+		if snap.GetDurableSnapshot().GetStatus() == ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED &&
+			snap.GetGeneration() < latestDurable.GetGeneration() &&
+			snap.GetLocality() == "" {
+			addPendingGCSnapshot(ctx, status, snap)
+			continue
+		}
+		kept = append(kept, snap)
+	}
+	status.Snapshots = kept
+}
+
+// addPendingGCSnapshot records a dropped actor-owned snapshot in
+// status.PendingGcSnapshots so its object storage prefix can be garbage
+// collected once a newer generation is durable. If the list is already at
+// maxPendingGCSnapshots, the earliest entries are dropped and left in storage
+// until the actor is deleted.
+func addPendingGCSnapshot(ctx context.Context, status *ateapipb.ActorStatus, snap *ateapipb.Snapshot) {
+	if snap.GetOwner() != ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR {
+		return
+	}
+	uri := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
+	if uri == "" {
+		return
+	}
+	for _, existing := range status.GetPendingGcSnapshots() {
+		if existing.GetGeneration() == snap.GetGeneration() {
+			return
+		}
+	}
+	if overflow := len(status.PendingGcSnapshots) - maxPendingGCSnapshots + 1; overflow > 0 {
+		for _, dropped := range status.PendingGcSnapshots[:overflow] {
+			slog.WarnContext(ctx, "Dropping earliest pending GC snapshot because the list is at its limit; its objects stay in storage until the actor is deleted",
+				slog.String("snapshot_uuid", dropped.GetUuid()),
+				slog.Int("generation", int(dropped.GetGeneration())),
+				slog.String("snapshot_uri", dropped.GetObject().GetSnapshotUri()))
+		}
+		status.PendingGcSnapshots = slices.Clone(status.PendingGcSnapshots[overflow:])
+	}
+	status.PendingGcSnapshots = append(status.PendingGcSnapshots, &ateapipb.PendingGCSnapshot{
+		Uuid:       snap.GetUuid(),
+		Generation: snap.GetGeneration(),
+		Object:     &ateapipb.ObjectSnapshot{SnapshotUri: uri},
+	})
 }
 
 // newDurableSnapshot constructs a Snapshot with DurableSnapshot populated.

@@ -659,6 +659,172 @@ func TestSuspendActor_Finalized_CommitsDespiteObjectStoreFailure(t *testing.T) {
 	if len(objects.Snapshot(t, fresh)) == 0 {
 		t.Error("the external snapshot this suspend wrote was collected")
 	}
+	wantPending := []*ateapipb.PendingGCSnapshot{{Uuid: previous.Name(), Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: previous.String()}}}
+	if diff := cmp.Diff(wantPending, stored.GetStatus().GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+		t.Errorf("pending_gc_snapshots mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSuspendActor_Finalized_CollectsPendingGCSnapshotsBelowLatestDurable
+// verifies that finalize deletes pending GC snapshots older than the latest
+// durable generation when their UUID matches their URI, and leaves mismatched
+// or newer pending GC snapshots untouched.
+func TestSuspendActor_Finalized_CollectsPendingGCSnapshotsBelowLatestDurable(t *testing.T) {
+	const node = "node-1"
+	memory := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	completed := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	pending := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	template := seedSubstrateTemplate(t, ctx, persistence, "sub-tmpl")
+	w, atelet, objects := newWireFinalizeWorkflow(t, persistence)
+
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "team-a", Name: "sub-tmpl"},
+		Status: &ateapipb.ActorStatus{
+			State:            ateapipb.ActorState_ACTOR_STATE_SUSPENDING,
+			AssignedNode:     node,
+			WorkerAssignment: wireTestAssignment(),
+		},
+	})
+
+	snap1 := mustActorSnapshotURI(t, template, actor, "snap-1")
+	snap2 := mustActorSnapshotURI(t, template, actor, "snap-2")
+	snap3 := mustActorSnapshotURI(t, template, actor, "snap-3")
+	snap4 := mustActorSnapshotURI(t, template, actor, "snap-4")
+	snap5 := mustActorSnapshotURI(t, template, actor, "snap-5")
+	snap6 := mustActorSnapshotURI(t, template, actor, "snap-6")
+	for _, uri := range []resources.SnapshotURI{snap1, snap2, snap3, snap4, snap5} {
+		objects.PutSnapshot(t, uri, "manifest.json")
+	}
+
+	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
+		local5 := newDurableSnapshot(5, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap5.Name(), snap5.String(), pending)
+		local5.Locality = node
+		s.LastAssignedGeneration = 6
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap1.Name(), snap1.String(), completed),
+			newDurableSnapshot(4, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap4.Name(), snap4.String(), pending),
+			local5,
+			newDurableSnapshot(6, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap6.Name(), snap6.String(), pending),
+		}
+		s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+			{Uuid: snap2.Name(), Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap2.String()}},
+			{Uuid: "wrong-uuid", Generation: 3, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap3.String()}},
+		}
+	})
+	atelet.checkpointState = &ateletpb.ActorSnapshotState{LatestDurable: &ateletpb.SnapshotReport{Snapshot: &ateletpb.Snapshot{
+		SnapshotUuid: snap4.Name(),
+		Generation:   4,
+		Fidelity:     ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY,
+		Object:       &ateletpb.ObjectStorage{SnapshotUri: snap4.String()},
+	}}}
+
+	stored, err := w.SuspendActor(ctx, actorRef, suspendAsync)
+	if err != nil {
+		t.Fatalf("SuspendActor: %v", err)
+	}
+	// Generation 4 is now latestDurable, so generations 1 and 2 are collected.
+	// Generation 3 stays because its UUID does not match its URI, and generation
+	// 5 (> 4) stays because it is newer than latestDurable.
+	for _, collected := range []resources.SnapshotURI{snap1, snap2} {
+		if len(objects.Snapshot(t, collected)) != 0 {
+			t.Errorf("snapshot %v was not collected", collected)
+		}
+	}
+	for _, kept := range []resources.SnapshotURI{snap3, snap4, snap5} {
+		if len(objects.Snapshot(t, kept)) == 0 {
+			t.Errorf("snapshot %v was collected, want kept", kept)
+		}
+	}
+	wantPending := []*ateapipb.PendingGCSnapshot{
+		{Uuid: "wrong-uuid", Generation: 3, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap3.String()}},
+		{Uuid: snap5.Name(), Generation: 5, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap5.String()}},
+	}
+	if diff := cmp.Diff(wantPending, stored.GetStatus().GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+		t.Errorf("pending_gc_snapshots mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestSuspendActor_PendingGCCapForcesSyncSuspend verifies that an async suspend
+// switches to sync when PendingGcSnapshots reaches syncSuspendPendingGCThreshold,
+// so the update never exceeds maxPendingGCSnapshots and the sync suspend drains
+// the list.
+func TestSuspendActor_PendingGCCapForcesSyncSuspend(t *testing.T) {
+	const node = "node-1"
+	memory := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	completed := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	pending := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	template := seedSubstrateTemplate(t, ctx, persistence, "sub-tmpl")
+	w, atelet, objects := newWireFinalizeWorkflow(t, persistence)
+
+	actorRef := resources.ActorRef{Atespace: "team-a", Name: "actor-1"}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata:      &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		ActorTemplate: &ateapipb.ObjectRef{Atespace: "team-a", Name: "sub-tmpl"},
+		Status: &ateapipb.ActorStatus{
+			State:            ateapipb.ActorState_ACTOR_STATE_RUNNING,
+			AssignedNode:     node,
+			WorkerAssignment: wireTestAssignment(),
+		},
+	})
+	seedWireWorker(t, ctx, persistence, assignmentOf(actor))
+
+	durableGen1 := mustActorSnapshotURI(t, template, actor, "snap-1")
+	objects.PutSnapshot(t, durableGen1, "manifest.json")
+	pendingGC := make([]*ateapipb.PendingGCSnapshot, 0, syncSuspendPendingGCThreshold)
+	var gen int32 = 1
+	for i := range syncSuspendPendingGCThreshold {
+		gen++
+		uri := mustActorSnapshotURI(t, template, actor, fmt.Sprintf("pending-%d", i+1))
+		objects.PutSnapshot(t, uri, "manifest.json")
+		pendingGC = append(pendingGC, &ateapipb.PendingGCSnapshot{
+			Uuid:       uri.Name(),
+			Generation: gen,
+			Object:     &ateapipb.ObjectSnapshot{SnapshotUri: uri.String()},
+		})
+	}
+	gen++
+	localLatest := mustActorSnapshotURI(t, template, actor, "local-latest")
+	objects.PutSnapshot(t, localLatest, "manifest.json")
+
+	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
+		localSnap := newDurableSnapshot(gen, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", localLatest.Name(), localLatest.String(), pending)
+		localSnap.Locality = node
+		s.LastAssignedGeneration = gen
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", durableGen1.Name(), durableGen1.String(), completed),
+			localSnap,
+		}
+		s.PendingGcSnapshots = pendingGC
+	})
+
+	stored, err := w.SuspendActor(ctx, actorRef, suspendAsync)
+	if err != nil {
+		t.Fatalf("SuspendActor: %v", err)
+	}
+	if got := atelet.checkpointRequest().GetUploadConfig().GetMode(); got != ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE {
+		t.Errorf("CheckpointRequest.UploadConfig.Mode = %v, want UPLOAD_MODE_IMMEDIATE when pending_gc_snapshots hits threshold", got)
+	}
+	gotSnap := snapshotAtLatestGeneration(stored.GetStatus())
+	if got := gotSnap.GetDurableSnapshot().GetStatus(); got != completed {
+		t.Errorf("new snapshot status = %v, want COMPLETED", got)
+	}
+	if got := len(stored.GetStatus().GetPendingGcSnapshots()); got != 0 {
+		t.Errorf("len(pending_gc_snapshots) = %d, want 0 after forced sync suspend", got)
+	}
+	if len(objects.Snapshot(t, durableGen1)) != 0 {
+		t.Error("superseded durable snapshot was not collected")
+	}
+	if len(objects.Snapshot(t, localLatest)) != 0 {
+		t.Error("superseded local snapshot was not collected")
+	}
 }
 
 // TestSuspendActor_Finalized_KeepsReplacedSnapshotOnConflict verifies that a

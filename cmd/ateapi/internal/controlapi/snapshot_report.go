@@ -37,9 +37,9 @@ func (s *RPCService) ApplyActorSnapshotState(ctx context.Context, actorRef resou
 }
 
 // ApplyReportedSnapshotState applies a report from the atelet on node to the
-// Actor. It holds the Actor's lease and applies reports only to a SUSPENDED or
-// RUNNING Actor, so a report never interleaves with a workflow. A report that
-// changes nothing writes nothing.
+// Actor, then collects any pending GC snapshots older than the latest durable
+// one. It holds the Actor's lease and applies reports only to a SUSPENDED or
+// RUNNING Actor, so a report never interleaves with a workflow.
 func (w *ActorWorkflow) ApplyReportedSnapshotState(ctx context.Context, actorRef resources.ActorRef, actorUID, node string, state *ateapipb.ActorSnapshotState) error {
 	ctx = preview.ContextWithOptIn(ctx)
 	// Check before taking the lease, so an atelet can't hold the lease of an
@@ -75,17 +75,20 @@ func (w *ActorWorkflow) ApplyReportedSnapshotState(ctx context.Context, actorRef
 		return err
 	}
 	if proto.Equal(applied.GetStatus(), before.GetStatus()) {
+		w.collectPendingGCSnapshots(leaseCtx, actorRef, before)
 		return nil
 	}
-	if _, err := w.store.UpdateActor(leaseCtx, actorRef, store.PreconditionFrom(before), func(toUpdate *ateapipb.Actor) error {
+	stored, err := w.store.UpdateActor(leaseCtx, actorRef, store.PreconditionFrom(before), func(toUpdate *ateapipb.Actor) error {
 		toUpdate.Status = applied.GetStatus()
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		if errors.Is(err, store.ErrVersionConflict) {
 			return apierror.Aborted("concurrent update conflict, please retry")
 		}
 		return err
 	}
+	w.collectPendingGCSnapshots(leaseCtx, actorRef, stored)
 	return nil
 }
 
@@ -209,6 +212,7 @@ func applyLatestDurable(ctx context.Context, status *ateapipb.ActorStatus, repor
 	}
 	snap.Fidelity = reported.GetFidelity()
 	snap.DurableSnapshot.Status = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	pruneSupersededDurableSnapshots(ctx, status)
 	return nil
 }
 

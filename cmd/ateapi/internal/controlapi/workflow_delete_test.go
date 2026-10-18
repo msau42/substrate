@@ -206,7 +206,10 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 		tagOwnedSnapshot bool
 		// inFlight, when set, names a snapshot an abandoned suspend left
 		// behind. It must always be collected by the delete.
-		inFlight            string
+		inFlight string
+		// pendingGC, when set, records a pending GC snapshot URI so the delete
+		// discovers the actor's prefix from PendingGcSnapshots.
+		pendingGC           string
 		wantCurrentReleased bool
 	}{
 		{
@@ -229,6 +232,12 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 			name:                "collects an in-flight external snapshot even while borrowing",
 			tagOwnedSnapshot:    true,
 			inFlight:            inFlightSnapshotName,
+			wantCurrentReleased: false,
+		},
+		{
+			name:                "collects pending GC snapshots when borrowing a tag snapshot",
+			tagOwnedSnapshot:    true,
+			pendingGC:           inFlightSnapshotName,
 			wantCurrentReleased: false,
 		},
 	}
@@ -256,14 +265,23 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 			}
 			objects.PutSnapshot(t, current, "manifest.json")
 			inFlight := mustActorSnapshotURI(t, template, actor, inFlightSnapshotName)
-			if tt.inFlight != "" {
+			if tt.inFlight != "" || tt.pendingGC != "" {
 				objects.PutSnapshot(t, inFlight, "manifest.json")
 			}
 			actor = mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
-				s.LastAssignedGeneration = 2
+				s.LastAssignedGeneration = 1
 				s.Snapshots = []*ateapipb.Snapshot{
 					newDurableSnapshot(1, currentType, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", current.Name(), current.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
-					newDurableSnapshot(2, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", inFlight.Name(), inFlight.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING),
+				}
+				if tt.inFlight != "" {
+					s.LastAssignedGeneration = 2
+					s.Snapshots = append(s.Snapshots, newDurableSnapshot(2, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "", inFlight.Name(), inFlight.String(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING))
+				}
+				if tt.pendingGC != "" {
+					s.LastAssignedGeneration = 2
+					s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+						{Uuid: inFlight.Name(), Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: inFlight.String()}},
+					}
 				}
 			})
 
@@ -273,7 +291,7 @@ func TestEnsureExternalSnapshotsReleased(t *testing.T) {
 			if released := len(objects.Snapshot(t, current)) == 0; released != tt.wantCurrentReleased {
 				t.Errorf("current external snapshot released = %v, want %v", released, tt.wantCurrentReleased)
 			}
-			if tt.inFlight != "" && len(objects.Snapshot(t, inFlight)) != 0 {
+			if (tt.inFlight != "" || tt.pendingGC != "") && len(objects.Snapshot(t, inFlight)) != 0 {
 				t.Errorf("in-flight external snapshot %v was not released", inFlight)
 			}
 		})

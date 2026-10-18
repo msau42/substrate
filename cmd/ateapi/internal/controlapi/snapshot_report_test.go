@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -517,6 +518,99 @@ func TestApplyReportedSnapshotState(t *testing.T) {
 		t.Fatalf("repeated ApplyReportedSnapshotState() failed: %v", err)
 	}
 	assertUnwritten(t)
+}
+
+func TestApplyReportedSnapshotState_CollectsPendingGCSnapshots(t *testing.T) {
+	ctx := context.Background()
+	persistence := newTestPersistence(t)
+	w, objects := newFinalizeWorkflow(persistence)
+
+	actorRef := resources.ActorRef{Atespace: reportAtespace, Name: "actor-1"}
+	actor := storetest.MustCreateActor(t, ctx, persistence, &ateapipb.Actor{
+		Metadata: &ateapipb.ResourceMetadata{Atespace: actorRef.Atespace, Name: actorRef.Name},
+		Status: &ateapipb.ActorStatus{
+			State:        ateapipb.ActorState_ACTOR_STATE_SUSPENDED,
+			AssignedNode: reportNode,
+		},
+	})
+	uid := actor.GetMetadata().GetUid()
+	uriOf := func(gen int32) resources.SnapshotURI {
+		u, err := resources.NewActorSnapshotURI("gs://snapshots", reportAtespace, uid, snapName(gen))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+
+	snap1 := uriOf(1)
+	snap2 := uriOf(2)
+	snap3 := uriOf(3)
+	snap4 := uriOf(4)
+	for _, u := range []resources.SnapshotURI{snap1, snap2, snap3, snap4} {
+		objects.PutSnapshot(t, u, "manifest.json")
+	}
+
+	memory := ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY
+	completed := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
+	pending := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING
+	mustUpdateActorStatus(t, ctx, persistence, actor, func(s *ateapipb.ActorStatus) {
+		local4 := newDurableSnapshot(4, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap4.Name(), snap4.String(), pending)
+		local4.Locality = reportNode
+		s.LastAssignedGeneration = 4
+		s.Snapshots = []*ateapipb.Snapshot{
+			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap1.Name(), snap1.String(), completed),
+			newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, memory, "", snap3.Name(), snap3.String(), pending),
+			local4,
+		}
+		s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+			{Uuid: snap2.Name(), Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap2.String()}},
+		}
+	})
+
+	// Fail deleting snap-2 on the first report: snap-1 (moved to PendingGcSnapshots
+	// when snap-3 becomes COMPLETED) is collected, snap-2 stays for retry, and
+	// snap-4 (> 3) is untouched.
+	objects.OnDelete = func(_, key string) error {
+		if strings.Contains(key, snap2.Name()) {
+			return errObjectStore
+		}
+		return nil
+	}
+	state := &ateapipb.ActorSnapshotState{
+		LatestLocal:   reportedAt(t, 4, snap4.String()),
+		LatestDurable: reportedAt(t, 3, snap3.String()),
+	}
+	if err := w.ApplyReportedSnapshotState(ctx, actorRef, uid, reportNode, state); err != nil {
+		t.Fatalf("ApplyReportedSnapshotState() failed: %v", err)
+	}
+	if len(objects.Snapshot(t, snap1)) != 0 {
+		t.Error("superseded COMPLETED snapshot snap-1 was not collected")
+	}
+	if len(objects.Snapshot(t, snap2)) == 0 {
+		t.Error("snap-2 was collected despite object store error")
+	}
+	if len(objects.Snapshot(t, snap3)) == 0 {
+		t.Error("latest durable snapshot snap-3 was collected")
+	}
+
+	got := mustReadActor(t, ctx, persistence, actorRef)
+	wantPending := []*ateapipb.PendingGCSnapshot{{Uuid: snap2.Name(), Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: snap2.String()}}}
+	if diff := cmp.Diff(wantPending, got.GetStatus().GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+		t.Errorf("pending_gc_snapshots after partial failure mismatch (-want +got):\n%s", diff)
+	}
+
+	// A repeat report where Status does not change still retries PendingGcSnapshots.
+	objects.OnDelete = nil
+	if err := w.ApplyReportedSnapshotState(ctx, actorRef, uid, reportNode, state); err != nil {
+		t.Fatalf("repeated ApplyReportedSnapshotState() failed: %v", err)
+	}
+	if len(objects.Snapshot(t, snap2)) != 0 {
+		t.Error("snap-2 was not collected on retry")
+	}
+	got = mustReadActor(t, ctx, persistence, actorRef)
+	if len(got.GetStatus().GetPendingGcSnapshots()) != 0 {
+		t.Errorf("pending_gc_snapshots after retry = %v, want empty", got.GetStatus().GetPendingGcSnapshots())
+	}
 }
 
 func TestActorOnNode(t *testing.T) {

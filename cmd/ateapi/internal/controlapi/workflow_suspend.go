@@ -46,6 +46,11 @@ const (
 	// pending, pinned to that node until atelet uploads it in the background
 	// and the detach report unpins it.
 	suspendAsync
+
+	// syncSuspendPendingGCThreshold switches an async suspend to sync before
+	// pending_gc_snapshots can hit maxPendingGCSnapshots. A single suspend can
+	// add at most two entries (an older durable and an older local snapshot).
+	syncSuspendPendingGCThreshold = maxPendingGCSnapshots - 2
 )
 
 // suspendModeFromOptions maps a SuspendActor request's options to the
@@ -114,6 +119,13 @@ func (w *ActorWorkflow) SuspendActor(ctx context.Context, actorRef resources.Act
 		return nil, err
 	}
 	actor = marked
+	if mode == suspendAsync && len(actor.GetStatus().GetPendingGcSnapshots()) >= syncSuspendPendingGCThreshold {
+		slog.WarnContext(leaseCtx, "Switching async suspend to sync because pending GC snapshots reached the threshold",
+			slog.Any("actor", actorRef),
+			slog.Int("pending_gc_snapshots", len(actor.GetStatus().GetPendingGcSnapshots())),
+			slog.Int("threshold", syncSuspendPendingGCThreshold))
+		mode = suspendSync
+	}
 	wireFidelity, ateletState, err = w.ensureAteletSuspended(leaseCtx, actorRef, actor, actorTemplate, mode)
 	if err != nil {
 		return nil, err
@@ -387,20 +399,19 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 		toUpdate.Status.State = ateapipb.ActorState_ACTOR_STATE_SUSPENDED
 		// The precondition makes toUpdate the version applied was built from.
 		toUpdate.Status.Snapshots = applied.GetSnapshots()
+		toUpdate.Status.PendingGcSnapshots = applied.GetPendingGcSnapshots()
 		snap := snapshotAtLatestGeneration(toUpdate.Status)
 		switch mode {
 		case suspendSync:
 			snap.GetDurableSnapshot().Status = ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
 			// Remove all local snapshots since they are superseded by the new durable snapshot.
-			// TODO: This will change when an async suspend uploads its snapshot
-			// and both local and durable snapshots are kept.
-			pruneSnapshots(toUpdate.Status, nil)
+			pruneSnapshots(ctx, toUpdate.Status, nil)
 			toUpdate.Status.AssignedNode = ""
 		case suspendAsync:
 			// Record the node locality of the local checkpoint and clear older local checkpoints.
 			// AssignedNode is kept: a paused actor resumes on that node.
 			snap.Locality = toUpdate.GetStatus().GetAssignedNode()
-			pruneSnapshots(toUpdate.Status, snap)
+			pruneSnapshots(ctx, toUpdate.Status, snap)
 		}
 		toUpdate.Status.WorkerAssignment = nil
 		return nil
@@ -414,49 +425,72 @@ func (w *ActorWorkflow) ensureSuspendedFinalized(ctx context.Context, actorRef r
 	}
 	logActorStateChanged(ctx, storedActor, ateattr.OperationSuspend)
 
-	// 3. Release the external snapshots this suspend replaced. Best-effort: the
-	// new snapshot is committed and the worker is gone, so failing the
-	// workflow here would only strand the actor.
+	// 3. Collect pending GC snapshots older than the latest durable one.
+	// Best-effort: the new snapshot is committed and the worker is gone, so
+	// failing the workflow here would only strand the actor.
 	t = time.Now()
-	w.releaseDroppedSnapshots(ctx, latestActor, storedActor)
+	storedActor = w.collectPendingGCSnapshots(ctx, actorRef, storedActor)
 	dReleaseSnapshot = time.Since(t)
 	return storedActor, nil
 }
 
-// releaseDroppedSnapshots releases each external snapshot that before records
-// as COMPLETED and after doesn't. A failure is only logged, and leaves the
-// snapshot's objects in storage until the actor is deleted, which removes its
-// whole prefix. An upload atelet reports can make a newer snapshot COMPLETED
-// outside any workflow, so the next one can drop more than one.
-func (w *ActorWorkflow) releaseDroppedSnapshots(ctx context.Context, before, after *ateapipb.Actor) {
-	completed := ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED
-	kept := map[string]bool{}
-	for _, snap := range after.GetStatus().GetSnapshots() {
-		kept[snap.GetDurableSnapshot().GetObject().GetSnapshotUri()] = true
+// collectPendingGCSnapshots deletes every entry in actor.Status.PendingGcSnapshots
+// older than the latest COMPLETED durable snapshot, then removes the deleted
+// entries from the store. Entries at or above the latest durable generation stay
+// until a newer snapshot becomes durable. A failure to delete an entry is logged
+// and leaves it in PendingGcSnapshots for the next suspend or snapshot report.
+func (w *ActorWorkflow) collectPendingGCSnapshots(ctx context.Context, actorRef resources.ActorRef, actor *ateapipb.Actor) *ateapipb.Actor {
+	latestDurable := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+	if latestDurable == nil || len(actor.GetStatus().GetPendingGcSnapshots()) == 0 {
+		return actor
 	}
-	for _, snap := range before.GetStatus().GetSnapshots() {
-		dropped := snap.GetDurableSnapshot().GetObject().GetSnapshotUri()
-		if snap.GetDurableSnapshot().GetStatus() != completed || kept[dropped] {
+	deleted := map[int32]string{}
+	for _, pending := range actor.GetStatus().GetPendingGcSnapshots() {
+		if pending.GetGeneration() >= latestDurable.GetGeneration() {
 			continue
 		}
-		if err := w.releaseReplacedSnapshot(ctx, before, dropped); err != nil {
-			slog.WarnContext(ctx, "Failed to release an external snapshot the actor no longer records; its objects are left in storage until the actor is deleted",
-				slog.Any("actor", resources.ActorRefFromActor(before)),
-				slog.String("snapshot_uri", dropped),
+		if err := w.releaseReplacedSnapshot(ctx, actor, pending); err != nil {
+			slog.WarnContext(ctx, "Failed to release a pending GC snapshot; its objects are left in storage for a later GC attempt",
+				slog.Any("actor", actorRef),
+				slog.String("snapshot_uuid", pending.GetUuid()),
+				slog.Int("generation", int(pending.GetGeneration())),
+				slog.String("snapshot_uri", pending.GetObject().GetSnapshotUri()),
 				slog.String("err", err.Error()))
+			continue
 		}
+		deleted[pending.GetGeneration()] = pending.GetUuid()
 	}
+	if len(deleted) == 0 {
+		return actor
+	}
+	updated, err := w.store.UpdateActor(ctx, actorRef, store.PreconditionFrom(actor), func(toUpdate *ateapipb.Actor) error {
+		var kept []*ateapipb.PendingGCSnapshot
+		for _, pending := range toUpdate.Status.PendingGcSnapshots {
+			if wantUUID, ok := deleted[pending.GetGeneration()]; !ok || pending.GetUuid() != wantUUID {
+				kept = append(kept, pending)
+			}
+		}
+		toUpdate.Status.PendingGcSnapshots = kept
+		return nil
+	})
+	if err != nil {
+		slog.WarnContext(ctx, "Failed to clear collected pending GC snapshots from actor status",
+			slog.Any("actor", actorRef),
+			slog.String("err", err.Error()))
+		return actor
+	}
+	return updated
 }
 
-// releaseReplacedSnapshot releases previous, the URI of an external snapshot
-// the actor held before a suspend or revert dropped it. actor is the record as
-// it was before that workflow committed.
-// An actor that borrowed its current snapshot from a tag releases nothing —
+// releaseReplacedSnapshot releases pending, an actor-owned external snapshot
+// that a newer durable snapshot superseded.
+// An actor that borrowed its snapshot from a tag releases nothing —
 // the snapshot lives under the tag's prefix, and the tag outlives the actor.
-func (w *ActorWorkflow) releaseReplacedSnapshot(ctx context.Context, actor *ateapipb.Actor, previous string) (err error) {
+func (w *ActorWorkflow) releaseReplacedSnapshot(ctx context.Context, actor *ateapipb.Actor, pending *ateapipb.PendingGCSnapshot) (err error) {
 	ctx, done := stepSpan(ctx, "ReleaseReplacedSnapshot")
 	defer func() { err = done(err) }()
 
+	previous := pending.GetObject().GetSnapshotUri()
 	switch {
 	case w.objectStorePlugin == nil:
 		markSkipped(ctx, "no object store configured")
@@ -472,6 +506,9 @@ func (w *ActorWorkflow) releaseReplacedSnapshot(ctx context.Context, actor *atea
 	if !uri.OwnedBy(actorSnapshotOwner(actor)) {
 		markSkipped(ctx, "the replaced external snapshot is owned by another resource")
 		return nil
+	}
+	if uri.Name() != pending.GetUuid() {
+		return fmt.Errorf("replaced external snapshot %q has name %q, want uuid %q", previous, uri.Name(), pending.GetUuid())
 	}
 	return w.cleanupSnapshot(ctx, uri.Prefix())
 }

@@ -429,6 +429,12 @@ func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix,
 	// recorded before atelet uploads the first object.
 	inProgressSnap := findLatestDurableSnapshot(actor.GetStatus(), ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING)
 	inProgress := inProgressSnap.GetDurableSnapshot().GetObject().GetSnapshotUri()
+	wantUUID := inProgressSnap.GetUuid()
+	if inProgress == "" && len(actor.GetStatus().GetPendingGcSnapshots()) > 0 {
+		first := actor.GetStatus().GetPendingGcSnapshots()[0]
+		inProgress = first.GetObject().GetSnapshotUri()
+		wantUUID = first.GetUuid()
+	}
 	if inProgress == "" {
 		return resources.StoragePrefix{}, nil
 	}
@@ -440,6 +446,9 @@ func actorSnapshotStoragePrefix(actor *ateapipb.Actor) (resources.StoragePrefix,
 		// Corrupted record. This should never happen. An in-progress snapshot should
 		// always be owned by the actor that holds it.
 		return resources.StoragePrefix{}, fmt.Errorf("the in-progress snapshot %q is not owned by actor %s", inProgress, actorOwner)
+	}
+	if uri.Name() != wantUUID {
+		return resources.StoragePrefix{}, fmt.Errorf("the in-progress snapshot %q has name %q, want uuid %q", inProgress, uri.Name(), wantUUID)
 	}
 	return uri.OwnerPrefix(), nil
 }

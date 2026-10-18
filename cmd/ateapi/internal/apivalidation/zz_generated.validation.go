@@ -1025,6 +1025,56 @@ func Validate_ActorStatus(
 		errs = append(errs, fn(fldPath.Child("last_assigned_generation"), &obj.LastAssignedGeneration, oldVal, oldObj != nil)...)
 	}
 
+	{ // field ateapipb.ActorStatus.PendingGcSnapshots
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj []*ateapipb.PendingGCSnapshot,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.PtrSliceNoNils[ateapipb.PendingGCSnapshot](ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if e := validate.MaxItems(ctx, op, fldPath, obj, oldObj, 256).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if e := validate.OptionalSlice(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// lists with map semantics require unique keys
+			if e := validate.PtrSliceUnique(ctx, op, fldPath, obj, oldObj,
+				func(a *ateapipb.PendingGCSnapshot, b *ateapipb.PendingGCSnapshot) bool {
+					return a.Generation == b.Generation
+				}); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			// iterate the list and call the type's validation function
+			if e := validate.EachPtrSliceVal(ctx, op, fldPath, obj, oldObj,
+				func(a *ateapipb.PendingGCSnapshot, b *ateapipb.PendingGCSnapshot) bool {
+					return a.Generation == b.Generation
+				}, ateDeepEqual, Validate_PendingGCSnapshot); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.ActorStatus) []*ateapipb.PendingGCSnapshot {
+				return oldObj.PendingGcSnapshots
+			})
+		errs = append(errs, fn(fldPath.Child("pending_gc_snapshots"), obj.PendingGcSnapshots, oldVal, oldObj != nil)...)
+	}
+
 	return errs
 }
 
@@ -6312,6 +6362,110 @@ func Validate_ObjectSnapshot(
 				return &oldObj.SnapshotUri
 			})
 		errs = append(errs, fn(fldPath.Child("snapshot_uri"), &obj.SnapshotUri, oldVal, oldObj != nil)...)
+	}
+
+	return errs
+}
+
+// Validate_PendingGCSnapshot validates an instance of PendingGCSnapshot according
+// to declarative validation rules in the API schema.
+func Validate_PendingGCSnapshot(
+	ctx context.Context, op operation.Operation, fldPath *field.Path,
+	obj, oldObj *ateapipb.PendingGCSnapshot) (errs field.ErrorList) {
+
+	{ // field ateapipb.PendingGCSnapshot.Uuid
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *string,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.ShortName(ctx, op, fldPath, obj, oldObj); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.PendingGCSnapshot) *string {
+				return &oldObj.Uuid
+			})
+		errs = append(errs, fn(fldPath.Child("uuid"), &obj.Uuid, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.PendingGCSnapshot.Generation
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *int32,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if obj == oldObj || (obj != nil && oldObj != nil && *obj == *oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredValue(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			if e := validate.Minimum(ctx, op, fldPath, obj, oldObj, 1); len(e) != 0 {
+				errs = append(errs, e...)
+			}
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.PendingGCSnapshot) *int32 {
+				return &oldObj.Generation
+			})
+		errs = append(errs, fn(fldPath.Child("generation"), &obj.Generation, oldVal, oldObj != nil)...)
+	}
+
+	{ // field ateapipb.PendingGCSnapshot.Object
+		fn := func(
+			fldPath *field.Path,
+			obj, oldObj *ateapipb.ObjectSnapshot,
+			oldValueCorrelated bool) (errs field.ErrorList) {
+			// don't revalidate unchanged data
+			if oldValueCorrelated && op.Type == operation.Update {
+				if ateDeepEqual(obj, oldObj) {
+					return nil
+				}
+			}
+			// call field-attached validations
+			earlyReturn := false
+			if e := validate.RequiredPointer(ctx, op, fldPath, obj, oldObj).MarkShortCircuit(); len(e) != 0 {
+				errs = append(errs, e...)
+				earlyReturn = true
+			}
+			if earlyReturn {
+				return // do not proceed
+			}
+			// call the type's validation function
+			errs = append(errs, Validate_ObjectSnapshot(ctx, op, fldPath, obj, oldObj)...)
+			return
+		}
+		oldVal := safe.Field(oldObj,
+			func(oldObj *ateapipb.PendingGCSnapshot) *ateapipb.ObjectSnapshot {
+				return oldObj.Object
+			})
+		errs = append(errs, fn(fldPath.Child("object"), obj.Object, oldVal, oldObj != nil)...)
 	}
 
 	return errs

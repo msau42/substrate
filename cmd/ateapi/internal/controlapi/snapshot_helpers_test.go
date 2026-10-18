@@ -15,6 +15,8 @@
 package controlapi
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -88,9 +90,10 @@ func TestFindLatestDurableAndLocalSnapshots(t *testing.T) {
 }
 
 func TestSnapshotPruningHelpers(t *testing.T) {
+	ctx := context.Background()
 	// Should not panic on nil status.
 	clearLocalSnapshots(nil)
-	pruneSnapshots(nil, nil)
+	pruneSnapshots(ctx, nil, nil)
 
 	t.Run("clearLocalSnapshots clears locality without dropping snapshots", func(t *testing.T) {
 		localGen1 := newPausedSnapshot(t, 1, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-1", "node-1")
@@ -114,6 +117,7 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 		completedGen1 := newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
 		completedGen1.Locality = "node-1"
 		localGen2 := newPausedSnapshot(t, 2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-2", "node-2")
+		localGen2URI := localGen2.GetDurableSnapshot().GetObject().GetSnapshotUri()
 		localGen3 := newPausedSnapshot(t, 3, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-3", "")
 
 		status := &ateapipb.ActorStatus{
@@ -122,7 +126,7 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 		}
 
 		localGen3.Locality = "node-3"
-		pruneSnapshots(status, localGen3)
+		pruneSnapshots(ctx, status, localGen3)
 
 		want := []*ateapipb.Snapshot{
 			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
@@ -130,6 +134,10 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 		}
 		if diff := cmp.Diff(want, status.GetSnapshots(), protocmp.Transform()); diff != "" {
 			t.Errorf("status.Snapshots mismatch (-want +got):\n%s", diff)
+		}
+		wantPending := []*ateapipb.PendingGCSnapshot{{Uuid: "local-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: localGen2URI}}}
+		if diff := cmp.Diff(wantPending, status.GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.PendingGcSnapshots mismatch (-want +got):\n%s", diff)
 		}
 		if status.GetLastAssignedGeneration() != 3 {
 			t.Errorf("LastAssignedGeneration = %d, want 3", status.GetLastAssignedGeneration())
@@ -148,7 +156,7 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 			},
 		}
 
-		pruneSnapshots(status, local)
+		pruneSnapshots(ctx, status, local)
 
 		want := []*ateapipb.Snapshot{
 			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
@@ -156,6 +164,10 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 		}
 		if diff := cmp.Diff(want, status.GetSnapshots(), protocmp.Transform()); diff != "" {
 			t.Errorf("status.Snapshots mismatch (-want +got):\n%s", diff)
+		}
+		wantPending := []*ateapipb.PendingGCSnapshot{{Uuid: "uuid-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://b/snap-2"}}}
+		if diff := cmp.Diff(wantPending, status.GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.PendingGcSnapshots mismatch (-want +got):\n%s", diff)
 		}
 		if pendingWithLocality.GetLocality() != "" {
 			t.Errorf("dropped PENDING snapshot Locality = %q, want cleared", pendingWithLocality.GetLocality())
@@ -165,15 +177,16 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 	t.Run("revert flow: pruneSnapshots drops all PENDING snapshots and retains latest COMPLETED", func(t *testing.T) {
 		completedWithLocality := newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
 		completedWithLocality.Locality = "node-1"
+		localGen2 := newPausedSnapshot(t, 2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-2", "node-2")
 		status := &ateapipb.ActorStatus{
 			Snapshots: []*ateapipb.Snapshot{
 				completedWithLocality,
-				newPausedSnapshot(t, 2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-2", "node-2"),
+				localGen2,
 				newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-3", "gs://b/snap-3", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_PENDING),
 			},
 		}
 
-		pruneSnapshots(status, nil)
+		pruneSnapshots(ctx, status, nil)
 
 		want := []*ateapipb.Snapshot{
 			newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
@@ -181,25 +194,113 @@ func TestSnapshotPruningHelpers(t *testing.T) {
 		if diff := cmp.Diff(want, status.GetSnapshots(), protocmp.Transform()); diff != "" {
 			t.Errorf("status.Snapshots mismatch (-want +got):\n%s", diff)
 		}
+		wantPending := []*ateapipb.PendingGCSnapshot{
+			{Uuid: "local-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: localGen2.GetDurableSnapshot().GetObject().GetSnapshotUri()}},
+			{Uuid: "uuid-3", Generation: 3, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://b/snap-3"}},
+		}
+		if diff := cmp.Diff(wantPending, status.GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.PendingGcSnapshots mismatch (-want +got):\n%s", diff)
+		}
 	})
 
-	t.Run("suspend flow: pruneSnapshots drops older COMPLETED and PENDING snapshots", func(t *testing.T) {
+	t.Run("suspend flow: pruneSnapshots drops older COMPLETED and PENDING snapshots and skips tag-owned", func(t *testing.T) {
+		localGen2 := newPausedSnapshot(t, 2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-2", "node-1")
 		status := &ateapipb.ActorStatus{
 			Snapshots: []*ateapipb.Snapshot{
+				newDurableSnapshot(0, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "tag-0", "gs://b/tag-0", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
 				newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-1", "gs://b/snap-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
-				newPausedSnapshot(t, 2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-2", "node-1"),
+				localGen2,
 				newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-3", "gs://b/snap-3", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
 			},
+			PendingGcSnapshots: []*ateapipb.PendingGCSnapshot{
+				{Uuid: "uuid-1", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://b/snap-1"}},
+			},
 		}
-		status.Snapshots[2].Locality = "node-1"
+		status.Snapshots[3].Locality = "node-1"
 
-		pruneSnapshots(status, nil)
+		pruneSnapshots(ctx, status, nil)
 
 		want := []*ateapipb.Snapshot{
 			newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-3", "gs://b/snap-3", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
 		}
 		if diff := cmp.Diff(want, status.GetSnapshots(), protocmp.Transform()); diff != "" {
 			t.Errorf("status.Snapshots mismatch (-want +got):\n%s", diff)
+		}
+		wantPending := []*ateapipb.PendingGCSnapshot{
+			{Uuid: "uuid-1", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://b/snap-1"}},
+			{Uuid: "local-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: localGen2.GetDurableSnapshot().GetObject().GetSnapshotUri()}},
+		}
+		if diff := cmp.Diff(wantPending, status.GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.PendingGcSnapshots mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("pruneSupersededDurableSnapshots moves older COMPLETED snapshots to PendingGcSnapshots", func(t *testing.T) {
+		pruneSupersededDurableSnapshots(ctx, nil)
+
+		localPending := newPausedSnapshot(t, 4, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-4", "node-1")
+		status := &ateapipb.ActorStatus{
+			Snapshots: []*ateapipb.Snapshot{
+				newDurableSnapshot(1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_TAG, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "tag-1", "gs://b/tag-1", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+				newDurableSnapshot(2, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-2", "gs://b/snap-2", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+				newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-3", "gs://b/snap-3", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+				localPending,
+			},
+		}
+
+		pruneSupersededDurableSnapshots(ctx, status)
+
+		want := []*ateapipb.Snapshot{
+			newDurableSnapshot(3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "uuid-3", "gs://b/snap-3", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+			localPending,
+		}
+		if diff := cmp.Diff(want, status.GetSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.Snapshots mismatch (-want +got):\n%s", diff)
+		}
+		wantPending := []*ateapipb.PendingGCSnapshot{
+			{Uuid: "uuid-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://b/snap-2"}},
+		}
+		if diff := cmp.Diff(wantPending, status.GetPendingGcSnapshots(), protocmp.Transform()); diff != "" {
+			t.Errorf("status.PendingGcSnapshots mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("pruneSnapshots drops earliest PendingGcSnapshots when at maxPendingGCSnapshots", func(t *testing.T) {
+		pending := make([]*ateapipb.PendingGCSnapshot, maxPendingGCSnapshots)
+		for i := range pending {
+			gen := int32(i + 1)
+			pending[i] = &ateapipb.PendingGCSnapshot{
+				Uuid:       fmt.Sprintf("snap-%d", gen),
+				Generation: gen,
+				Object:     &ateapipb.ObjectSnapshot{SnapshotUri: fmt.Sprintf("gs://b/snap-%d", gen)},
+			}
+		}
+		localSnap := newPausedSnapshot(t, maxPendingGCSnapshots+2, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "local-next", "node-1")
+		latestCompleted := newDurableSnapshot(maxPendingGCSnapshots+3, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "snap-latest", "gs://b/snap-latest", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED)
+		status := &ateapipb.ActorStatus{
+			Snapshots: []*ateapipb.Snapshot{
+				newDurableSnapshot(maxPendingGCSnapshots+1, ateapipb.SnapshotOwner_SNAPSHOT_OWNER_ACTOR, ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, "tmpl-1", "snap-old-durable", "gs://b/snap-old-durable", ateapipb.SnapshotStorageStatus_SNAPSHOT_STORAGE_STATUS_COMPLETED),
+				localSnap,
+				latestCompleted,
+			},
+			PendingGcSnapshots: pending,
+		}
+
+		pruneSnapshots(ctx, status, nil)
+
+		if got := len(status.GetPendingGcSnapshots()); got != maxPendingGCSnapshots {
+			t.Fatalf("len(PendingGcSnapshots) = %d, want %d", got, maxPendingGCSnapshots)
+		}
+		// Generations 1 and 2 were dropped to make room for the two newly pruned
+		// snapshots (maxPendingGCSnapshots+1 and maxPendingGCSnapshots+2).
+		if got := status.GetPendingGcSnapshots()[0].GetGeneration(); got != 3 {
+			t.Errorf("first PendingGcSnapshot generation = %d, want 3", got)
+		}
+		if got := status.GetPendingGcSnapshots()[maxPendingGCSnapshots-2].GetGeneration(); got != maxPendingGCSnapshots+1 {
+			t.Errorf("second-to-last PendingGcSnapshot generation = %d, want %d", got, maxPendingGCSnapshots+1)
+		}
+		if got := status.GetPendingGcSnapshots()[maxPendingGCSnapshots-1].GetGeneration(); got != maxPendingGCSnapshots+2 {
+			t.Errorf("last PendingGcSnapshot generation = %d, want %d", got, maxPendingGCSnapshots+2)
 		}
 	})
 }

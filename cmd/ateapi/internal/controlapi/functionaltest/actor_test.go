@@ -3408,6 +3408,10 @@ func TestSuspendActor_ReplacedSnapshotReleaseFailure(t *testing.T) {
 	assertSnapshotPresent(t, tc, freshURI)
 	assertSnapshotPresent(t, tc, replacedURI)
 
+	if got := len(second.GetActor().GetStatus().GetPendingGcSnapshots()); got != 1 {
+		t.Errorf("len(pending_gc_snapshots) after release failure = %d, want 1", got)
+	}
+
 	if _, err := tc.client.ResumeActor(context.Background(), &ateapipb.ResumeActorRequest{Actor: actorRef}); err != nil {
 		t.Fatalf("ResumeActor after the release failure failed: %v", err)
 	}
@@ -3415,9 +3419,8 @@ func TestSuspendActor_ReplacedSnapshotReleaseFailure(t *testing.T) {
 		t.Errorf("restore snapshot uri = %q, want the second suspend's %q", got, freshURI)
 	}
 
-	// A later suspend releases only the snapshot it replaces; the one the
-	// failed release left behind stays until the actor is deleted, which
-	// collects everything under the actor's prefix.
+	// A later suspend retries pending GC snapshots alongside the snapshot it
+	// replaces, so both freshURI and replacedURI are collected.
 	third, err := tc.client.SuspendActor(context.Background(), &ateapipb.SuspendActorRequest{Actor: actorRef, Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS}})
 	if err != nil {
 		t.Fatalf("SuspendActor (third) failed: %v", err)
@@ -3425,12 +3428,14 @@ func TestSuspendActor_ReplacedSnapshotReleaseFailure(t *testing.T) {
 	waitForWorkerAvailable(t, tc, workerName)
 	lastURI := durableSnapshotURI(third.GetActor().GetStatus())
 	assertSnapshotCollected(t, tc, freshURI)
-	assertSnapshotPresent(t, tc, replacedURI)
+	assertSnapshotCollected(t, tc, replacedURI)
+	if got := len(third.GetActor().GetStatus().GetPendingGcSnapshots()); got != 0 {
+		t.Errorf("len(pending_gc_snapshots) after third suspend = %d, want 0", got)
+	}
 
 	if _, err := tc.client.DeleteActor(context.Background(), &ateapipb.DeleteActorRequest{Actor: actorRef}); err != nil {
 		t.Fatalf("DeleteActor failed: %v", err)
 	}
-	assertSnapshotCollected(t, tc, replacedURI)
 	assertSnapshotCollected(t, tc, lastURI)
 }
 

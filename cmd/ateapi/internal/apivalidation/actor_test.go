@@ -607,6 +607,94 @@ func TestValidateActorUpdate(t *testing.T) {
 		})),
 		want: field.ErrorList{field.Invalid(field.NewPath("status", "snapshots").Index(0).Child("fidelity"), nil, "").WithOrigin("maximum")},
 	}, {
+		name:   "valid actor.status.pending_gc_snapshots",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+				{Uuid: "snap-2", Generation: 2, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-2"}},
+			}
+		})),
+	}, {
+		name:   "duplicate actor.status.pending_gc_snapshots generation",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+				{Uuid: "snap-2", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-2"}},
+			}
+		})),
+		want: field.ErrorList{field.Duplicate(field.NewPath("status", "pending_gc_snapshots").Index(1), nil)},
+	}, {
+		name:   "too many actor.status.pending_gc_snapshots",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			pending := make([]*ateapipb.PendingGCSnapshot, 257)
+			for i := range pending {
+				pending[i] = &ateapipb.PendingGCSnapshot{
+					Uuid:       fmt.Sprintf("snap-%d", i+1),
+					Generation: int32(i + 1),
+					Object:     &ateapipb.ObjectSnapshot{SnapshotUri: fmt.Sprintf("gs://bucket/snap-%d", i+1)},
+				}
+			}
+			s.PendingGcSnapshots = pending
+		})),
+		want: field.ErrorList{field.TooMany(field.NewPath("status", "pending_gc_snapshots"), 257, 256).WithOrigin("maxItems")},
+	}, {
+		name:   "missing actor.status.pending_gc_snapshots.uuid",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+			}
+		})),
+		want: field.ErrorList{field.Required(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("uuid"), "")},
+	}, {
+		name:   "invalid actor.status.pending_gc_snapshots.uuid",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "SNAP 1", Generation: 1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+			}
+		})),
+		want: field.ErrorList{field.Invalid(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("uuid"), nil, "").WithOrigin("format=k8s-short-name")},
+	}, {
+		name:   "missing actor.status.pending_gc_snapshots.generation",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: 0, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+			}
+		})),
+		want: field.ErrorList{field.Required(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("generation"), "")},
+	}, {
+		name:   "negative actor.status.pending_gc_snapshots.generation",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: -1, Object: &ateapipb.ObjectSnapshot{SnapshotUri: "gs://bucket/snap-1"}},
+			}
+		})),
+		want: field.ErrorList{field.Invalid(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("generation"), int32(-1), "").WithOrigin("minimum")},
+	}, {
+		name:   "missing actor.status.pending_gc_snapshots.object",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: 1},
+			}
+		})),
+		want: field.ErrorList{field.Required(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("object"), "")},
+	}, {
+		name:   "missing actor.status.pending_gc_snapshots.object.snapshot_uri",
+		oldVal: validInput(),
+		newVal: validOutput(withStatus(func(s *ateapipb.ActorStatus) {
+			s.PendingGcSnapshots = []*ateapipb.PendingGCSnapshot{
+				{Uuid: "snap-1", Generation: 1, Object: &ateapipb.ObjectSnapshot{}},
+			}
+		})),
+		want: field.ErrorList{field.Required(field.NewPath("status", "pending_gc_snapshots").Index(0).Child("object", "snapshot_uri"), "")},
+	}, {
 		// Status is written by the server, so it is not preview-gated: the
 		// volume cases below expect the same result with and without preview.
 		name:            "no volumes",
