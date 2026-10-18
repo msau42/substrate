@@ -1016,10 +1016,10 @@ groups:
     note: >
       atelet uploads deferred snapshots in the background once the upload delay
       or the detach delay elapses. A probe that finds the manifest committed
-      already without uploading is not recorded. An upload that Terminate or an
-      atelet shutdown cancels records error.type Canceled. Synchronous uploads
-      from UPLOAD_MODE_IMMEDIATE checkpoints and PromoteSnapshot are recorded
-      on ate.actor.checkpoint.duration instead.
+      already without uploading is not recorded. An upload that Terminate, an
+      atelet shutdown, or a newer durable snapshot cancels records error.type
+      Canceled. Synchronous uploads from UPLOAD_MODE_IMMEDIATE checkpoints and
+      PromoteSnapshot are recorded on ate.actor.checkpoint.duration instead.
     annotations:
       substrate:
         emitted_by: [atelet]

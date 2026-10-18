@@ -16,6 +16,7 @@ package snapshottracker
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
@@ -220,6 +221,11 @@ type actorSnapshots struct {
 	// entry because writing the file failed. The entry stays in memory while
 	// unsaved is set.
 	unsaved bool
+	// forgetting is set once Forget has canceled the actor's operation in
+	// progress, while it waits for that operation to end. The operation then
+	// leaves the actor alone, no background upload, detach, or report begins,
+	// and the entry stays in memory until Forget drops it.
+	forgetting bool
 }
 
 // inFlightSnapshot is the snapshot of a Checkpoint or PromoteSnapshot of the
@@ -426,6 +432,28 @@ func (a *actorSnapshots) runningUpload() *SnapshotRef {
 		return nil
 	}
 	return &a.op.target
+}
+
+// supersededUpload returns the upload in progress when a snapshot newer than
+// the one it uploads is durable, or nil.
+func (a *actorSnapshots) supersededUpload() *actorOp {
+	up := a.runningUpload()
+	if up == nil || a.LatestDurable == nil || up.generation() >= a.LatestDurable.generation() {
+		return nil
+	}
+	return a.op
+}
+
+// localInUse reports whether a Run, Restore, Checkpoint, or PromoteSnapshot of
+// the actor in progress may use the local copy of ref. A Run or Restore names
+// no snapshot, and a Restore may read any local snapshot in place, so either
+// uses them all. A Checkpoint or PromoteSnapshot uses only the snapshot it
+// names in inFlight.
+func (a *actorSnapshots) localInUse(ref *SnapshotRef) bool {
+	if a.holds > len(a.inFlight) {
+		return true
+	}
+	return slices.ContainsFunc(a.inFlight, func(f *inFlightSnapshot) bool { return sameUUID(f.ref, ref) })
 }
 
 // runningDetach returns the snapshot an opDetach goroutine is currently
