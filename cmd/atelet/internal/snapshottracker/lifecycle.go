@@ -67,12 +67,14 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.Actor
 // CommitDurable records snap, just uploaded by a Checkpoint under
 // UPLOAD_MODE_IMMEDIATE, as the actor's latest durable snapshot, and returns
 // the actor's state. A commit of a snapshot already durable or older than
-// LatestDurable leaves the state as it is. It drops an older LatestLocal,
-// which snap supersedes, so the Checkpoint's prune deletes it even if no local
-// copy of snap is kept. The Checkpoint then records its local copy with
-// CommitLocal, if it manages to keep one. An older snapshot's upload in
-// progress runs on, and removes that snapshot's local copy when it ends (see
-// removeSupersededLocalCopy).
+// LatestDurable leaves the state as it is.
+//
+// It drops an older LatestLocal, which snap supersedes, so the Checkpoint's
+// prune deletes it even if no local copy of snap is kept. The Checkpoint then
+// records its local copy with CommitLocal, if it manages to keep one.
+//
+// Whether or not it records snap, it returns only once no upload of a
+// snapshot older than LatestDurable is in progress (see durableStateLocked).
 func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.ActorSnapshotState {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
@@ -83,7 +85,7 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.Act
 		} else {
 			t.requeueLocked(a)
 		}
-		return t.stateLocked(a)
+		return t.durableStateLocked(a)
 	}
 	a.LatestDurable = snap.clone()
 	if a.LatestLocal != nil && a.LatestLocal.generation() < snap.generation() {
@@ -91,7 +93,7 @@ func (t *Tracker) CommitDurable(actorUID string, snap SnapshotRef) *ateletpb.Act
 	}
 	t.cancelReportLocked(a)
 	t.durableCommittedLocked(a)
-	return t.stateLocked(a)
+	return t.durableStateLocked(a)
 }
 
 // LocalSnapshotsToKeep returns the actor's local snapshots atelet still needs:
@@ -117,11 +119,15 @@ func (t *Tracker) LocalSnapshotsToKeep(actorUID string) []string {
 }
 
 // CommitPromoted records snap, a local snapshot PromoteSnapshot made durable or
-// found durable already, as the actor's latest durable snapshot, keeping its
-// local copy, the time its checkpoint committed, and any UploadTime on snap.
-// It leaves DetachAt as it is. A promote of a snapshot already durable, or
-// older than LatestDurable, keeps what was recorded. It returns the actor's
-// state.
+// found durable already, as the actor's latest durable snapshot, and returns
+// the actor's state. A promote of a snapshot already durable, or older than
+// LatestDurable, keeps what was recorded.
+//
+// It keeps snap's local copy, the time its checkpoint committed, and any
+// UploadTime on snap. It leaves DetachAt as it is.
+//
+// Whether or not it records snap, it returns only once no upload of a
+// snapshot older than LatestDurable is in progress (see durableStateLocked).
 func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.ActorSnapshotState {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
@@ -135,7 +141,7 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 		} else {
 			t.requeueLocked(a)
 		}
-		return t.stateLocked(a)
+		return t.durableStateLocked(a)
 	}
 	// Carry over the checkpoint commit time when promoting the tracked
 	// local snapshot. snap.UploadTime is already set by the caller when
@@ -152,7 +158,7 @@ func (t *Tracker) CommitPromoted(actorUID string, snap SnapshotRef) *ateletpb.Ac
 		t.cancelReportLocked(a)
 	}
 	t.durableCommittedLocked(a)
-	return t.stateLocked(a)
+	return t.durableStateLocked(a)
 }
 
 // BeginStart records that a Run or Restore is starting the actor on this node,
@@ -280,18 +286,28 @@ func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots, snap *SnapshotR
 	}
 }
 
-// Forget drops the actor's state, in memory and on disk. It does not wait for
-// the actor's operation in progress, an upload or a detach: it cancels it, and
-// the operation finds itself abandoned when it ends.
+// Forget drops the actor's state, in memory and on disk. It first cancels the
+// actor's operation in progress, an upload or a detach, and waits for it to
+// end, releasing the actor's lock meanwhile; the operation leaves the actor
+// alone when it ends. The snapshot state file goes before the wait, so an
+// atelet restart meanwhile does not resume the operation.
 func (t *Tracker) Forget(actorUID string) error {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
-	t.abandonOpLocked(actorUID)
+	// Abandon too any operation that begins before the lock is taken back.
+	for op := t.abandonOpLocked(actorUID); op != nil; op = t.abandonOpLocked(actorUID) {
+		// Best-effort: the removal below reports a failure.
+		_ = removeSnapshotState(actorUID)
+		t.unlock(actorUID)
+		<-op.done
+		t.lock(actorUID)
+	}
 	// Start the actor's backoff over; its entry, and any hold, goes below.
 	t.retries.Forget(actorUID)
 	t.reporting.retries.Forget(actorUID)
 	t.dropLocked(actorUID)
 	t.undurableActorsTally.forget(actorUID)
+	// This also deletes a file that a commit rewrote during the wait.
 	return removeSnapshotState(actorUID)
 }
 
@@ -324,6 +340,26 @@ func (t *Tracker) durableCommittedLocked(a *actorSnapshots) {
 	}
 	t.saveLocked(a)
 	t.requeueLocked(a)
+}
+
+// durableStateLocked returns the actor's state for CommitDurable or
+// CommitPromoted to return. Once the control plane learns of LatestDurable,
+// it may delete the objects of older snapshots, so this first cancels any
+// upload of an older snapshot in progress and waits for it to end, releasing
+// the actor's lock meanwhile. The object-store plugin may still finish an
+// object that upload had under way; deleting the actor collects it.
+func (t *Tracker) durableStateLocked(a *actorSnapshots) *ateletpb.ActorSnapshotState {
+	actorUID := a.actorUID
+	for op := a.supersededUpload(); op != nil; op = a.supersededUpload() {
+		op.cancel()
+		t.unlock(actorUID)
+		<-op.done
+		t.lock(actorUID)
+		if a = t.findLocked(actorUID); a == nil {
+			return &ateletpb.ActorSnapshotState{}
+		}
+	}
+	return t.stateLocked(a)
 }
 
 // succeededLocked finishes a change that leaves the actor in a successful end

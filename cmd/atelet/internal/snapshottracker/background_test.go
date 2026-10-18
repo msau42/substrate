@@ -73,8 +73,9 @@ func beginOp(t *testing.T, tr *Tracker, target SnapshotRef) (context.Context, *a
 
 // endOp ends op, as a worker does, and reports whether it was still the
 // tracked actor's operation in progress. It then finishes like a worker
-// whose operation changed nothing, calling requeueLocked.
+// whose operation changed nothing, calling requeueLocked and closing op.done.
 func endOp(tr *Tracker, op *actorOp) bool {
+	defer close(op.done)
 	tr.lock(trackedActorUID)
 	defer tr.unlock(trackedActorUID)
 	a := tr.endOpLocked(trackedActorUID, op)
@@ -83,6 +84,18 @@ func endOp(tr *Tracker, op *actorOp) bool {
 	}
 	tr.requeueLocked(a)
 	return true
+}
+
+// waitAbandoned waits until Forget has abandoned the tracked actor's operation
+// in progress.
+func waitAbandoned(t *testing.T, tr *Tracker) {
+	t.Helper()
+	eventually(t, "Forget abandons the operation", func() bool {
+		tr.lock(trackedActorUID)
+		defer tr.unlock(trackedActorUID)
+		a := tr.findLocked(trackedActorUID)
+		return a != nil && a.forgetting && a.op != nil
+	})
 }
 
 // inMemory reports whether the tracker holds the tracked actor's entry in
@@ -217,10 +230,11 @@ func TestStartQueuesActorsWithSnapshotState(t *testing.T) {
 	}
 }
 
-// Forget does not wait for the actor's background operation in progress. It
-// cancels the operation, which finds itself abandoned when it ends, so it
-// leaves alone both the forgotten actor's state and an operation that began
-// for the actor after Forget.
+// Forget cancels the actor's background operation in progress, and waits for
+// it to end before it drops the actor. The operation stays the actor's
+// meanwhile, so no other operation begins, and a retried Forget waits for it
+// too; but the snapshot state file is already gone, so an atelet restarted
+// meanwhile would not resume it. Once it ends, it leaves the actor alone.
 func TestForgetAbandonsInFlightOp(t *testing.T) {
 	useActorDir(t)
 	tr := newTracker(t)
@@ -228,29 +242,109 @@ func TestForgetAbandonsInFlightOp(t *testing.T) {
 	tr.CommitLocal(trackedActorUID, s1)
 	opCtx, op := beginOp(t, tr, s1)
 
-	returnsPromptly(t, "Forget during a background operation", func() {
-		if err := tr.Forget(trackedActorUID); err != nil {
-			t.Errorf("Forget: %v", err)
-		}
-	})
-	if opCtx.Err() == nil {
-		t.Error("the operation's context is live after Forget, want it cancelled")
+	forgetDone := make(chan error, 2)
+	forget := func() { forgetDone <- tr.Forget(trackedActorUID) }
+	go forget()
+	select {
+	case <-opCtx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for Forget to cancel the operation")
 	}
-	_, next := beginOp(t, tr, s1)
+	tr.lock(trackedActorUID)
+	_, other := tr.beginOpLocked(tr.ctx, tr.findOrAddLocked(trackedActorUID), opUpload, s1)
+	tr.unlock(trackedActorUID)
+	if other != nil {
+		t.Error("beginOpLocked began an operation while Forget waits, want none")
+	}
+	if st := newTracker(t).State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+		t.Errorf("state a restarted atelet reads while Forget waits = %v, want empty", st)
+	}
+	go forget()
+	select {
+	case err := <-forgetDone:
+		t.Fatalf("Forget returned (%v) before the canceled operation ended", err)
+	case <-time.After(50 * time.Millisecond):
+	}
 	if endOp(tr, op) {
 		t.Error("endOpLocked = true after Forget, want the operation abandoned")
 	}
-	if got, want := tr.State(trackedActorUID), (&ateletpb.ActorSnapshotState{Uploading: s1.report()}); !proto.Equal(got, want) {
-		t.Errorf("state after forget = %v, want %v: only the operation begun after Forget", got, want)
+	for range 2 {
+		select {
+		case err := <-forgetDone:
+			if err != nil {
+				t.Errorf("Forget: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for Forget to return")
+		}
 	}
+	if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+		t.Errorf("state after forget = %v, want empty", st)
+	}
+	_, next := beginOp(t, tr, s1)
 	if !endOp(tr, next) {
-		t.Error("endOpLocked = false for the operation begun after Forget, want the abandoned one's end to leave it alone")
+		t.Error("endOpLocked = false for an operation begun after Forget, want it the actor's")
 	}
 }
 
-// A Checkpoint's commits and LocalSnapshotsToKeep, PromoteSnapshot's commit,
-// and State neither wait for the actor's background operation in progress nor
-// cancel it.
+// While Forget waits for the operation it canceled, even once that operation
+// has ended, no background upload, detach, or report begins on the actor, and
+// a change made meanwhile keeps the entry in memory. Forget then deletes the
+// snapshot state file that change rewrote.
+func TestNoBackgroundWorkWhileForgetWaits(t *testing.T) {
+	tr := newIdleTestTracker(t, newFakeSnapshotStore())
+	tr.reporting.reporter = newFakeReporter()
+	t0 := tr.clock.Now()
+	s1 := testRef("s1", 1, t0)
+	tr.CommitLocal(trackedActorUID, s1)
+	stepTo(tr, t0.Add(testDetachDelay)) // An upload and a detach are both due.
+	_, op := beginOp(t, tr, s1)
+	tr.lock(trackedActorUID)
+	tr.markReportDueLocked(tr.findLocked(trackedActorUID))
+	tr.unlock(trackedActorUID)
+
+	forgetDone := make(chan error, 1)
+	go func() { forgetDone <- tr.Forget(trackedActorUID) }()
+	waitAbandoned(t, tr)
+	// End op but leave op.done open, so Forget keeps waiting with no
+	// operation in progress on the actor.
+	tr.lock(trackedActorUID)
+	if a := tr.endOpLocked(trackedActorUID, op); a != nil {
+		t.Error("endOpLocked returned the entry of an abandoned operation, want nil")
+	}
+	tr.unlock(trackedActorUID)
+
+	for _, kind := range []opKind{opUpload, opDetach} {
+		if run := tr.beginDueWork(trackedActorUID, kind); run != nil {
+			t.Errorf("beginDueWork(%v) began work while Forget waits, want none", kind)
+			run()
+		}
+	}
+	if _, _, _, ok := tr.beginReport(trackedActorUID); ok {
+		t.Error("beginReport began a report while Forget waits, want none")
+	}
+	// A Run or Restore saves the actor's state as it begins, and runs
+	// requeueLocked as it ends.
+	if end, err := tr.BeginStart(t.Context(), trackedActorUID); err != nil {
+		t.Errorf("BeginStart: %v", err)
+	} else {
+		end()
+	}
+	if !inMemory(tr) {
+		t.Error("entry dropped from memory while Forget waits, want it kept")
+	}
+
+	close(op.done)
+	if err := <-forgetDone; err != nil {
+		t.Errorf("Forget: %v", err)
+	}
+	if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
+		t.Errorf("state file after Forget: stat = %v, want none", err)
+	}
+}
+
+// CommitLocal, LocalSnapshotsToKeep, and State neither wait for the actor's
+// background upload in progress nor cancel it.
 func TestCommitsDoNotWaitForInFlightOp(t *testing.T) {
 	useActorDir(t)
 	tr := newTracker(t)
@@ -265,8 +359,6 @@ func TestCommitsDoNotWaitForInFlightOp(t *testing.T) {
 	}{
 		{"CommitLocal", func() { tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0)) }},
 		{"LocalSnapshotsToKeep", func() { tr.LocalSnapshotsToKeep(trackedActorUID) }},
-		{"CommitDurable", func() { tr.CommitDurable(trackedActorUID, testRef("s3", 3, t0)) }},
-		{"CommitPromoted", func() { tr.CommitPromoted(trackedActorUID, testRef("s4", 4, t0)) }},
 		{"State", func() { tr.State(trackedActorUID) }},
 	} {
 		returnsPromptly(t, c.name+" during a background operation", c.call)

@@ -242,8 +242,9 @@ func jitteredReportDelay(d time.Duration) time.Duration {
 }
 
 // beginReport returns the actor, the state to report for it, and when the
-// report became due, or false when no report is due or a Run, Restore,
-// Checkpoint, or PromoteSnapshot of the actor is in progress.
+// report became due, or false when no report is due, Forget is dropping the
+// actor, or a Run, Restore, Checkpoint, or PromoteSnapshot of the actor is in
+// progress.
 func (t *Tracker) beginReport(actorUID string) (resources.ActorRef, *ateletpb.ActorSnapshotState, time.Time, bool) {
 	if !t.locks.Lock(t.ctx, actorUID) {
 		// atelet is shutting down.
@@ -251,7 +252,7 @@ func (t *Tracker) beginReport(actorUID string) (resources.ActorRef, *ateletpb.Ac
 	}
 	defer t.unlock(actorUID)
 	a := t.findLocked(actorUID)
-	if a == nil || !a.reportDue() {
+	if a == nil || a.forgetting || !a.reportDue() {
 		t.reporting.retries.Forget(actorUID)
 		return resources.ActorRef{}, nil, time.Time{}, false
 	}

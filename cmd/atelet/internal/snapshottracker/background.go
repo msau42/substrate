@@ -73,8 +73,8 @@ func (k opKind) String() string {
 
 // logOp logs how an upload or detach ended. Foreground failures are returned
 // to the RPC caller, so only background failures are logged here: as a
-// warning, or at info level once ctx has ended, as when Terminate or an atelet
-// shutdown cancels the operation.
+// warning, or at info level once ctx has ended, as when Terminate, an atelet
+// shutdown, or a newer durable snapshot cancels the operation.
 func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef, uploaded, background bool, elapsed time.Duration, err error) {
 	attrs := []any{
 		slog.String("op", kind.String()),
@@ -104,8 +104,10 @@ func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef
 //
 // The operation holds the actor's lock only while it begins and ends, not
 // while it runs:
-//   - Terminate never waits for it.
-//   - Checkpoint never waits for an upload.
+//   - Forget cancels any operation in progress and waits for it to end.
+//   - CommitDurable and CommitPromoted cancel an upload of a snapshot older
+//     than LatestDurable and wait for it to end; a deferred Checkpoint never
+//     waits for an upload.
 //   - Run, Restore, and Checkpoint wait for a detach to end, so it never
 //     deletes the actor's local snapshots underneath them.
 type actorOp struct {
@@ -209,11 +211,11 @@ func (t *Tracker) beginDueWork(actorUID string, kind opKind) func() {
 		return nil
 	}
 	a := t.findLocked(actorUID)
-	if a == nil || a.op != nil {
-		// Forgotten, or an operation is already in progress on the actor: one
-		// a worker of the other queue began, or one an atelet RPC such as
-		// Detach runs in the RPC's goroutine. When that operation ends,
-		// requeueLocked queues the actor again.
+	if a == nil || a.forgetting || a.op != nil {
+		// Forgotten or being forgotten, or an operation is already in progress
+		// on the actor: one a worker of the other queue began, or one an
+		// atelet RPC such as Detach runs in the RPC's goroutine. When that
+		// operation ends, requeueLocked queues the actor again.
 		return nil
 	}
 	now := t.clock.Now()
@@ -267,11 +269,12 @@ func (t *Tracker) nextDueLocked(a *actorSnapshots) (time.Time, bool) {
 // operation of that kind is due, if it has one, then drops the actor's entry
 // from memory unless the entry has an operation, or a Run, Restore,
 // Checkpoint, or PromoteSnapshot, in progress, a retry hold, a failed upload
-// kept to retry, or a change that failed to save. An entry whose Uploading is
-// superseded is queued at once on the upload queue and kept in memory until an
-// upload worker cleans it up. A save that finds the actor's directory gone
-// leaves nothing unsaved. requeueLocked runs after a change to the actor is
-// saved, so it must not change what the snapshot state file keeps.
+// kept to retry, a change that failed to save, or Forget dropping it. An entry
+// whose Uploading is superseded is queued at once on the upload queue and kept
+// in memory until an upload worker cleans it up. A save that finds the actor's
+// directory gone leaves nothing unsaved. requeueLocked runs after a change to
+// the actor is saved, so it must not change what the snapshot state file
+// keeps.
 func (t *Tracker) requeueLocked(a *actorSnapshots) {
 	now := t.clock.Now()
 	// CommitDurable and CommitPromoted leave a superseded Uploading snapshot
@@ -287,7 +290,7 @@ func (t *Tracker) requeueLocked(a *actorSnapshots) {
 	if due, ok := t.detachDueLocked(a); ok {
 		t.queues[opDetach].AddAfter(a.actorUID, due.Sub(now))
 	}
-	if !supersededUploading && a.op == nil && a.holds == 0 && a.retryAt.IsZero() && !a.uploadingFailed && !a.unsaved {
+	if !supersededUploading && a.op == nil && a.holds == 0 && a.retryAt.IsZero() && !a.uploadingFailed && !a.unsaved && !a.forgetting {
 		t.dropLocked(a.actorUID)
 	}
 }
@@ -321,7 +324,7 @@ func (t *Tracker) beginOpLocked(ctx context.Context, a *actorSnapshots, kind opK
 // progress, or nil once Forget has abandoned op.
 func (t *Tracker) opEntryLocked(actorUID string, op *actorOp) *actorSnapshots {
 	a := t.findLocked(actorUID)
-	if a == nil || a.op != op {
+	if a == nil || a.op != op || a.forgetting {
 		return nil
 	}
 	return a
@@ -353,12 +356,16 @@ func (t *Tracker) updateOp(actorUID string, op *actorOp, opErr error, fn func(a 
 }
 
 // endOpLocked ends op and returns the actor's entry, or nil once Forget has
-// abandoned op.
+// abandoned op. Either way, op is no longer the actor's operation in progress.
 func (t *Tracker) endOpLocked(actorUID string, op *actorOp) *actorSnapshots {
 	op.cancel()
-	a := t.opEntryLocked(actorUID, op)
-	if a != nil {
-		a.op = nil
+	a := t.findLocked(actorUID)
+	if a == nil || a.op != op {
+		return nil
+	}
+	a.op = nil
+	if a.forgetting {
+		return nil
 	}
 	return a
 }
@@ -475,17 +482,20 @@ func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp
 	}
 }
 
-// abandonOpLocked cancels the actor's operation in progress, if any, without
-// waiting for it to end.
-func (t *Tracker) abandonOpLocked(actorUID string) {
+// abandonOpLocked cancels the actor's operation in progress, if any, marks the
+// actor forgetting, and returns the operation. It stays the actor's operation
+// until it ends, so a retried Forget waits for it too.
+func (t *Tracker) abandonOpLocked(actorUID string) *actorOp {
 	// An entry with an operation in progress is always in memory.
 	t.mu.Lock()
 	a := t.actors[actorUID]
 	t.mu.Unlock()
-	if a != nil && a.op != nil {
-		a.op.cancel()
-		a.op = nil
+	if a == nil || a.op == nil {
+		return nil
 	}
+	a.forgetting = true
+	a.op.cancel()
+	return a.op
 }
 
 // backOffLocked records a failure of the actor's background work, and holds
