@@ -911,6 +911,19 @@ func TestTrackerCancelsReportOnForegroundCall(t *testing.T) {
 			},
 		},
 		{
+			name: "CommittedCheckpointState with local snapshot",
+			call: func(_ *testing.T, tr *Tracker) {
+				tr.CommittedCheckpointState(trackedActorUID)
+			},
+		},
+		{
+			name:            "CommittedCheckpointState when already detached",
+			alreadyDetached: true,
+			call: func(_ *testing.T, tr *Tracker) {
+				tr.CommittedCheckpointState(trackedActorUID)
+			},
+		},
+		{
 			name: "Detach with local snapshot",
 			call: func(t *testing.T, tr *Tracker) {
 				if _, err := tr.Detach(t.Context(), trackedActorUID); err != nil {
@@ -1134,7 +1147,7 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 		{
 			name: "BeginCheckpoint",
 			begin: func(t *testing.T, tr *Tracker) func() {
-				end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot)
+				_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot)
 				if err != nil {
 					t.Fatalf("BeginCheckpoint: %v", err)
 				}
@@ -1224,7 +1237,7 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 		uploadNow(t, tr, store, nil)
 
 		s2 := committedRef("s2", 2, tr.clock.Now())
-		end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot)
+		_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot)
 		if err != nil {
 			t.Fatalf("BeginCheckpoint: %v", err)
 		}

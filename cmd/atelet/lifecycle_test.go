@@ -39,6 +39,7 @@ import (
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/resources"
+	"go.ate.dev/substrate/internal/volume"
 	"go.ate.dev/substrate/pkg/api/v1alpha1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -1234,9 +1235,13 @@ func TestImmediateCheckpointKeepsLocalCopy(t *testing.T) {
 
 // TestImmediateCheckpointWithoutLocalCopy suspends a running actor whose
 // snapshot cannot be stored locally: the snapshot is durable, so the
-// checkpoint still succeeds, and reports no local snapshot.
+// checkpoint still succeeds, and reports no local snapshot. A retry of that
+// checkpoint answers from the durable snapshot without checkpointing or
+// uploading again, and skips cleanup because LatestLocal is nil.
 func TestImmediateCheckpointWithoutLocalCopy(t *testing.T) {
 	a := runPluginActor(t)
+	var workerCheckpoints atomic.Int32
+	a.worker.onCheckpoint = func() { workerCheckpoints.Add(1) }
 	snap := a.snapshot("suspend-snap-1", 1)
 	// A file where the local checkpoint directory belongs fails the move.
 	if err := os.WriteFile(ateletpath.LocalCheckpointsDir(pluginActorUID), nil, 0o600); err != nil {
@@ -1259,6 +1264,226 @@ func TestImmediateCheckpointWithoutLocalCopy(t *testing.T) {
 	}
 	if got := a.s.snapshots.State(pluginActorUID); !proto.Equal(got, st) {
 		t.Errorf("tracked state = %v, want %v, as Checkpoint returned", got, st)
+	}
+
+	a.store.mu.Lock()
+	a.store.putErr = errors.New("retried Checkpoint uploaded a snapshot that was already durable")
+	a.store.mu.Unlock()
+	inUse := filepath.Join(ateletpath.OCIBundleDir(pluginActorUID), "in-use")
+	if err := os.WriteFile(inUse, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	retryResp, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE)
+	if err != nil {
+		t.Fatalf("retried Checkpoint: %v", err)
+	}
+	if n := workerCheckpoints.Load(); n != 1 {
+		t.Errorf("worker checkpointed the actor %d times, want once", n)
+	}
+	if !proto.Equal(retryResp.GetState(), st) {
+		t.Errorf("retried Checkpoint state = %v, want %v", retryResp.GetState(), st)
+	}
+	if _, err := os.Stat(inUse); err != nil {
+		t.Errorf("bundle dir marker after durable-only retry: stat = %v, want it untouched when LatestLocal is nil", err)
+	}
+}
+
+// TestStaleCheckpointRetryLeavesRestoredActorAlone retries a Checkpoint
+// after the actor was restored from the snapshot it committed: atelet answers
+// from that snapshot without checkpointing or cleaning up, since the actor's
+// directories and volumes belong to the restored activation now.
+func TestStaleCheckpointRetryLeavesRestoredActorAlone(t *testing.T) {
+	a := runPluginActor(t)
+	var workerCheckpoints atomic.Int32
+	a.worker.onCheckpoint = func() { workerCheckpoints.Add(1) }
+	snap := a.snapshot("pause-snap-1", 1)
+	if _, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	a.restoreLocal(t, "pause-snap-1", 1)
+	inUse := filepath.Join(ateletpath.OCIBundleDir(pluginActorUID), "in-use")
+	if err := os.WriteFile(inUse, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
+	if err != nil {
+		t.Fatalf("stale retry of the Checkpoint: %v", err)
+	}
+	if n := workerCheckpoints.Load(); n != 1 {
+		t.Errorf("worker checkpointed the actor %d times, want once", n)
+	}
+	if got := resp.GetState().GetLatestLocal().GetSnapshot(); !proto.Equal(got, snap) {
+		t.Errorf("latest_local = %v, want %v", got, snap)
+	}
+	if _, err := os.Stat(inUse); err != nil {
+		t.Errorf("restored activation's bundle dir after the stale retry: stat = %v, want it untouched", err)
+	}
+}
+
+// TestRetriedCheckpointAnswersFromCommittedSnapshot retries a Checkpoint
+// that committed its snapshot, as the control plane does when the first
+// call's response is lost: atelet answers without checkpointing the worker
+// again, which has no workload left to checkpoint, and finishes the first
+// call's cleanup. A retry under UPLOAD_MODE_IMMEDIATE uploads the snapshot
+// first if the first Checkpoint deferred its upload, and a retry under
+// UPLOAD_MODE_DEFERRED after atelet detached the snapshot returns no local
+// snapshot.
+func TestRetriedCheckpointAnswersFromCommittedSnapshot(t *testing.T) {
+	const (
+		deferred  = ateletpb.UploadMode_UPLOAD_MODE_DEFERRED
+		immediate = ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE
+	)
+	for _, tc := range []struct {
+		name         string
+		first, retry ateletpb.UploadMode
+		detachFirst  bool
+		wantLocal    bool
+		wantDurable  bool
+	}{
+		{name: "deferred", first: deferred, retry: deferred, wantLocal: true},
+		{name: "immediate", first: immediate, retry: immediate, wantLocal: true, wantDurable: true},
+		{name: "deferred then immediate", first: deferred, retry: immediate, wantLocal: true, wantDurable: true},
+		{name: "immediate then deferred", first: immediate, retry: deferred, wantLocal: true, wantDurable: true},
+		{name: "deferred after detach", first: deferred, retry: deferred, detachFirst: true, wantDurable: true},
+		{name: "immediate after detach", first: deferred, retry: immediate, detachFirst: true, wantDurable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := runPluginActor(t)
+			a.s.snapshots = snapshottracker.New(t.Context(), &trackerStore{s: a.s}, clock.RealClock{})
+			var workerCheckpoints atomic.Int32
+			a.worker.onCheckpoint = func() { workerCheckpoints.Add(1) }
+			snap := a.snapshot("snap-1", 1)
+			if _, err := a.checkpoint(t, snap, tc.first); err != nil {
+				t.Fatalf("Checkpoint: %v", err)
+			}
+			leftover := filepath.Join(ateletpath.OCIBundleDir(pluginActorUID), "leftover")
+			if tc.detachFirst {
+				if _, err := a.s.snapshots.Detach(t.Context(), pluginActorUID); err != nil {
+					t.Fatalf("Detach: %v", err)
+				}
+			} else {
+				// What the first call's cleanup leaves behind when it fails.
+				if err := os.WriteFile(leftover, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			resp, err := a.checkpoint(t, snap, tc.retry)
+			if err != nil {
+				t.Fatalf("retried Checkpoint: %v", err)
+			}
+			if n := workerCheckpoints.Load(); n != 1 {
+				t.Errorf("worker checkpointed the actor %d times, want once", n)
+			}
+			if !tc.detachFirst {
+				if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+					t.Errorf("leftover in the bundle dir after the retry: stat = %v, want it cleaned up", err)
+				}
+			}
+			st := resp.GetState()
+			if got := st.GetLatestLocal().GetSnapshot(); proto.Equal(got, snap) != tc.wantLocal {
+				t.Errorf("latest_local = %v, want local = %v", got, tc.wantLocal)
+			}
+			if got := st.GetLatestDurable().GetSnapshot(); proto.Equal(got, snap) != tc.wantDurable {
+				t.Errorf("latest_durable = %v, want durable = %v", got, tc.wantDurable)
+			}
+			if got := slices.Contains(a.store.keys(), manifestKey("snap-1")); got != tc.wantDurable {
+				t.Errorf("snapshot uploaded = %v, want %v", got, tc.wantDurable)
+			}
+			if got := a.s.snapshots.State(pluginActorUID); !proto.Equal(got, st) {
+				t.Errorf("tracked state = %v, want %v, as the retry returned", got, st)
+			}
+		})
+	}
+}
+
+type blockingUnmountPlugin struct {
+	onUnmount func()
+}
+
+func (*blockingUnmountPlugin) MountVolume(context.Context, volume.MountVolumeRequest) error {
+	return nil
+}
+
+func (p *blockingUnmountPlugin) UnmountVolume(context.Context, string, string) error {
+	if p.onUnmount != nil {
+		p.onUnmount()
+	}
+	return nil
+}
+
+// TestRestoreWaitsForCheckpointCleanup starts a Restore while a retried
+// Checkpoint is in cleanUpAfterCheckpoint, past its NotStartedSince check:
+// Restore waits for the Checkpoint to finish, so the Checkpoint's directory
+// reset cannot wipe out the restored activation's files.
+func TestRestoreWaitsForCheckpointCleanup(t *testing.T) {
+	a := runPluginActor(t)
+	plugin := &blockingUnmountPlugin{}
+	a.s.volumePlugins = map[string]volume.VolumePluginWorkerPlane{"mock-driver": plugin}
+	a.spec.Volumes = []*ateletpb.Volume{{
+		Name: "vol-1",
+		External: &ateletpb.ExternalVolumeSource{
+			StorageVolumeId: "vol-1",
+			VolumeType:      "mock-driver",
+		},
+	}}
+	snap := a.snapshot("pause-snap-1", 1)
+	if _, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+
+	unmounting := make(chan struct{})
+	release := make(chan struct{})
+	plugin.onUnmount = func() {
+		close(unmounting)
+		<-release
+	}
+
+	retryDone := make(chan error, 1)
+	go func() {
+		_, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
+		retryDone <- err
+	}()
+	select {
+	case <-unmounting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for retried Checkpoint to enter cleanUpAfterCheckpoint")
+	}
+
+	restoreDone := make(chan error, 1)
+	go func() {
+		_, err := a.s.Restore(t.Context(), &ateletpb.RestoreRequest{
+			Atespace:              "ate-demo",
+			ActorName:             "counter",
+			ActorUid:              pluginActorUID,
+			ActorTemplateAtespace: "default",
+			ActorTemplateName:     "counter",
+			WorkerPodUid:          pluginWorkerPodUID,
+			SandboxAssets:         a.assets,
+			SandboxRuntime:        runtimeFor(t, a.assets),
+			Spec:                  a.spec,
+			Snapshot:              snap,
+		})
+		restoreDone <- err
+	}()
+	select {
+	case err := <-restoreDone:
+		t.Fatalf("Restore returned %v while retried Checkpoint cleanup was in progress, want it to wait", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-retryDone; err != nil {
+		t.Fatalf("retried Checkpoint: %v", err)
+	}
+	if err := <-restoreDone; err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	entries, err := os.ReadDir(ateletpath.OCIBundleDir(pluginActorUID))
+	if err != nil || len(entries) == 0 {
+		t.Errorf("restored actor's bundle dir entries = %v, %v; want non-empty after Restore", entries, err)
 	}
 }
 

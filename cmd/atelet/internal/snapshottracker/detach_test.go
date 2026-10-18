@@ -287,7 +287,7 @@ func TestTrackerDetach(t *testing.T) {
 		{
 			name: "refused while a checkpoint is in progress",
 			setup: func(t *testing.T, tr *Tracker) {
-				end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s2", 2, time.Time{}).Snapshot)
+				_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s2", 2, time.Time{}).Snapshot)
 				if err != nil {
 					t.Fatalf("beginCheckpoint: %v", err)
 				}
@@ -413,7 +413,7 @@ func TestTrackerDetachTimer(t *testing.T) {
 
 	tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
 	due := detachDueOf(tr, trackedActorUID)
-	endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s3", 3, time.Time{}).Snapshot)
+	_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s3", 3, time.Time{}).Snapshot)
 	if err != nil {
 		t.Fatalf("beginCheckpoint: %v", err)
 	}
@@ -491,7 +491,8 @@ func TestTrackerWaitsForDetach(t *testing.T) {
 	for name, begin := range map[string]func(context.Context, string) (func(), error){
 		"beginStart": tr.BeginStart,
 		"beginCheckpoint": func(ctx context.Context, uid string) (func(), error) {
-			return tr.BeginCheckpoint(ctx, uid, testRef("s2", 2, time.Time{}).Snapshot)
+			_, end, err := tr.BeginCheckpoint(ctx, uid, testRef("s2", 2, time.Time{}).Snapshot)
+			return end, err
 		},
 	} {
 		result := make(chan error, 1)
@@ -541,7 +542,7 @@ func TestTrackerDetachWaitChecksGeneration(t *testing.T) {
 
 	stale := testRef("s0", 1, time.Time{})
 	returnsPromptly(t, "BeginCheckpoint of stale generation during detach", func() {
-		if _, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, stale.Snapshot); apierror.Code(err) != codes.FailedPrecondition {
+		if _, _, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, stale.Snapshot); apierror.Code(err) != codes.FailedPrecondition {
 			t.Errorf("BeginCheckpoint = %v, want FailedPrecondition", err)
 		}
 	})
@@ -555,7 +556,8 @@ func TestTrackerDetachWaitChecksGeneration(t *testing.T) {
 	results := make(map[string]chan error)
 	for name, begin := range map[string]func() (func(), error){
 		"beginCheckpoint": func() (func(), error) {
-			return tr.BeginCheckpoint(t.Context(), trackedActorUID, superseded.Snapshot)
+			_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, superseded.Snapshot)
+			return end, err
 		},
 		"beginPromote": func() (func(), error) {
 			_, end, err := tr.BeginPromote(t.Context(), trackedActorUID, superseded)
@@ -694,7 +696,7 @@ func TestTrackerHoldsFirstCheckpoint(t *testing.T) {
 	store := newFakeSnapshotStore()
 	tr := newTestTracker(t, store)
 	s1 := testRef("s1", 1, tr.clock.Now())
-	end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+	_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
 	if err != nil {
 		t.Fatalf("beginCheckpoint: %v", err)
 	}

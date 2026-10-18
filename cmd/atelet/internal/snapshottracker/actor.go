@@ -199,8 +199,10 @@ type actorSnapshots struct {
 	holds int
 	// inFlight holds the snapshots of Checkpoints and PromoteSnapshots of the
 	// actor currently in progress on this node. newest includes them, so an
-	// older generation cannot start while a newer one is in flight.
-	inFlight []*SnapshotRef
+	// older generation cannot start while a newer one is in flight. A retried
+	// Checkpoint waits for the one in flight with its snapshot, and a Run or
+	// Restore for every Checkpoint in flight.
+	inFlight []*inFlightSnapshot
 	// promotes counts the PromoteSnapshots of the actor in progress on this
 	// node. While it is nonzero, atelet does not start a background upload of
 	// the actor.
@@ -218,6 +220,57 @@ type actorSnapshots struct {
 	// entry because writing the file failed. The entry stays in memory while
 	// unsaved is set.
 	unsaved bool
+}
+
+// inFlightSnapshot is the snapshot of a Checkpoint or PromoteSnapshot of the
+// actor in progress on this node.
+type inFlightSnapshot struct {
+	ref *SnapshotRef
+	// checkpoint is set for a Checkpoint, and clear for a PromoteSnapshot.
+	checkpoint bool
+	// done is closed once the call ends.
+	done chan struct{}
+}
+
+// checkpointInFlight returns the Checkpoint of the snapshot named uuid in
+// progress on this node, or nil.
+func (a *actorSnapshots) checkpointInFlight(uuid string) *inFlightSnapshot {
+	for _, f := range a.inFlight {
+		if f.checkpoint && f.ref.uuid() == uuid {
+			return f
+		}
+	}
+	return nil
+}
+
+// anyCheckpointInFlight returns a Checkpoint of the actor in progress on this
+// node, or nil.
+func (a *actorSnapshots) anyCheckpointInFlight() *inFlightSnapshot {
+	for _, f := range a.inFlight {
+		if f.checkpoint {
+			return f
+		}
+	}
+	return nil
+}
+
+// checkpointCommitted reports whether a Checkpoint of snap has committed it
+// already: LatestLocal or LatestDurable is snap. It fails with
+// FailedPrecondition when one of them has snap's UUID but a different
+// generation, fidelity, or URI: the control plane named one snapshot two
+// ways, so refuse rather than guess which is right.
+func (a *actorSnapshots) checkpointCommitted(snap *ateletpb.Snapshot) (bool, error) {
+	for _, r := range []*SnapshotRef{a.LatestLocal, a.LatestDurable} {
+		if r == nil || r.uuid() != snap.GetSnapshotUuid() {
+			continue
+		}
+		if r.generation() != snap.GetGeneration() || r.Snapshot.GetFidelity() != snap.GetFidelity() || r.uri() != snap.GetObject().GetSnapshotUri() {
+			return false, apierror.FailedPrecondition("snapshot %s is committed as generation %d with fidelity %s at %q, but requested as generation %d with fidelity %s at %q",
+				r.uuid(), r.generation(), r.Snapshot.GetFidelity(), r.uri(), snap.GetGeneration(), snap.GetFidelity(), snap.GetObject().GetSnapshotUri())
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // localNeeded reports whether CommitLocal should record snap as LatestLocal:
@@ -406,8 +459,8 @@ func (a *actorSnapshots) newest() *SnapshotRef {
 	consider(a.Uploading)
 	consider(a.LatestDurable)
 	consider(a.opTarget())
-	for _, r := range a.inFlight {
-		consider(r)
+	for _, f := range a.inFlight {
+		consider(f.ref)
 	}
 	return newest
 }

@@ -673,7 +673,7 @@ func TestTrackerCheckGeneration(t *testing.T) {
 	}
 	checkBegin := func(t *testing.T, tr *Tracker, r SnapshotRef, wantCode codes.Code) {
 		t.Helper()
-		end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, r.Snapshot)
+		_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, r.Snapshot)
 		if err == nil {
 			end()
 		}
@@ -735,14 +735,20 @@ func TestTrackerCheckGeneration(t *testing.T) {
 
 	// While a Checkpoint or PromoteSnapshot holds an uncommitted snapshot at
 	// generation 8, it is newest until end() runs.
-	endCp, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, snap("s4", 8))
+	_, endCp, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, snap("s4", 8))
 	if err != nil {
 		t.Fatalf("BeginCheckpoint(s4@8): %v", err)
 	}
 	checkBegin(t, tr, ref("s3", 6), codes.FailedPrecondition)
 	checkBegin(t, tr, ref("between", 7), codes.FailedPrecondition)
 	checkBegin(t, tr, ref("other", 8), codes.FailedPrecondition)
-	checkBegin(t, tr, ref("s4", 8), codes.OK)
+	// A retried Checkpoint of s4 waits for this one (see
+	// TestTrackerRetriedCheckpointWaitsForInFlight); a PromoteSnapshot does not.
+	if _, end, err := tr.BeginPromote(t.Context(), trackedActorUID, ref("s4", 8)); err != nil {
+		t.Errorf("BeginPromote(s4@8) during its Checkpoint = %v, want OK", err)
+	} else {
+		end()
+	}
 	checkBegin(t, tr, ref("s5", 9), codes.OK)
 	endCp()
 	// Ending without committing drops the in-flight generation, so s3@6 is newest again.
@@ -799,6 +805,196 @@ func TestTrackerCheckGeneration(t *testing.T) {
 	}
 	if got := apierror.Code(a.checkGeneration(snap("uploading", 7))); got != codes.OK {
 		t.Errorf("checkGeneration(uploading@7) code = %v, want OK", got)
+	}
+}
+
+// BeginCheckpoint reports whether its snapshot is committed already, as
+// LatestLocal or LatestDurable, and refuses a snapshot committed under the
+// same UUID but named differently.
+func TestTrackerBeginCheckpointReportsCommitted(t *testing.T) {
+	useActorDir(t)
+	tr := newTracker(t)
+	t0 := tr.clock.Now()
+	begin := func(snap *ateletpb.Snapshot) (bool, error) {
+		committed, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, snap)
+		if err == nil {
+			end()
+		}
+		return committed, err
+	}
+
+	s1 := testRef("s1", 1, t0)
+	if committed, err := begin(s1.Snapshot); err != nil || committed {
+		t.Errorf("BeginCheckpoint(s1) before its commit = (%v, %v), want (false, nil)", committed, err)
+	}
+	tr.CommitLocal(trackedActorUID, s1)
+	if committed, err := begin(s1.Snapshot); err != nil || !committed {
+		t.Errorf("BeginCheckpoint(s1) once committed locally = (%v, %v), want (true, nil)", committed, err)
+	}
+
+	// s2 is durable only: CommitDurable drops s1, the older LatestLocal.
+	s2 := testRef("s2", 2, t0)
+	tr.CommitDurable(trackedActorUID, s2)
+	if committed, err := begin(s2.Snapshot); err != nil || !committed {
+		t.Errorf("BeginCheckpoint(s2) once durable = (%v, %v), want (true, nil)", committed, err)
+	}
+	for name, rename := range map[string]func(*ateletpb.Snapshot){
+		"generation": func(s *ateletpb.Snapshot) { s.Generation = 3 },
+		"fidelity":   func(s *ateletpb.Snapshot) { s.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES },
+		"uri":        func(s *ateletpb.Snapshot) { s.Object.SnapshotUri += "-other" },
+	} {
+		snap := proto.CloneOf(s2.Snapshot)
+		rename(snap)
+		if _, err := begin(snap); apierror.Code(err) != codes.FailedPrecondition {
+			t.Errorf("BeginCheckpoint(s2 with another %s) = %v, want FailedPrecondition", name, err)
+		}
+	}
+}
+
+// A retried Checkpoint that arrives while a Checkpoint of its snapshot is in
+// progress waits for that one to end, as long as its context allows. It then
+// reports the snapshot committed if that one committed it.
+func TestTrackerRetriedCheckpointWaitsForInFlight(t *testing.T) {
+	for _, firstCommits := range []bool{true, false} {
+		t.Run(fmt.Sprintf("firstCommits=%v", firstCommits), func(t *testing.T) {
+			useActorDir(t)
+			tr := newTracker(t)
+			s1 := testRef("s1", 1, tr.clock.Now())
+			_, endFirst, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+			if err != nil {
+				t.Fatalf("BeginCheckpoint(s1): %v", err)
+			}
+
+			gaveUp, cancel := context.WithCancel(t.Context())
+			cancel()
+			if _, _, err := tr.BeginCheckpoint(gaveUp, trackedActorUID, s1.Snapshot); !errors.Is(err, context.Canceled) {
+				t.Errorf("retried BeginCheckpoint(s1) whose context ended = %v, want %v", err, context.Canceled)
+			}
+
+			type result struct {
+				committed bool
+				err       error
+			}
+			retried := make(chan result, 1)
+			go func() {
+				committed, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+				if err == nil {
+					end()
+				}
+				retried <- result{committed, err}
+			}()
+			select {
+			case r := <-retried:
+				t.Fatalf("retried BeginCheckpoint(s1) = (%v, %v) while the first was in progress, want it to wait", r.committed, r.err)
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			if firstCommits {
+				tr.CommitLocal(trackedActorUID, s1)
+			}
+			endFirst()
+			select {
+			case r := <-retried:
+				if r.err != nil || r.committed != firstCommits {
+					t.Errorf("retried BeginCheckpoint(s1) = (%v, %v), want (%v, nil)", r.committed, r.err, firstCommits)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("retried BeginCheckpoint(s1) did not return once the first ended")
+			}
+		})
+	}
+}
+
+// BeginStart waits for any Checkpoint of the actor in progress to end, as
+// long as its context allows, and does not wait for a PromoteSnapshot.
+func TestTrackerBeginStartWaitsForCheckpoint(t *testing.T) {
+	useActorDir(t)
+	tr := newTracker(t)
+	s1 := testRef("s1", 1, tr.clock.Now())
+
+	_, endPromote, err := tr.BeginPromote(t.Context(), trackedActorUID, s1)
+	if err != nil {
+		t.Fatalf("BeginPromote(s1): %v", err)
+	}
+	returnsPromptly(t, "BeginStart during a PromoteSnapshot", func() {
+		endStart, err := tr.BeginStart(t.Context(), trackedActorUID)
+		if err != nil {
+			t.Errorf("BeginStart during a PromoteSnapshot = %v, want nil", err)
+			return
+		}
+		endStart()
+	})
+	endPromote()
+
+	_, endCp, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+	if err != nil {
+		t.Fatalf("BeginCheckpoint(s1): %v", err)
+	}
+
+	gaveUp, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := tr.BeginStart(gaveUp, trackedActorUID); !errors.Is(err, context.Canceled) {
+		t.Errorf("BeginStart whose context ended = %v, want %v", err, context.Canceled)
+	}
+
+	started := make(chan error, 1)
+	go func() {
+		endStart, err := tr.BeginStart(t.Context(), trackedActorUID)
+		if err == nil {
+			endStart()
+		}
+		started <- err
+	}()
+	select {
+	case err := <-started:
+		t.Fatalf("BeginStart = %v while a Checkpoint was in progress, want it to wait", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	tr.CommitLocal(trackedActorUID, s1)
+	endCp()
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Errorf("BeginStart once the Checkpoint ended = %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginStart did not return once the Checkpoint ended")
+	}
+	if tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) after BeginStart finished = true, want false")
+	}
+}
+
+// NotStartedSince holds for the latest local snapshot until a Run or Restore
+// of the actor begins, and never for a snapshot that is durable only.
+func TestTrackerNotStartedSince(t *testing.T) {
+	useActorDir(t)
+	tr := newTracker(t)
+	s1 := testRef("s1", 1, tr.clock.Now())
+	if tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) before its commit = true, want false")
+	}
+	tr.CommitLocal(trackedActorUID, s1)
+	if !tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) once committed locally = false, want true")
+	}
+	if tr.NotStartedSince(trackedActorUID, testRef("other", 1, time.Time{}).Snapshot) {
+		t.Error("NotStartedSince(another snapshot) = true, want false")
+	}
+	end, err := tr.BeginStart(t.Context(), trackedActorUID)
+	if err != nil {
+		t.Fatalf("BeginStart: %v", err)
+	}
+	end()
+	if tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) once a Restore began = true, want false")
+	}
+
+	s2 := testRef("s2", 2, tr.clock.Now())
+	tr.CommitDurable(trackedActorUID, s2)
+	if tr.NotStartedSince(trackedActorUID, s2.Snapshot) {
+		t.Error("NotStartedSince(s2), durable only = true, want false")
 	}
 }
 
