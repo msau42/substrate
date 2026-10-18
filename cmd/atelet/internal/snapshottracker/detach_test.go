@@ -775,6 +775,347 @@ func TestTrackerForgetDuringStart(t *testing.T) {
 	}
 }
 
+// Forget during a Checkpoint or PromoteSnapshot refuses that call's commit,
+// so it cannot track the forgotten actor again, but not the commits of a
+// later activation of the actor. The refusal ends with the call.
+func TestTrackerForgetRefusesCommitsInProgress(t *testing.T) {
+	beginCheckpoint := func(t *testing.T, tr *Tracker, snap SnapshotRef) func() {
+		_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, snap.Snapshot)
+		if err != nil {
+			t.Fatalf("BeginCheckpoint: %v", err)
+		}
+		return end
+	}
+	beginPromote := func(t *testing.T, tr *Tracker, snap SnapshotRef) func() {
+		_, end, err := tr.BeginPromote(t.Context(), trackedActorUID, snap)
+		if err != nil {
+			t.Fatalf("BeginPromote: %v", err)
+		}
+		return end
+	}
+	for _, tc := range []struct {
+		name   string
+		begin  func(*testing.T, *Tracker, SnapshotRef) func()
+		commit func(*Tracker, string, SnapshotRef) (*ateletpb.ActorSnapshotState, error)
+	}{
+		{name: "CommitLocal", begin: beginCheckpoint, commit: (*Tracker).CommitLocal},
+		{name: "CommitDurable", begin: beginCheckpoint, commit: (*Tracker).CommitDurable},
+		{name: "CommitPromoted", begin: beginPromote, commit: (*Tracker).CommitPromoted},
+		{
+			name: "CommittedCheckpointState",
+			begin: func(t *testing.T, tr *Tracker, snap SnapshotRef) func() {
+				if _, err := tr.CommitLocal(trackedActorUID, snap); err != nil {
+					t.Fatalf("CommitLocal: %v", err)
+				}
+				return beginCheckpoint(t, tr, snap)
+			},
+			commit: func(tr *Tracker, actorUID string, snap SnapshotRef) (*ateletpb.ActorSnapshotState, error) {
+				return tr.CommittedCheckpointState(actorUID, snap.Snapshot)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useActorDir(t)
+			tr := newTracker(t)
+			s1 := testRef("s1", 1, tr.clock.Now())
+			end := tc.begin(t, tr, s1)
+			if err := tr.Forget(trackedActorUID); err != nil {
+				t.Fatalf("Forget: %v", err)
+			}
+			if _, err := tc.commit(tr, trackedActorUID, s1); apierror.Code(err) != codes.Aborted {
+				t.Errorf("%s of s1 after Forget = %v, want Aborted", tc.name, err)
+			}
+			if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+				t.Errorf("state after the refused commit = %v, want empty", st)
+			}
+			if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
+				t.Errorf("state file after the refused commit: stat = %v, want none", err)
+			}
+
+			if _, err := tc.commit(tr, trackedActorUID, testRef("s2", 2, tr.clock.Now())); err != nil {
+				t.Errorf("%s of a later activation's s2 = %v, want it committed", tc.name, err)
+			}
+			end()
+			if len(tr.forgotten) != 0 {
+				t.Errorf("forgotten snapshots after the call ended = %v, want none", tr.forgotten)
+			}
+		})
+	}
+}
+
+// While Forget waits for a canceled upload to end, commits of Checkpoints and
+// PromoteSnapshots already in flight fail, new ones cannot begin, and
+// CommitDurable or CommitPromoted waiting for that upload fails too.
+func TestTrackerForgetWhileWaitingOnUpload(t *testing.T) {
+	t.Run("commit and end while Forget waits", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		store.setIgnoreCancel(true)
+		tr := newTestTracker(t, store)
+		t0 := tr.clock.Now()
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+		uploadDone := startUpload(t, tr, store)
+
+		s2 := testRef("s2", 2, t0.Add(time.Minute))
+		_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot)
+		if err != nil {
+			t.Fatalf("BeginCheckpoint: %v", err)
+		}
+
+		forgetDone := make(chan error, 1)
+		go func() { forgetDone <- tr.Forget(trackedActorUID) }()
+		waitAbandoned(t, tr)
+
+		if _, err := tr.CommitLocal(trackedActorUID, s2); apierror.Code(err) != codes.Aborted {
+			t.Errorf("CommitLocal while Forget waits = %v, want Aborted", err)
+		}
+		// End the Checkpoint before Forget drops the entry from memory.
+		endCheckpoint()
+		if len(tr.forgotten) != 0 {
+			t.Errorf("forgotten snapshots after endCheckpoint = %v, want none", tr.forgotten)
+		}
+
+		s3 := testRef("s3", 3, t0.Add(2*time.Minute))
+		if _, _, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s3.Snapshot); apierror.Code(err) != codes.Aborted {
+			t.Errorf("BeginCheckpoint while Forget waits = %v, want Aborted", err)
+		}
+		if _, _, err := tr.BeginPromote(t.Context(), trackedActorUID, s3); apierror.Code(err) != codes.Aborted {
+			t.Errorf("BeginPromote while Forget waits = %v, want Aborted", err)
+		}
+
+		store.release <- context.Canceled
+		waitClosed(t, uploadDone, "the upload of s1")
+		if err := <-forgetDone; err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("state after Forget = %v, want empty", st)
+		}
+		if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
+			t.Errorf("state file after Forget: stat = %v, want none", err)
+		}
+	})
+
+	t.Run("Forget while CommitDurable waits for older upload", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		store.setIgnoreCancel(true)
+		tr := newTestTracker(t, store)
+		t0 := tr.clock.Now()
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+		uploadDone := startUpload(t, tr, store)
+
+		s2 := testRef("s2", 2, t0.Add(time.Minute))
+		_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot)
+		if err != nil {
+			t.Fatalf("BeginCheckpoint: %v", err)
+		}
+
+		commitErr := make(chan error, 1)
+		go func() {
+			_, err := tr.CommitDurable(trackedActorUID, s2)
+			commitErr <- err
+		}()
+		if got := waitCanceled(t, store); got != "s1" {
+			t.Fatalf("canceled upload = %q, want s1", got)
+		}
+
+		forgetDone := make(chan error, 1)
+		go func() { forgetDone <- tr.Forget(trackedActorUID) }()
+		waitAbandoned(t, tr)
+
+		store.release <- context.Canceled
+		waitClosed(t, uploadDone, "the upload of s1")
+		if err := <-commitErr; apierror.Code(err) != codes.Aborted {
+			t.Errorf("CommitDurable after Forget = %v, want Aborted", err)
+		}
+		if err := <-forgetDone; err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		endCheckpoint()
+		if len(tr.forgotten) != 0 {
+			t.Errorf("forgotten snapshots after endCheckpoint = %v, want none", tr.forgotten)
+		}
+		if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("state after Forget = %v, want empty", st)
+		}
+		if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
+			t.Errorf("state file after Forget: stat = %v, want none", err)
+		}
+	})
+}
+
+func waitWaiting(t *testing.T, tr *Tracker) {
+	t.Helper()
+	eventually(t, "the call is waiting on the actor", func() bool {
+		tr.lock(trackedActorUID)
+		defer tr.unlock(trackedActorUID)
+		a := tr.findLocked(trackedActorUID)
+		return a != nil && a.waiters == 1
+	})
+}
+
+// Forget aborts BeginStart, BeginCheckpoint, and BeginPromote when they are
+// waiting for an operation or checkpoint in progress.
+func TestTrackerForgetAbortsWaiters(t *testing.T) {
+	t.Run("BeginStart waiting on detach", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		tr := newTestTracker(t, store)
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
+		detached := startDetach(t, tr)
+		waitStarted(t, store)
+
+		started := make(chan error, 1)
+		go func() {
+			_, err := tr.BeginStart(t.Context(), trackedActorUID)
+			started <- err
+		}()
+		waitWaiting(t, tr)
+
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if err := <-detached; !errors.Is(err, context.Canceled) {
+			t.Fatalf("detach = %v, want %v", err, context.Canceled)
+		}
+		if err := <-started; apierror.Code(err) != codes.Aborted {
+			t.Errorf("BeginStart after Forget = %v, want Aborted", err)
+		}
+	})
+
+	t.Run("BeginCheckpoint waiting on in-flight checkpoint", func(t *testing.T) {
+		useActorDir(t)
+		tr := newTracker(t)
+		s1 := testRef("s1", 1, tr.clock.Now())
+		_, endFirst, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+		if err != nil {
+			t.Fatalf("first BeginCheckpoint: %v", err)
+		}
+
+		second := make(chan error, 1)
+		go func() {
+			_, _, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+			second <- err
+		}()
+		waitWaiting(t, tr)
+
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		endFirst()
+		if err := <-second; apierror.Code(err) != codes.Aborted {
+			t.Errorf("waiting BeginCheckpoint after Forget = %v, want Aborted", err)
+		}
+	})
+
+	t.Run("BeginPromote waiting on detach", func(t *testing.T) {
+		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		tr := newTestTracker(t, store)
+		s1 := testRef("s1", 1, tr.clock.Now())
+		tr.CommitLocal(trackedActorUID, s1)
+		detached := startDetach(t, tr)
+		waitStarted(t, store)
+
+		promoted := make(chan error, 1)
+		go func() {
+			_, _, err := tr.BeginPromote(t.Context(), trackedActorUID, s1)
+			promoted <- err
+		}()
+		waitWaiting(t, tr)
+
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if err := <-detached; !errors.Is(err, context.Canceled) {
+			t.Fatalf("detach = %v, want %v", err, context.Canceled)
+		}
+		if err := <-promoted; apierror.Code(err) != codes.Aborted {
+			t.Errorf("BeginPromote after Forget = %v, want Aborted", err)
+		}
+	})
+}
+
+// BeginStart waits for a Checkpoint that was in progress when Forget dropped
+// the actor, so the Checkpoint's cleanup finishes before a new activation
+// starts, and fails with Aborted if Forget runs again during that wait.
+func TestTrackerBeginStartWaitsForForgottenCheckpoint(t *testing.T) {
+	t.Run("starts once forgotten checkpoint ends", func(t *testing.T) {
+		useActorDir(t)
+		tr := newTracker(t)
+		s1 := testRef("s1", 1, tr.clock.Now())
+		_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+		if err != nil {
+			t.Fatalf("BeginCheckpoint: %v", err)
+		}
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+
+		started := make(chan func(), 1)
+		startErr := make(chan error, 1)
+		go func() {
+			endStart, err := tr.BeginStart(t.Context(), trackedActorUID)
+			if err != nil {
+				startErr <- err
+				return
+			}
+			started <- endStart
+		}()
+
+		waitWaiting(t, tr)
+		select {
+		case <-started:
+			t.Fatal("BeginStart finished before the forgotten Checkpoint ended")
+		case err := <-startErr:
+			t.Fatalf("BeginStart failed while waiting: %v", err)
+		default:
+		}
+
+		endCheckpoint()
+		select {
+		case endStart := <-started:
+			endStart()
+		case err := <-startErr:
+			t.Fatalf("BeginStart: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("timed out waiting for BeginStart")
+		}
+		if inMemory(tr) {
+			t.Error("entry in memory after BeginStart ended, want none")
+		}
+	})
+
+	t.Run("aborts if forgotten again while waiting", func(t *testing.T) {
+		useActorDir(t)
+		tr := newTracker(t)
+		s1 := testRef("s1", 1, tr.clock.Now())
+		_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+		if err != nil {
+			t.Fatalf("BeginCheckpoint: %v", err)
+		}
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("first Forget: %v", err)
+		}
+
+		startErr := make(chan error, 1)
+		go func() {
+			_, err := tr.BeginStart(t.Context(), trackedActorUID)
+			startErr <- err
+		}()
+		waitWaiting(t, tr)
+
+		if err := tr.Forget(trackedActorUID); err != nil {
+			t.Fatalf("second Forget: %v", err)
+		}
+		endCheckpoint()
+		if err := <-startErr; apierror.Code(err) != codes.Aborted {
+			t.Errorf("BeginStart after second Forget = %v, want Aborted", err)
+		}
+	})
+}
+
 // Forget cancels a detach in progress and waits for it to end, leaving the
 // forgotten actor's local snapshots for Terminate to prune.
 func TestTrackerForgetAbandonsDetach(t *testing.T) {

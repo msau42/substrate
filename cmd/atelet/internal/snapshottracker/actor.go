@@ -221,10 +221,15 @@ type actorSnapshots struct {
 	// entry because writing the file failed. The entry stays in memory while
 	// unsaved is set.
 	unsaved bool
-	// forgetting is set once Forget has canceled the actor's operation in
-	// progress, while it waits for that operation to end. The operation then
-	// leaves the actor alone, no background upload, detach, or report begins,
-	// and the entry stays in memory until Forget drops it.
+	// waiters counts goroutines waiting on op or inFlight while the actor's
+	// lock is released. The entry stays in memory while waiters is nonzero, so
+	// Forget can mark it forgetting.
+	waiters int
+	// forgetting is set once Forget begins dropping the actor, including while
+	// it waits for an operation it canceled to end. The operation then leaves
+	// the actor alone, calls waiting on the entry fail with Aborted, no
+	// background upload, detach, or report begins, and the entry stays in
+	// memory until Forget drops it.
 	forgetting bool
 }
 

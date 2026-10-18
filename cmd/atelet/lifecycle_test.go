@@ -1487,6 +1487,135 @@ func TestRestoreWaitsForCheckpointCleanup(t *testing.T) {
 	}
 }
 
+// TestCheckpointOfForgottenActorCommitsNothing has Terminate forget an actor
+// while the worker checkpoints it: the Checkpoint fails with Aborted, and
+// leaves no tracked state and no local snapshot that atelet would upload or
+// detach for the deleted actor.
+func TestCheckpointOfForgottenActorCommitsNothing(t *testing.T) {
+	for _, mode := range []ateletpb.UploadMode{
+		ateletpb.UploadMode_UPLOAD_MODE_DEFERRED,
+		ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE,
+	} {
+		t.Run(mode.String(), func(t *testing.T) {
+			a := runPluginActor(t)
+			a.worker.onCheckpoint = func() {
+				if err := a.s.snapshots.Forget(pluginActorUID); err != nil {
+					t.Errorf("Forget: %v", err)
+				}
+			}
+			_, err := a.checkpoint(t, a.snapshot("snap-1", 1), mode)
+			if code := apierror.Code(err); code != codes.Aborted {
+				t.Fatalf("Checkpoint of a forgotten actor = %v (code %v), want Aborted", err, code)
+			}
+			if st := a.s.snapshots.State(pluginActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+				t.Errorf("tracked state = %v, want none", st)
+			}
+			if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(pluginActorUID)); !os.IsNotExist(err) {
+				t.Errorf("snapshot state file: stat = %v, want none", err)
+			}
+			if _, err := os.Stat(ateletpath.LocalSnapshotDir(pluginActorUID, "snap-1")); !os.IsNotExist(err) {
+				t.Errorf("local snapshot: stat = %v, want none", err)
+			}
+		})
+	}
+
+	t.Run("Terminate during cleanup after commit", func(t *testing.T) {
+		a := runPluginActor(t)
+		plugin := &blockingUnmountPlugin{}
+		a.s.volumePlugins = map[string]volume.VolumePluginWorkerPlane{"mock-driver": plugin}
+		a.spec.Volumes = []*ateletpb.Volume{{
+			Name: "vol-1",
+			External: &ateletpb.ExternalVolumeSource{
+				StorageVolumeId: "vol-1",
+				VolumeType:      "mock-driver",
+			},
+		}}
+		plugin.onUnmount = func() {
+			if err := a.s.snapshots.Forget(pluginActorUID); err != nil {
+				t.Errorf("Forget: %v", err)
+			}
+			if err := snapshottracker.PruneLocalCheckpoints(t.Context(), pluginActorUID); err != nil {
+				t.Errorf("PruneLocalCheckpoints: %v", err)
+			}
+			if err := removeActorDirs(pluginActorUID); err != nil {
+				t.Errorf("removeActorDirs: %v", err)
+			}
+		}
+
+		_, err := a.checkpoint(t, a.snapshot("snap-1", 1), ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE)
+		if code := apierror.Code(err); code != codes.Aborted {
+			t.Fatalf("Checkpoint = %v (code %v), want Aborted", err, code)
+		}
+		if st := a.s.snapshots.State(pluginActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("tracked state = %v, want none", st)
+		}
+		if _, err := os.Stat(ateletpath.ActorPath(pluginActorUID)); !os.IsNotExist(err) {
+			t.Errorf("actor dir after Terminate: stat = %v, want none", err)
+		}
+	})
+
+	t.Run("Terminate during retried Checkpoint", func(t *testing.T) {
+		a := runPluginActor(t)
+		plugin := &blockingUnmountPlugin{}
+		a.s.volumePlugins = map[string]volume.VolumePluginWorkerPlane{"mock-driver": plugin}
+		a.spec.Volumes = []*ateletpb.Volume{{
+			Name: "vol-1",
+			External: &ateletpb.ExternalVolumeSource{
+				StorageVolumeId: "vol-1",
+				VolumeType:      "mock-driver",
+			},
+		}}
+		snap := a.snapshot("snap-1", 1)
+		if _, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED); err != nil {
+			t.Fatalf("Checkpoint: %v", err)
+		}
+
+		plugin.onUnmount = func() {
+			if err := a.s.snapshots.Forget(pluginActorUID); err != nil {
+				t.Errorf("Forget: %v", err)
+			}
+		}
+		_, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
+		if code := apierror.Code(err); code != codes.Aborted {
+			t.Fatalf("retried Checkpoint = %v (code %v), want Aborted", err, code)
+		}
+	})
+
+	t.Run("Terminate during PromoteSnapshot", func(t *testing.T) {
+		a := runPluginActor(t)
+		snap := a.snapshot("snap-1", 1)
+		if _, err := a.checkpoint(t, snap, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED); err != nil {
+			t.Fatalf("Checkpoint: %v", err)
+		}
+
+		var once sync.Once
+		a.store.onPut = func() {
+			once.Do(func() {
+				if err := a.s.snapshots.Forget(pluginActorUID); err != nil {
+					t.Errorf("Forget: %v", err)
+				}
+				if err := snapshottracker.PruneLocalCheckpoints(t.Context(), pluginActorUID); err != nil {
+					t.Errorf("PruneLocalCheckpoints: %v", err)
+				}
+			})
+		}
+		_, err := a.s.PromoteSnapshot(t.Context(), &ateletpb.PromoteSnapshotRequest{
+			Atespace:              "ate-demo",
+			ActorName:             "counter",
+			ActorUid:              pluginActorUID,
+			ActorTemplateAtespace: "default",
+			ActorTemplateName:     "counter",
+			Snapshot:              snap,
+		})
+		if code := apierror.Code(err); code != codes.Aborted {
+			t.Fatalf("PromoteSnapshot = %v (code %v), want Aborted", err, code)
+		}
+		if st := a.s.snapshots.State(pluginActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
+			t.Errorf("tracked state = %v, want none", st)
+		}
+	})
+}
+
 // TestFailedCheckpointKeepsLocalSnapshot checkpoints a resumed actor again, and
 // fails before the new snapshot commits: the pause snapshot stays on disk and
 // recorded as the actor's latest local snapshot, so the actor can still be
@@ -2370,10 +2499,13 @@ func TestCheckpointSkipsStaleCommitAndKeepsNewerLocal(t *testing.T) {
 		SnapshotFiles: []string{"checkpoint.img"},
 		Fidelity:      "MEMORY",
 	}, map[string]string{"checkpoint.img": "newer-memory"})
-	wantState := a.s.snapshots.CommitLocal(pluginActorUID, snapshottracker.SnapshotRef{
+	wantState, err := a.s.snapshots.CommitLocal(pluginActorUID, snapshottracker.SnapshotRef{
 		Snapshot:   snap3,
 		CommitTime: time.Now(),
 	})
+	if err != nil {
+		t.Fatalf("CommitLocal(pause-snap-3): %v", err)
+	}
 
 	close(release)
 	res := <-resCh

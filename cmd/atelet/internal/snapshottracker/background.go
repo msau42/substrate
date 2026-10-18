@@ -290,7 +290,16 @@ func (t *Tracker) requeueLocked(a *actorSnapshots) {
 	if due, ok := t.detachDueLocked(a); ok {
 		t.queues[opDetach].AddAfter(a.actorUID, due.Sub(now))
 	}
-	if !supersededUploading && a.op == nil && a.holds == 0 && a.retryAt.IsZero() && !a.uploadingFailed && !a.unsaved && !a.forgetting {
+	t.dropIfIdleLocked(a)
+}
+
+// dropIfIdleLocked drops the actor's entry from memory when it has no
+// superseded upload to clean up, no operation, hold, or waiter in progress,
+// no retry hold, no failed upload kept to retry, nothing unsaved, and Forget
+// is not dropping it.
+func (t *Tracker) dropIfIdleLocked(a *actorSnapshots) {
+	supersededUploading := t.store != nil && a.Uploading != nil && !a.keepUploading()
+	if !supersededUploading && a.op == nil && a.holds == 0 && a.waiters == 0 && a.retryAt.IsZero() && !a.uploadingFailed && !a.unsaved && !a.forgetting {
 		t.dropLocked(a.actorUID)
 	}
 }
@@ -406,7 +415,7 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string, check fun
 		if a == nil || a.op == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnEntryLocked(ctx, a, a.op.done, false); err != nil {
 			return nil, err
 		}
 	}
@@ -416,8 +425,9 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string, check fun
 // actor is in progress, and returns the actor's entry, which may be nil. It
 // releases the actor's lock while it waits, and holds it again when it
 // returns. check, if not nil, vets the entry on every pass: an error from it
-// is returned at once, without waiting further. Checkpoint, Run, and Restore
-// call this first so they never race with a detach pruning the actor's local
+// is returned at once, without waiting further. It fails with Aborted when
+// Forget drops the actor during the wait. Checkpoint, Run, and Restore call
+// this first so they never race with a detach pruning the actor's local
 // directory, without waiting behind an upload.
 func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, check func(*actorSnapshots) error) (*actorSnapshots, error) {
 	for {
@@ -430,7 +440,7 @@ func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, chec
 		if a == nil || a.runningDetach() == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnEntryLocked(ctx, a, a.op.done, true); err != nil {
 			return nil, err
 		}
 	}
@@ -440,9 +450,10 @@ func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, chec
 // detach of the actor and no background upload of snap is in progress, and
 // returns the actor's entry, which may be nil. It checks snap's generation on
 // every pass, so a stale generation fails at once without waiting, and one
-// superseded while waiting fails as soon as the wait ends. PromoteSnapshot
-// calls this first so it never races with a detach or uploads the same
-// snapshot twice.
+// superseded while waiting fails as soon as the wait ends. It fails with
+// Aborted when Forget drops the actor during the wait. PromoteSnapshot calls
+// this first so it never races with a detach or uploads the same snapshot
+// twice.
 func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actorUID string, snap SnapshotRef) (*actorSnapshots, error) {
 	for {
 		a := t.findLocked(actorUID)
@@ -463,23 +474,38 @@ func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actor
 		default:
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnEntryLocked(ctx, a, a.op.done, true); err != nil {
 			return nil, err
 		}
 	}
 }
 
-// waitOpLocked waits, releasing the actor's lock meanwhile, until op has
-// ended or ctx does.
-func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp) error {
-	t.unlock(actorUID)
-	defer t.lock(actorUID)
+// waitOnEntryLocked waits, releasing the actor's lock meanwhile, until done is
+// closed or ctx ends. It keeps a in memory while waiting so Forget can mark it
+// forgetting, and fails with Aborted when failIfForgotten is set and Forget
+// began dropping a during the wait.
+func (t *Tracker) waitOnEntryLocked(ctx context.Context, a *actorSnapshots, done <-chan struct{}, failIfForgotten bool) error {
+	t.addLocked(a)
+	a.waiters++
+	t.unlock(a.actorUID)
+	var err error
 	select {
-	case <-op.done:
-		return nil
+	case <-done:
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
 	}
+	t.lock(a.actorUID)
+	a.waiters--
+	if t.tracksLocked(a) {
+		t.dropIfIdleLocked(a)
+	}
+	if err != nil {
+		return err
+	}
+	if failIfForgotten && a.forgetting {
+		return apierror.Aborted("actor %s was forgotten", a.actorUID)
+	}
+	return nil
 }
 
 // abandonOpLocked cancels the actor's operation in progress, if any, marks the

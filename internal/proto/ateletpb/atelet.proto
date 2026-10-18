@@ -329,7 +329,8 @@ service Atelet {
   // it. A Checkpoint of a snapshot already committed, as a retry's is, returns
   // the actor's state without checkpointing the workload again; under
   // UPLOAD_MODE_IMMEDIATE it first uploads the snapshot if it is not durable
-  // yet.
+  // yet. A Checkpoint that a Terminate of the actor overtakes fails with
+  // ABORTED and keeps no snapshot on the node.
   rpc Checkpoint(CheckpointRequest) returns (CheckpointResponse) {}
 
   // Restore restores a workload from a snapshot onto a worker.
@@ -342,7 +343,8 @@ service Atelet {
   // this node.
   //
   // Idempotent: once the snapshot is durable, atelet answers from the
-  // manifest at `snapshot.object`, and fails if there is none.
+  // manifest at `snapshot.object`, and fails if there is none. A
+  // PromoteSnapshot that a Terminate of the actor overtakes fails with ABORTED.
   //
   // TODO: Temporarily, this does not check whether the actor is running.
   rpc PromoteSnapshot(PromoteSnapshotRequest) returns (PromoteSnapshotResponse) {}

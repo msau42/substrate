@@ -151,7 +151,8 @@ type Tracker struct {
 	// actor.
 	locks *actorlock.Locks
 
-	// mu guards the actors map, and is never held during file I/O.
+	// mu guards the actors and forgotten maps, and is never held during file
+	// I/O.
 	mu sync.Mutex
 	// actors maps actorUID to the entries requeueLocked keeps in memory (see
 	// requeueLocked). requeueLocked drops any other entry, and findLocked then
@@ -159,6 +160,11 @@ type Tracker struct {
 	// findOrAddLocked, addLocked, dropLocked, tracksLocked, and
 	// localInUseLocked.
 	actors map[string]*actorSnapshots
+	// forgotten maps actorUID to the Checkpoints and PromoteSnapshots that
+	// were in progress when Forget dropped the actor, until each ends: their
+	// commits fail (see checkNotForgottenLocked), and BeginStart waits for
+	// the Checkpoints among them.
+	forgotten map[string][]*inFlightSnapshot
 }
 
 // Option configures a Tracker.

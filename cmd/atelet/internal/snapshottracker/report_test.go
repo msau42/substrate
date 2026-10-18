@@ -917,15 +917,19 @@ func TestTrackerCancelsReportOnForegroundCall(t *testing.T) {
 		},
 		{
 			name: "CommittedCheckpointState with local snapshot",
-			call: func(_ *testing.T, tr *Tracker) {
-				tr.CommittedCheckpointState(trackedActorUID)
+			call: func(t *testing.T, tr *Tracker) {
+				if _, err := tr.CommittedCheckpointState(trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot); err != nil {
+					t.Fatalf("CommittedCheckpointState: %v", err)
+				}
 			},
 		},
 		{
 			name:            "CommittedCheckpointState when already detached",
 			alreadyDetached: true,
-			call: func(_ *testing.T, tr *Tracker) {
-				tr.CommittedCheckpointState(trackedActorUID)
+			call: func(t *testing.T, tr *Tracker) {
+				if _, err := tr.CommittedCheckpointState(trackedActorUID, committedRef("s1", 1, tr.clock.Now()).Snapshot); err != nil {
+					t.Fatalf("CommittedCheckpointState: %v", err)
+				}
 			},
 		},
 		{

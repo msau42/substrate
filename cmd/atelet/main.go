@@ -850,7 +850,7 @@ func allocatedBytes(info os.FileInfo) int64 {
 	return info.Size()
 }
 
-func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (_ *ateletpb.CheckpointResponse, err error) {
+func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest) (checkpointResp *ateletpb.CheckpointResponse, err error) {
 	if errs := apivalidation.ValidateCheckpointRequest(ctx, req); len(errs) > 0 {
 		return nil, resources.ToAPIError(errs)
 	}
@@ -898,6 +898,11 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		return nil, err
 	}
 	defer endCheckpoint()
+	defer func() {
+		if fErr := s.snapshots.CheckNotForgotten(actorUID, req.GetSnapshot()); fErr != nil {
+			checkpointResp, err = nil, fErr
+		}
+	}()
 	if committed {
 		// A retry of a Checkpoint that committed the snapshot. That one
 		// deleted the workload, so checkpointing again would fail.
@@ -997,7 +1002,10 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 			dPersist = time.Since(tPersist)
 			return nil, fmt.Errorf("while moving to local snapshot: %w", err)
 		}
-		state = s.snapshots.CommitLocal(actorUID, snap)
+		if state, err = s.commitLocal(ctx, actorUID, snap); err != nil {
+			dPersist = time.Since(tPersist)
+			return nil, err
+		}
 	case ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE:
 		// CheckpointWorkload has already deleted the workload, so a retried
 		// Checkpoint cannot redo this upload. It waits for the object-store plugin
@@ -1010,14 +1018,22 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		}
 		durable := snap
 		durable.UploadTime = time.Now()
-		state = s.snapshots.CommitDurable(actorUID, durable)
+		if state, err = s.snapshots.CommitDurable(actorUID, durable); err != nil {
+			dPersist = time.Since(tPersist)
+			return nil, err
+		}
 		// The snapshot is durable now, so the local copy only saves a
 		// download: failing to keep it must not fail the checkpoint. The prune
 		// below deletes a partial copy.
-		if err := s.moveLocalCheckpoint(ctx, req, sandboxRec); err != nil {
-			slog.WarnContext(ctx, "Failed to keep a local copy of the uploaded snapshot", slog.Any("actor", actorRef), slog.Any("err", err))
-		} else {
-			state = s.snapshots.CommitLocal(actorUID, snap)
+		if moveErr := s.moveLocalCheckpoint(ctx, req, sandboxRec); moveErr != nil {
+			if err := s.snapshots.CheckNotForgotten(actorUID, req.GetSnapshot()); err != nil {
+				dPersist = time.Since(tPersist)
+				return nil, err
+			}
+			slog.WarnContext(ctx, "Failed to keep a local copy of the uploaded snapshot", slog.Any("actor", actorRef), slog.Any("err", moveErr))
+		} else if state, err = s.commitLocal(ctx, actorUID, snap); err != nil {
+			dPersist = time.Since(tPersist)
+			return nil, err
 		}
 	default:
 		return nil, fmt.Errorf("unexpected upload mode: %v", mode)
@@ -1031,6 +1047,22 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		return nil, err
 	}
 	return &ateletpb.CheckpointResponse{State: state}, nil
+}
+
+// commitLocal records snap, which a Checkpoint just stored in the actor's
+// local checkpoint directory, as the actor's latest local snapshot. When the
+// tracker refuses the commit, as once Terminate has forgotten the actor, it
+// deletes that copy, which nothing else would delete.
+func (s *Atelet) commitLocal(ctx context.Context, actorUID string, snap snapshottracker.SnapshotRef) (*ateletpb.ActorSnapshotState, error) {
+	state, err := s.snapshots.CommitLocal(actorUID, snap)
+	if err != nil {
+		localDir := ateletpath.LocalSnapshotDir(actorUID, snap.Snapshot.GetSnapshotUuid())
+		if rmErr := os.RemoveAll(localDir); rmErr != nil {
+			slog.WarnContext(ctx, "Failed to delete an uncommitted local snapshot", slog.String("local_dir", localDir), slog.Any("err", rmErr))
+		}
+		return nil, err
+	}
+	return state, nil
 }
 
 // committedCheckpointState returns the actor's state for a retry of a
@@ -1052,7 +1084,7 @@ func (s *Atelet) committedCheckpointState(ctx context.Context, req *ateletpb.Che
 			return nil, err
 		}
 	}
-	return s.snapshots.CommittedCheckpointState(req.GetActorUid()), nil
+	return s.snapshots.CommittedCheckpointState(req.GetActorUid(), req.GetSnapshot())
 }
 
 // cleanUpAfterCheckpoint finishes a Checkpoint that has committed its
@@ -1061,6 +1093,9 @@ func (s *Atelet) committedCheckpointState(ctx context.Context, req *ateletpb.Che
 // Checkpoint runs them again.
 func (s *Atelet) cleanUpAfterCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest) error {
 	actorUID := req.GetActorUid()
+	if err := s.snapshots.CheckNotForgotten(actorUID, req.GetSnapshot()); err != nil {
+		return err
+	}
 
 	// Delete the actor's earlier local snapshots only now that this checkpoint
 	// has committed its own. A checkpoint that fails before then leaves the
@@ -1088,8 +1123,19 @@ func (s *Atelet) cleanUpAfterCheckpoint(ctx context.Context, req *ateletpb.Check
 		return fmt.Errorf("while unmounting external volumes: %w", err)
 	}
 
+	// Terminate forgets the actor before removing its directories, and
+	// BeginStart waits for a forgotten Checkpoint to end. Checking before and
+	// after resetActorDirs avoids recreating directories Terminate removed.
+	if err := s.snapshots.CheckNotForgotten(actorUID, req.GetSnapshot()); err != nil {
+		return err
+	}
+	err := resetActorDirs(actorUID)
+	if fErr := s.snapshots.CheckNotForgotten(actorUID, req.GetSnapshot()); fErr != nil {
+		_ = removeActorDirs(actorUID)
+		return fErr
+	}
 	// Note: we do not crash the actor if resetting the directory fails.
-	if err := resetActorDirs(actorUID); err != nil {
+	if err != nil {
 		return fmt.Errorf("while resetting actor dirs: %w", err)
 	}
 	return nil
@@ -1126,7 +1172,7 @@ func toWorkerFidelity(fidelity ateletpb.SnapshotFidelity) ateworkerpb.SnapshotFi
 	}
 }
 
-func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord) error {
+func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord) (err error) {
 	actorDir := ateletpath.ActorPath(req.GetActorUid())
 	root, err := os.OpenRoot(actorDir)
 	if err != nil {
@@ -1146,6 +1192,11 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	if err := root.MkdirAll(localDir, 0o700); err != nil {
 		return fmt.Errorf("while creating local checkpoint directory: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			_ = root.RemoveAll(localDir)
+		}
+	}()
 
 	// Move exactly the files worker reported.
 	for _, fileName := range rec.SnapshotFiles {
@@ -1265,7 +1316,7 @@ func (s *Atelet) PromoteSnapshot(ctx context.Context, req *ateletpb.PromoteSnaps
 // returns the actor's state. When it uploads, it records the sandbox class
 // the snapshot's manifest names in op, and how long the upload took in
 // dPersist.
-func (s *Atelet) promoteLocalSnapshot(ctx context.Context, req *ateletpb.PromoteSnapshotRequest, op *snapshotOp, dPersist *time.Duration) (*ateletpb.ActorSnapshotState, error) {
+func (s *Atelet) promoteLocalSnapshot(ctx context.Context, req *ateletpb.PromoteSnapshotRequest, op *snapshotOp, dPersist *time.Duration) (state *ateletpb.ActorSnapshotState, err error) {
 	uri, err := resources.ParseSnapshotURI(req.GetSnapshot().GetObject().GetSnapshotUri())
 	if err != nil {
 		return nil, apierror.InvalidArgument("%v", err)
@@ -1280,6 +1331,11 @@ func (s *Atelet) promoteLocalSnapshot(ctx context.Context, req *ateletpb.Promote
 		return nil, err
 	}
 	defer endPromote()
+	defer func() {
+		if fErr := s.snapshots.CheckNotForgotten(req.GetActorUid(), req.GetSnapshot()); fErr != nil {
+			state, err = nil, fErr
+		}
+	}()
 
 	if !alreadyDurable {
 		tPersist := time.Now()
@@ -1295,7 +1351,7 @@ func (s *Atelet) promoteLocalSnapshot(ctx context.Context, req *ateletpb.Promote
 			snap.UploadTime = time.Now()
 		}
 	}
-	return s.snapshots.CommitPromoted(req.GetActorUid(), snap), nil
+	return s.snapshots.CommitPromoted(req.GetActorUid(), snap)
 }
 
 // uploadLocalCheckpointDir uploads the local checkpoint in localDir to uri. It

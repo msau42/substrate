@@ -328,7 +328,8 @@ type AteletClient interface {
 	// it. A Checkpoint of a snapshot already committed, as a retry's is, returns
 	// the actor's state without checkpointing the workload again; under
 	// UPLOAD_MODE_IMMEDIATE it first uploads the snapshot if it is not durable
-	// yet.
+	// yet. A Checkpoint that a Terminate of the actor overtakes fails with
+	// ABORTED and keeps no snapshot on the node.
 	Checkpoint(ctx context.Context, in *CheckpointRequest, opts ...grpc.CallOption) (*CheckpointResponse, error)
 	// Restore restores a workload from a snapshot onto a worker.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (*RestoreResponse, error)
@@ -339,7 +340,8 @@ type AteletClient interface {
 	// this node.
 	//
 	// Idempotent: once the snapshot is durable, atelet answers from the
-	// manifest at `snapshot.object`, and fails if there is none.
+	// manifest at `snapshot.object`, and fails if there is none. A
+	// PromoteSnapshot that a Terminate of the actor overtakes fails with ABORTED.
 	//
 	// TODO: Temporarily, this does not check whether the actor is running.
 	PromoteSnapshot(ctx context.Context, in *PromoteSnapshotRequest, opts ...grpc.CallOption) (*PromoteSnapshotResponse, error)
@@ -453,7 +455,8 @@ type AteletServer interface {
 	// it. A Checkpoint of a snapshot already committed, as a retry's is, returns
 	// the actor's state without checkpointing the workload again; under
 	// UPLOAD_MODE_IMMEDIATE it first uploads the snapshot if it is not durable
-	// yet.
+	// yet. A Checkpoint that a Terminate of the actor overtakes fails with
+	// ABORTED and keeps no snapshot on the node.
 	Checkpoint(context.Context, *CheckpointRequest) (*CheckpointResponse, error)
 	// Restore restores a workload from a snapshot onto a worker.
 	Restore(context.Context, *RestoreRequest) (*RestoreResponse, error)
@@ -464,7 +467,8 @@ type AteletServer interface {
 	// this node.
 	//
 	// Idempotent: once the snapshot is durable, atelet answers from the
-	// manifest at `snapshot.object`, and fails if there is none.
+	// manifest at `snapshot.object`, and fails if there is none. A
+	// PromoteSnapshot that a Terminate of the actor overtakes fails with ABORTED.
 	//
 	// TODO: Temporarily, this does not check whether the actor is running.
 	PromoteSnapshot(context.Context, *PromoteSnapshotRequest) (*PromoteSnapshotResponse, error)

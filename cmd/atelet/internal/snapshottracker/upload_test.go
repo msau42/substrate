@@ -64,7 +64,7 @@ func TestTrackerUploadsLatestLocalSnapshot(t *testing.T) {
 	}
 	t0 := tr.clock.Now()
 
-	st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 	if got := st.GetLatestLocal(); uuidOf(got) != "s1" || !timeOf(got.GetLocalCommitTime()).Equal(t0) {
 		t.Errorf("latest_local = %v, want s1 committed at %v", got, t0)
 	}
@@ -72,7 +72,7 @@ func TestTrackerUploadsLatestLocalSnapshot(t *testing.T) {
 		t.Errorf("upload_due_time = %v, want %v", got, want)
 	}
 
-	st = tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0.Add(10*time.Minute)))
+	st, _ = tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0.Add(10*time.Minute)))
 	if got, want := timeOf(st.GetUploadDueTime()), t0.Add(testUploadDelay); !got.Equal(want) {
 		t.Errorf("upload_due_time = %v, want %v: when the first snapshot was due", got, want)
 	}
@@ -114,7 +114,7 @@ func TestTrackerCheckpointDuringUpload(t *testing.T) {
 	tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 	done := startUpload(t, tr, store)
 
-	st := tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s2", 2, tr.clock.Now()))
 	if keep := tr.LocalSnapshotsToKeep(trackedActorUID); !slices.Equal(keep, []string{"s2", "s1"}) {
 		t.Errorf("LocalSnapshotsToKeep = %v, want [s2 s1]: s1 is being uploaded", keep)
 	}
@@ -181,7 +181,11 @@ func TestTrackerImmediateCheckpointDuringUpload(t *testing.T) {
 			s2.UploadTime = s2.CommitTime.Add(time.Second)
 			stateCh := make(chan *ateletpb.ActorSnapshotState, 1)
 			go func() {
-				stateCh <- tr.CommitDurable(trackedActorUID, s2)
+				st, err := tr.CommitDurable(trackedActorUID, s2)
+				if err != nil {
+					t.Errorf("CommitDurable: %v", err)
+				}
+				stateCh <- st
 			}()
 			if got := waitCanceled(t, store); got != "s1" {
 				t.Fatalf("canceled upload = %q, want s1", got)
@@ -220,7 +224,7 @@ func TestTrackerImmediateCheckpointDuringUpload(t *testing.T) {
 
 			// The next deferred checkpoint is due a full delay after it was taken.
 			s3Time := tr.clock.Now()
-			st = tr.CommitLocal(trackedActorUID, testRef("s3", 3, s3Time))
+			st, _ = tr.CommitLocal(trackedActorUID, testRef("s3", 3, s3Time))
 			if got, want := timeOf(st.GetUploadDueTime()), s3Time.Add(testUploadDelay); !got.Equal(want) {
 				t.Errorf("upload_due_time = %v, want %v", got, want)
 			}
@@ -255,7 +259,11 @@ func TestTrackerCommitPromotedCancelsOlderUpload(t *testing.T) {
 
 	stateCh := make(chan *ateletpb.ActorSnapshotState, 1)
 	go func() {
-		stateCh <- tr.CommitPromoted(trackedActorUID, s2)
+		st, err := tr.CommitPromoted(trackedActorUID, s2)
+		if err != nil {
+			t.Errorf("CommitPromoted: %v", err)
+		}
+		stateCh <- st
 	}()
 	if got := waitCanceled(t, store); got != "s1" {
 		t.Fatalf("canceled upload = %q, want s1", got)
@@ -288,7 +296,7 @@ func TestTrackerCommitPromotedCancelsOlderUpload(t *testing.T) {
 func TestTrackerRetriedCommitWaitsForOlderUpload(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		commit func(*Tracker, string, SnapshotRef) *ateletpb.ActorSnapshotState
+		commit func(*Tracker, string, SnapshotRef) (*ateletpb.ActorSnapshotState, error)
 	}{
 		{"CommitDurable", (*Tracker).CommitDurable},
 		{"CommitPromoted", (*Tracker).CommitPromoted},
@@ -306,7 +314,13 @@ func TestTrackerRetriedCommitWaitsForOlderUpload(t *testing.T) {
 			s2.UploadTime = s2.CommitTime.Add(time.Second)
 
 			states := make(chan *ateletpb.ActorSnapshotState, 2)
-			commit := func() { states <- tc.commit(tr, trackedActorUID, s2) }
+			commit := func() {
+				st, err := tc.commit(tr, trackedActorUID, s2)
+				if err != nil {
+					t.Errorf("%s: %v", tc.name, err)
+				}
+				states <- st
+			}
 			go commit()
 			if got := waitCanceled(t, store); got != "s1" {
 				t.Fatalf("canceled upload = %q, want s1", got)
@@ -549,7 +563,7 @@ func TestTrackerWithoutStoreSchedulesNoUploads(t *testing.T) {
 	useActorDir(t)
 	tr := newTracker(t)
 	taken := tr.clock.Now().Add(-time.Hour)
-	if st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, taken)); st.GetUploadDueTime() != nil {
+	if st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, taken)); st.GetUploadDueTime() != nil {
 		t.Errorf("upload_due_time = %v without a store, want unset", st.GetUploadDueTime())
 	}
 	if n := queuedNow(tr); n != 0 {
@@ -888,7 +902,7 @@ func TestTrackerRetriesUploadingWhenLatestLocalHasNoObject(t *testing.T) {
 	// Another pause checkpoint during backoff still keeps s1 and its backoff.
 	s3 := testRef("s3", 3, tr.clock.Now())
 	s3.Snapshot.Object = nil
-	st = tr.CommitLocal(trackedActorUID, s3)
+	st, _ = tr.CommitLocal(trackedActorUID, s3)
 	if keep := tr.LocalSnapshotsToKeep(trackedActorUID); !slices.Equal(keep, []string{"s3", "s1"}) {
 		t.Errorf("LocalSnapshotsToKeep during backoff = %v, want [s3 s1]", keep)
 	}
@@ -1366,7 +1380,7 @@ func TestTrackerOlderLocalDoesNotSupersedeUploading(t *testing.T) {
 	// Fail s2 once, then record an older generation s1 as LatestLocal.
 	uploadNow(t, tr, store, errors.New("boom"))
 	retryAt := tr.clock.Now().Add(testRetryDelay)
-	st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0.Add(time.Minute)))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0.Add(time.Minute)))
 	if got := uuidOf(st.GetUploading()); got != "s2" {
 		t.Fatalf("uploading after older CommitLocal = %q, want s2 kept", got)
 	}

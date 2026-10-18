@@ -353,7 +353,7 @@ func TestTrackerState(t *testing.T) {
 	}
 	tr := newTracker(t)
 	t0 := time.Now()
-	st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 	if got := st.GetLatestLocal(); uuidOf(got) != "s1" || !timeOf(got.GetLocalCommitTime()).Equal(t0) {
 		t.Errorf("latest_local = %v, want s1 committed at %v", got, t0)
 	}
@@ -367,7 +367,7 @@ func TestTrackerState(t *testing.T) {
 	s2 := testRef("s2", 2, t0.Add(time.Minute))
 	durable := s2
 	durable.UploadTime = s2.CommitTime.Add(time.Second)
-	st = tr.CommitDurable(trackedActorUID, durable)
+	st, _ = tr.CommitDurable(trackedActorUID, durable)
 	if st.GetLatestLocal() != nil {
 		t.Errorf("latest_local = %v after CommitDurable, want unset: s2 supersedes s1", st.GetLatestLocal())
 	}
@@ -377,12 +377,12 @@ func TestTrackerState(t *testing.T) {
 	if len(tr.actors) != 0 {
 		t.Errorf("in-memory actors after CommitDurable = %d, want 0 after writing to file", len(tr.actors))
 	}
-	st = tr.CommitLocal(trackedActorUID, s2)
+	st, _ = tr.CommitLocal(trackedActorUID, s2)
 	if got := st.GetLatestLocal(); uuidOf(got) != "s2" || !timeOf(got.GetLocalCommitTime()).Equal(s2.CommitTime) || got.GetDurableCompleteTime() != nil {
 		t.Errorf("latest_local = %v, want s2 committed at %v, with no upload time", got, s2.CommitTime)
 	}
 
-	st = tr.CommitLocal(trackedActorUID, testRef("s3", 3, t0.Add(2*time.Minute)))
+	st, _ = tr.CommitLocal(trackedActorUID, testRef("s3", 3, t0.Add(2*time.Minute)))
 	if uuidOf(st.GetLatestLocal()) != "s3" || uuidOf(st.GetLatestDurable()) != "s2" {
 		t.Errorf("state = %v, want s3 local and s2 still durable", st)
 	}
@@ -429,7 +429,7 @@ func TestTrackerCommitDurableDropsOlderLocal(t *testing.T) {
 	}
 
 	tr.CommitLocal(trackedActorUID, s2)
-	if st := tr.CommitDurable(trackedActorUID, s2); uuidOf(st.GetLatestLocal()) != "s2" {
+	if st, _ := tr.CommitDurable(trackedActorUID, s2); uuidOf(st.GetLatestLocal()) != "s2" {
 		t.Errorf("latest_local after CommitDurable of the same snapshot = %v, want s2 kept", st.GetLatestLocal())
 	}
 }
@@ -448,7 +448,7 @@ func TestTrackerCommitPromoted(t *testing.T) {
 
 	promoted := testRef("s1", 1, time.Time{})
 	promoted.UploadTime = t0.Add(time.Minute)
-	st := tr.CommitPromoted(trackedActorUID, promoted)
+	st, _ := tr.CommitPromoted(trackedActorUID, promoted)
 	if got := st.GetLatestLocal(); uuidOf(got) != "s1" || !timeOf(got.GetLocalCommitTime()).Equal(t0) || got.GetDurableCompleteTime() != nil {
 		t.Errorf("latest_local = %v, want s1 committed at %v, with no upload time", got, t0)
 	}
@@ -461,7 +461,7 @@ func TestTrackerCommitPromoted(t *testing.T) {
 
 	retry := testRef("s1", 1, time.Time{})
 	retry.UploadTime = t0.Add(time.Hour)
-	if got := tr.CommitPromoted(trackedActorUID, retry); !proto.Equal(got, st) {
+	if got, _ := tr.CommitPromoted(trackedActorUID, retry); !proto.Equal(got, st) {
 		t.Errorf("state after a retried promote = %v, want %v", got, st)
 	}
 
@@ -470,7 +470,7 @@ func TestTrackerCommitPromoted(t *testing.T) {
 	tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0.Add(2*time.Hour)))
 	other := testRef("s3", 3, time.Time{})
 	other.UploadTime = t0.Add(3 * time.Hour)
-	st = tr.CommitPromoted(trackedActorUID, other)
+	st, _ = tr.CommitPromoted(trackedActorUID, other)
 	if got := st.GetLatestDurable(); uuidOf(got) != "s3" || got.GetLocalCommitTime() != nil || uuidOf(st.GetLatestLocal()) != "s2" {
 		t.Errorf("state = %v, want s3 durable without a commit time, and s2 still local", st)
 	}
@@ -480,7 +480,7 @@ func TestTrackerCommitPromoted(t *testing.T) {
 	tr.CommitLocal(trackedActorUID, testRef("s4", 4, t0.Add(4*time.Hour)))
 	older := testRef("s2", 2, time.Time{})
 	older.UploadTime = t0.Add(5 * time.Hour)
-	st = tr.CommitPromoted(trackedActorUID, older)
+	st, _ = tr.CommitPromoted(trackedActorUID, older)
 	if uuidOf(st.GetLatestDurable()) != "s3" || uuidOf(st.GetLatestLocal()) != "s4" {
 		t.Errorf("state after older promote = %v, want s3 durable and s4 local", st)
 	}
@@ -521,14 +521,14 @@ func TestTrackerCommitPromotedClearsUploadDue(t *testing.T) {
 	store := newFakeSnapshotStore()
 	tr := newIdleTestTracker(t, store)
 	t0 := tr.clock.Now()
-	st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 	if st.GetUploadDueTime() == nil {
 		t.Fatal("upload_due_time unset before promote, want set")
 	}
 
 	promoted := testRef("s1", 1, time.Time{})
 	promoted.UploadTime = t0.Add(time.Minute)
-	if st = tr.CommitPromoted(trackedActorUID, promoted); st.GetUploadDueTime() != nil {
+	if st, _ = tr.CommitPromoted(trackedActorUID, promoted); st.GetUploadDueTime() != nil {
 		t.Errorf("upload_due_time after promoting latest local = %v, want unset", st.GetUploadDueTime())
 	}
 
@@ -539,7 +539,7 @@ func TestTrackerCommitPromotedClearsUploadDue(t *testing.T) {
 
 	older := testRef("s0", 0, time.Time{})
 	older.UploadTime = t2.Add(3 * time.Minute)
-	st = tr.CommitPromoted(trackedActorUID, older)
+	st, _ = tr.CommitPromoted(trackedActorUID, older)
 	if got := uuidOf(st.GetLatestDurable()); got != "s1" {
 		t.Errorf("latest_durable after promoting below durable = %q, want s1", got)
 	}
@@ -549,7 +549,7 @@ func TestTrackerCommitPromotedClearsUploadDue(t *testing.T) {
 
 	between := testRef("s2", 2, time.Time{})
 	between.UploadTime = t2.Add(3 * time.Minute)
-	st = tr.CommitPromoted(trackedActorUID, between)
+	st, _ = tr.CommitPromoted(trackedActorUID, between)
 	if got := uuidOf(st.GetLatestDurable()); got != "s2" {
 		t.Errorf("latest_durable after promoting s2 = %q, want s2", got)
 	}
@@ -563,13 +563,13 @@ func TestTrackerCommitPromotedClearsUploadDue(t *testing.T) {
 		t.Fatal("detach succeeded, want the store's error")
 	}
 	wantRetry := tr.clock.Now().Add(testRetryDelay)
-	st = tr.CommitPromoted(trackedActorUID, older)
+	st, _ = tr.CommitPromoted(trackedActorUID, older)
 	if got := timeOf(st.GetUploadDueTime()); !got.Equal(wantRetry) {
 		t.Errorf("upload_due_time after promoting below durable during backoff = %v, want %v", got, wantRetry)
 	}
 	betweenBackoff := testRef("s3", 3, time.Time{})
 	betweenBackoff.UploadTime = tr.clock.Now()
-	st = tr.CommitPromoted(trackedActorUID, betweenBackoff)
+	st, _ = tr.CommitPromoted(trackedActorUID, betweenBackoff)
 	if got := uuidOf(st.GetLatestDurable()); got != "s3" {
 		t.Errorf("latest_durable after promoting s3 during backoff = %q, want s3", got)
 	}
@@ -589,7 +589,7 @@ func TestTrackerKeepsUnsavedStateInMemory(t *testing.T) {
 	}
 	tr := newTracker(t)
 	t0 := time.Now()
-	st := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 	if len(tr.actors) != 1 {
 		t.Fatalf("in-memory actors = %d after a failed save, want 1", len(tr.actors))
 	}
@@ -600,7 +600,7 @@ func TestTrackerKeepsUnsavedStateInMemory(t *testing.T) {
 	if err := os.Remove(stateFile); err != nil {
 		t.Fatal(err)
 	}
-	st = tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0.Add(time.Minute)))
+	st, _ = tr.CommitLocal(trackedActorUID, testRef("s2", 2, t0.Add(time.Minute)))
 	if len(tr.actors) != 0 {
 		t.Errorf("in-memory actors = %d after a successful save, want 0", len(tr.actors))
 	}
@@ -1040,13 +1040,13 @@ func TestTrackerCommitsSkipOlderGenerations(t *testing.T) {
 	tr := newIdleTestTracker(t, store)
 	t0 := tr.clock.Now()
 
-	st := tr.CommitLocal(trackedActorUID, testRef("s3", 3, t0))
+	st, _ := tr.CommitLocal(trackedActorUID, testRef("s3", 3, t0))
 	for _, stale := range []SnapshotRef{
 		testRef("s2", 2, t0.Add(time.Minute)),
 		testRef("other", 3, t0.Add(time.Minute)),
 		testRef("s3", 3, t0.Add(time.Minute)),
 	} {
-		got := tr.CommitLocal(trackedActorUID, stale)
+		got, _ := tr.CommitLocal(trackedActorUID, stale)
 		if !proto.Equal(got, st) {
 			t.Errorf("CommitLocal(%v) = %v, want unchanged %v", stale.Snapshot, got, st)
 		}
@@ -1057,13 +1057,13 @@ func TestTrackerCommitsSkipOlderGenerations(t *testing.T) {
 
 	s4 := testRef("s4", 4, t0.Add(2*time.Minute))
 	s4.UploadTime = t0.Add(2 * time.Minute)
-	st = tr.CommitDurable(trackedActorUID, s4)
+	st, _ = tr.CommitDurable(trackedActorUID, s4)
 	for _, stale := range []SnapshotRef{
 		testRef("s2", 2, t0.Add(3*time.Minute)),
 		testRef("other", 4, t0.Add(3*time.Minute)),
 		testRef("s4", 4, t0.Add(3*time.Minute)),
 	} {
-		if got := tr.CommitDurable(trackedActorUID, stale); !proto.Equal(got, st) {
+		if got, _ := tr.CommitDurable(trackedActorUID, stale); !proto.Equal(got, st) {
 			t.Errorf("CommitDurable(%v) = %v, want unchanged %v", stale.Snapshot, got, st)
 		}
 	}
@@ -1071,7 +1071,7 @@ func TestTrackerCommitsSkipOlderGenerations(t *testing.T) {
 		testRef("s3", 3, t0.Add(3*time.Minute)),
 		testRef("other", 4, t0.Add(3*time.Minute)),
 	} {
-		if got := tr.CommitLocal(trackedActorUID, staleLocal); !proto.Equal(got, st) {
+		if got, _ := tr.CommitLocal(trackedActorUID, staleLocal); !proto.Equal(got, st) {
 			t.Errorf("CommitLocal(%v) below durable = %v, want unchanged %v", staleLocal.Snapshot, got, st)
 		}
 	}
@@ -1090,7 +1090,7 @@ func TestTrackerCommitsSkipOlderGenerations(t *testing.T) {
 
 	s5 := testRef("s5", 5, t6.Add(time.Minute))
 	s5.UploadTime = tr.clock.Now()
-	st = tr.CommitDurable(trackedActorUID, s5)
+	st, _ = tr.CommitDurable(trackedActorUID, s5)
 	if got := uuidOf(st.GetLatestDurable()); got != "s5" {
 		t.Errorf("latest_durable after CommitDurable(s5) = %q, want s5", got)
 	}
