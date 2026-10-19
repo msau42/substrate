@@ -673,7 +673,7 @@ func TestTrackerCheckGeneration(t *testing.T) {
 	}
 	checkBegin := func(t *testing.T, tr *Tracker, r SnapshotRef, wantCode codes.Code) {
 		t.Helper()
-		end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, r.Snapshot)
+		_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, r.Snapshot)
 		if err == nil {
 			end()
 		}
@@ -732,6 +732,7 @@ func TestTrackerCheckGeneration(t *testing.T) {
 	tr.CommitLocal(trackedActorUID, ref("s3", 6))
 	checkBegin(t, tr, ref("s2", 4), codes.Aborted)
 	checkBegin(t, tr, ref("s3", 6), codes.OK)
+
 	// If durable has a higher generation than local, durable is newest.
 	a := &actorSnapshots{
 		actorUID: trackedActorUID,
@@ -773,6 +774,114 @@ func TestTrackerCheckGeneration(t *testing.T) {
 	if got := apierror.Code(a.checkGeneration(snap("uploading", 7))); got != codes.OK {
 		t.Errorf("checkGeneration(uploading@7) code = %v, want OK", got)
 	}
+}
+
+// BeginCheckpoint reports whether its snapshot is committed already, as
+// LatestLocal or LatestDurable, and refuses a snapshot committed under the
+// same UUID but named differently.
+func TestTrackerBeginCheckpointReportsCommitted(t *testing.T) {
+	useActorDir(t)
+	tr := newTracker(t)
+	t0 := tr.clock.Now()
+	begin := func(snap *ateletpb.Snapshot) (bool, error) {
+		committed, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, snap)
+		if err == nil {
+			end()
+		}
+		return committed, err
+	}
+
+	s1 := testRef("s1", 1, t0)
+	if committed, err := begin(s1.Snapshot); err != nil || committed {
+		t.Errorf("BeginCheckpoint(s1) before its commit = (%v, %v), want (false, nil)", committed, err)
+	}
+	tr.CommitLocal(trackedActorUID, s1)
+	if committed, err := begin(s1.Snapshot); err != nil || !committed {
+		t.Errorf("BeginCheckpoint(s1) once committed locally = (%v, %v), want (true, nil)", committed, err)
+	}
+
+	// s2 is durable only: CommitDurable drops s1, the older LatestLocal.
+	s2 := testRef("s2", 2, t0)
+	tr.CommitDurable(trackedActorUID, s2)
+	if committed, err := begin(s2.Snapshot); err != nil || !committed {
+		t.Errorf("BeginCheckpoint(s2) once durable = (%v, %v), want (true, nil)", committed, err)
+	}
+	for name, rename := range map[string]func(*ateletpb.Snapshot){
+		"generation": func(s *ateletpb.Snapshot) { s.Generation = 3 },
+		"fidelity":   func(s *ateletpb.Snapshot) { s.Fidelity = ateletpb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES },
+		"uri":        func(s *ateletpb.Snapshot) { s.Object.SnapshotUri += "-other" },
+	} {
+		snap := proto.CloneOf(s2.Snapshot)
+		rename(snap)
+		if _, err := begin(snap); apierror.Code(err) != codes.FailedPrecondition {
+			t.Errorf("BeginCheckpoint(s2 with another %s) = %v, want FailedPrecondition", name, err)
+		}
+	}
+}
+
+// NotStartedSince holds for the latest local snapshot until a Run or Restore
+// of the actor begins, and never for a snapshot that is durable only.
+func TestTrackerNotStartedSince(t *testing.T) {
+	useActorDir(t)
+	tr := newTracker(t)
+	s1 := testRef("s1", 1, tr.clock.Now())
+	if tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) before its commit = true, want false")
+	}
+	tr.CommitLocal(trackedActorUID, s1)
+	if !tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) once committed locally = false, want true")
+	}
+	if tr.NotStartedSince(trackedActorUID, testRef("other", 1, time.Time{}).Snapshot) {
+		t.Error("NotStartedSince(another snapshot) = true, want false")
+	}
+	end, err := tr.BeginStart(t.Context(), trackedActorUID)
+	if err != nil {
+		t.Fatalf("BeginStart: %v", err)
+	}
+	end()
+	if tr.NotStartedSince(trackedActorUID, s1.Snapshot) {
+		t.Error("NotStartedSince(s1) once a Restore began = true, want false")
+	}
+
+	s2 := testRef("s2", 2, tr.clock.Now())
+	tr.CommitDurable(trackedActorUID, s2)
+	if tr.NotStartedSince(trackedActorUID, s2.Snapshot) {
+		t.Error("NotStartedSince(s2), durable only = true, want false")
+	}
+}
+
+// When a retried immediate Checkpoint promotes inside its checkpoint hold,
+// ending the promote restores the checkpoint hold so detaches stay blocked
+// until the checkpoint ends.
+func TestTrackerPromoteInsideCheckpointKeepsHold(t *testing.T) {
+	store := newFakeSnapshotStore()
+	tr := newIdleTestTracker(t, store)
+	s1 := testRef("s1", 1, tr.clock.Now())
+	tr.CommitLocal(trackedActorUID, s1)
+
+	_, endCheckpoint, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s1.Snapshot)
+	if err != nil {
+		t.Fatalf("BeginCheckpoint: %v", err)
+	}
+	_, endPromote, err := tr.BeginPromote(t.Context(), trackedActorUID, s1)
+	if err != nil {
+		t.Fatalf("BeginPromote: %v", err)
+	}
+	tr.CommitPromoted(trackedActorUID, s1)
+	endPromote()
+
+	stepTo(tr, detachDueOf(tr, trackedActorUID))
+	if run := tr.beginDueWork(trackedActorUID, opDetach); run != nil {
+		t.Error("a due detach began after the inner endPromote, want it held off while the Checkpoint holds the actor")
+		run()
+	}
+	endCheckpoint()
+	run := tr.beginDueWork(trackedActorUID, opDetach)
+	if run == nil {
+		t.Fatal("no detach began after endCheckpoint, want the due detach")
+	}
+	run()
 }
 
 // CommitLocal and CommitDurable skip older generations, and an older

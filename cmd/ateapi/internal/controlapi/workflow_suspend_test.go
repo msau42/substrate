@@ -1369,6 +1369,9 @@ func TestSuspendActor_AppliesCheckpointState(t *testing.T) {
 		// state builds what Checkpoint returns, from the request it got.
 		state         func(req *ateletpb.CheckpointRequest) *ateletpb.ActorSnapshotState
 		wantSnapshots []snapshotOutcome
+		// wantDetached is set when an async suspend's snapshot was already
+		// uploaded and detached by atelet, clearing AssignedNode.
+		wantDetached bool
 		// wantCode, when set, is the error the suspend fails with.
 		wantCode codes.Code
 	}{{
@@ -1407,6 +1410,22 @@ func TestSuspendActor_AppliesCheckpointState(t *testing.T) {
 			return nil
 		},
 		wantSnapshots: []snapshotOutcome{{generation: 2, fidelity: memory, locality: node, durable: pending}},
+	}, {
+		// A retried async suspend can get a state where atelet already
+		// uploaded and detached the snapshot it committed on the first
+		// attempt. The snapshot is recorded as durable with no node
+		// locality, and AssignedNode is cleared so the actor can resume
+		// on any node.
+		name:   "async: a snapshot atelet already detached is recorded without locality",
+		mode:   suspendAsync,
+		status: &ateapipb.ActorStatus{LastAssignedGeneration: 1, Snapshots: []*ateapipb.Snapshot{durable(1, completed)}},
+		state: func(req *ateletpb.CheckpointRequest) *ateletpb.ActorSnapshotState {
+			return &ateletpb.ActorSnapshotState{
+				LatestDurable: &ateletpb.SnapshotReport{Snapshot: req.GetSnapshot()},
+			}
+		},
+		wantSnapshots: []snapshotOutcome{{generation: 2, fidelity: memory, durable: completed}},
+		wantDetached:  true,
 	}, {
 		name: "sync: the fidelity atelet reports is recorded",
 		mode: suspendSync,
@@ -1485,6 +1504,13 @@ func TestSuspendActor_AppliesCheckpointState(t *testing.T) {
 			}
 			if got := stored.GetStatus().GetState(); got != ateapipb.ActorState_ACTOR_STATE_SUSPENDED {
 				t.Errorf("state = %v, want SUSPENDED", got)
+			}
+			wantNode := node
+			if tt.mode == suspendSync || tt.wantDetached {
+				wantNode = ""
+			}
+			if got := stored.GetStatus().GetAssignedNode(); got != wantNode {
+				t.Errorf("assigned_node = %q, want %q", got, wantNode)
 			}
 			if diff := cmp.Diff(tt.wantSnapshots, describeSnapshots(stored.GetStatus()), cmp.AllowUnexported(snapshotOutcome{})); diff != "" {
 				t.Errorf("snapshots mismatch (-want +got):\n%s", diff)

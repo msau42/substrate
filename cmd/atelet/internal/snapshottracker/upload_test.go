@@ -535,7 +535,8 @@ func TestTrackerStartAndCheckpointDoNotWaitForUpload(t *testing.T) {
 	}{
 		{"BeginStart", tr.BeginStart},
 		{"BeginCheckpoint", func(ctx context.Context, uid string) (func(), error) {
-			return tr.BeginCheckpoint(ctx, uid, testRef("s2", 2, time.Time{}).Snapshot)
+			_, end, err := tr.BeginCheckpoint(ctx, uid, testRef("s2", 2, time.Time{}).Snapshot)
+			return end, err
 		}},
 	} {
 		returnsPromptly(t, tc.name+" during a background upload", func() {
@@ -561,7 +562,7 @@ func TestTrackerUploadRunsWhileActorHeld(t *testing.T) {
 	t0 := tr.clock.Now()
 	tr.CommitLocal(trackedActorUID, testRef("s1", 1, t0))
 
-	end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s2", 2, t0).Snapshot)
+	_, end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, testRef("s2", 2, t0).Snapshot)
 	if err != nil {
 		t.Fatalf("BeginCheckpoint: %v", err)
 	}

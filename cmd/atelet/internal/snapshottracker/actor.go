@@ -181,7 +181,8 @@ type actorSnapshotsRecord struct {
 }
 
 // holdKind is the kind of RPC in progress on an actor, or holdNone. Callers
-// serialize lifecycle RPCs per actor, so at most one holds an actor at once.
+// serialize lifecycle RPCs per actor, so at most one RPC holds an actor at
+// once; a retried immediate Checkpoint promotes inside its checkpoint hold.
 type holdKind int
 
 const (
@@ -222,6 +223,25 @@ type actorSnapshots struct {
 	// entry because writing the file failed. The entry stays in memory while
 	// unsaved is set.
 	unsaved bool
+}
+
+// checkpointCommitted reports whether a Checkpoint of snap has committed it
+// already: LatestLocal or LatestDurable is snap. It fails with
+// FailedPrecondition when one of them has snap's UUID but a different
+// generation, fidelity, or URI: the control plane named one snapshot two
+// ways, so refuse rather than guess which is right.
+func (a *actorSnapshots) checkpointCommitted(snap *ateletpb.Snapshot) (bool, error) {
+	for _, r := range []*SnapshotRef{a.LatestLocal, a.LatestDurable} {
+		if r == nil || r.uuid() != snap.GetSnapshotUuid() {
+			continue
+		}
+		if r.generation() != snap.GetGeneration() || r.Snapshot.GetFidelity() != snap.GetFidelity() || r.uri() != snap.GetObject().GetSnapshotUri() {
+			return false, apierror.FailedPrecondition("snapshot %s is committed as generation %d with fidelity %s at %q, but requested as generation %d with fidelity %s at %q",
+				r.uuid(), r.generation(), r.Snapshot.GetFidelity(), r.uri(), snap.GetGeneration(), snap.GetFidelity(), snap.GetObject().GetSnapshotUri())
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 // localNeeded reports whether CommitLocal should record snap as LatestLocal:
