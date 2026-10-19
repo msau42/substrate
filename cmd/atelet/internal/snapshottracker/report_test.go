@@ -295,9 +295,12 @@ func TestTrackerDoesNotReportWhenNothingChanged(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		snap SnapshotRef
+		// cancels is set when snap is newer than the upload's snapshot, so
+		// CommitDurable cancels the upload and waits for it to end.
+		cancels bool
 	}{
-		{"newer durable snapshot", committedRef("s2", 2, time.Time{})},
-		{"same generation already durable", committedRef("s1", 1, time.Time{})},
+		{"newer durable snapshot", committedRef("s2", 2, time.Time{}), true},
+		{"same generation already durable", committedRef("s1", 1, time.Time{}), false},
 	} {
 		t.Run("upload overtaken by "+tc.name, func(t *testing.T) {
 			store := newFakeSnapshotStore()
@@ -311,7 +314,9 @@ func TestTrackerDoesNotReportWhenNothingChanged(t *testing.T) {
 			durable.UploadTime = durable.CommitTime.Add(time.Second)
 			tr.CommitDurable(trackedActorUID, durable)
 
-			store.release <- nil
+			if !tc.cancels {
+				store.release <- nil
+			}
 			waitClosed(t, done, "the upload of s1")
 			if reportDue(tr) || tr.reporting.queue.Len() != 0 {
 				t.Errorf("report due = %v, queued = %d after an overtaken upload, want neither", reportDue(tr), tr.reporting.queue.Len())

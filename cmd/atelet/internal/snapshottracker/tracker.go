@@ -104,10 +104,12 @@ type Store interface {
 // control-plane call does not wait behind other actors' background work. It
 // does wait for the actor's own background operation in progress, even an
 // upload of an older snapshot; Run, Restore, and Checkpoint wait for a
-// background detach in progress; and PromoteSnapshot waits for a background
-// detach or a background upload of the same snapshot. A worker leaves an actor
-// with an operation in progress to that operation's end, which queues the
-// actor again.
+// background detach in progress; PromoteSnapshot waits for a background detach
+// or a background upload of the same snapshot; CommitDurable and
+// CommitPromoted cancel an upload of a snapshot older than LatestDurable and
+// wait for it to end; and Forget cancels any background operation in progress
+// and waits for it to end. A worker leaves an actor with an operation in
+// progress to that operation's end, which queues the actor again.
 type Tracker struct {
 	// ctx bounds background work, and shuts the queues down when it ends.
 	ctx context.Context
@@ -158,7 +160,7 @@ type Tracker struct {
 	// actors maps actorUID to the entries requeueLocked keeps in memory (see
 	// requeueLocked). requeueLocked drops any other entry, and findLocked then
 	// reads the state from the file. Read and change it through findLocked,
-	// findOrAddLocked, addLocked, dropLocked, and heldLocked.
+	// findOrAddLocked, addLocked, dropLocked, and localInUseLocked.
 	actors map[string]*actorSnapshots
 }
 
@@ -315,14 +317,14 @@ func (t *Tracker) dropLocked(actorUID string) {
 	delete(t.actors, actorUID)
 }
 
-// heldLocked reports whether a Run, Restore, Checkpoint, or PromoteSnapshot of
-// the actor is in progress. An entry with one stays in memory, so this never
-// reads the snapshot state file.
-func (t *Tracker) heldLocked(actorUID string) bool {
+// localInUseLocked reports whether a Run or Restore of the actor in progress
+// may use a superseded local snapshot (see actorSnapshots.localInUse). An
+// entry with one stays in memory, so this never reads the snapshot state file.
+func (t *Tracker) localInUseLocked(actorUID string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	a := t.actors[actorUID]
-	return a != nil && a.hold != holdNone
+	return a != nil && a.localInUse()
 }
 
 // uploadDueLocked returns when the actor's background upload is due, as

@@ -399,6 +399,24 @@ func (a *actorSnapshots) runningUpload() *SnapshotRef {
 	return &a.op.target
 }
 
+// supersededUpload returns the upload in progress when a snapshot newer than
+// the one it uploads is durable, or nil.
+func (a *actorSnapshots) supersededUpload() *actorOp {
+	up := a.runningUpload()
+	if up == nil || a.LatestDurable == nil || up.generation() >= a.LatestDurable.generation() {
+		return nil
+	}
+	return a.op
+}
+
+// localInUse reports whether a Run or Restore of the actor in progress may use
+// a superseded local snapshot. A Restore may read any local snapshot in place,
+// whereas a Checkpoint or PromoteSnapshot only uses its own snapshot, which is
+// never superseded while that RPC holds the actor.
+func (a *actorSnapshots) localInUse() bool {
+	return a.hold == holdStart
+}
+
 // runningDetach returns the snapshot an opDetach goroutine is currently
 // detaching, or nil.
 func (a *actorSnapshots) runningDetach() *SnapshotRef {
