@@ -927,7 +927,10 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 
 	// A detach in progress finishes first, and no detach starts until the
 	// checkpoint returns, so it cannot delete the snapshot being written.
-	endCheckpoint, err := s.snapshots.BeginCheckpoint(ctx, actorUID, req.GetSnapshot())
+	// Under UPLOAD_MODE_IMMEDIATE, a background upload in progress finishes
+	// first too, and none starts until the checkpoint returns, so the control
+	// plane can delete older snapshots once it learns this one is durable.
+	endCheckpoint, err := s.snapshots.BeginCheckpoint(ctx, actorUID, req.GetSnapshot(), req.GetUploadConfig().GetMode())
 	if err != nil {
 		return nil, err
 	}
@@ -1242,8 +1245,9 @@ func (s *Atelet) PromoteSnapshot(ctx context.Context, req *ateletpb.PromoteSnaps
 	}
 	defer unlockActor()
 
-	// A detach or a background upload of this snapshot in progress finishes
-	// first, and no detach starts until the promote returns.
+	// A detach or background upload in progress finishes first, and neither
+	// starts until the promote returns, so the control plane can delete older
+	// snapshots once it learns this one is durable.
 	snap := snapshottracker.SnapshotRef{Snapshot: req.GetSnapshot(), Actor: resources.ActorRef{Atespace: req.GetAtespace(), Name: req.GetActorName()}}
 	alreadyDurable, endPromote, err := s.snapshots.BeginPromote(ctx, req.GetActorUid(), snap)
 	if err != nil {
@@ -1718,9 +1722,8 @@ func (s *Atelet) Terminate(ctx context.Context, req *ateletpb.TerminateRequest) 
 	}
 
 	// The actor is gone, so no pause snapshot of it can ever be restored again.
-	// Forget cancels the actor's background upload or detach in progress
-	// without waiting for it. The cancelled operation leaves the actor's files
-	// alone, unless it was already deleting them, as this does too.
+	// Forget cancels the actor's background upload or detach in progress and
+	// waits for it to end before this prunes the actor's files.
 	// TODO(#664): this only removes local snapshots in one node. We should clean
 	// up the copies on any other NodeVmsWithLocalSnapshots. This is fine *as of
 	// the day this was written* because today NodeVmsWithLocalSnapshots has at

@@ -106,9 +106,7 @@ func (t *Tracker) backgroundUpload(ctx context.Context, actorUID string, op *act
 		t.queueReportLocked(a)
 		removeOld = a.localSuperseded(&target)
 	case !a.uploadNeeded(target):
-		// A newer snapshot became durable while the upload ran, as an
-		// immediate checkpoint or a promote makes one, so the failure costs
-		// nothing.
+		// A newer snapshot is durable already, so the failure costs nothing.
 		a.Uploading = nil
 		a.uploadingFailed = false
 		t.saveLocked(a)

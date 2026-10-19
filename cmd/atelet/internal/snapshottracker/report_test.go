@@ -1120,6 +1120,9 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 	holds := []struct {
 		name  string
 		begin func(t *testing.T, tr *Tracker) func()
+		// durable is set for a hold that waits for a background upload in
+		// progress and starts none, so no upload can finish during it.
+		durable bool
 	}{
 		{
 			name: "BeginStart",
@@ -1134,7 +1137,7 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 		{
 			name: "BeginCheckpoint",
 			begin: func(t *testing.T, tr *Tracker) func() {
-				end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot)
+				end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
 				if err != nil {
 					t.Fatalf("BeginCheckpoint: %v", err)
 				}
@@ -1142,20 +1145,33 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 			},
 		},
 		{
+			name: "BeginCheckpoint immediate",
+			begin: func(t *testing.T, tr *Tracker) func() {
+				end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()).Snapshot, ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE)
+				if err != nil {
+					t.Fatalf("BeginCheckpoint: %v", err)
+				}
+				return end
+			},
+			durable: true,
+		},
+		{
 			name: "BeginPromote",
 			begin: func(t *testing.T, tr *Tracker) func() {
-				// Promote a snapshot other than s1 so BeginPromote does not
-				// wait for the background upload of s1.
 				_, end, err := tr.BeginPromote(t.Context(), trackedActorUID, committedRef("s2", 2, tr.clock.Now()))
 				if err != nil {
 					t.Fatalf("BeginPromote: %v", err)
 				}
 				return end
 			},
+			durable: true,
 		},
 	}
 
 	for _, h := range holds {
+		if h.durable {
+			continue
+		}
 		t.Run(h.name+"/upload finishes during hold", func(t *testing.T) {
 			store := newFakeSnapshotStore()
 			store.setBlocking(true)
@@ -1183,7 +1199,9 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 				t.Error("report still due once acknowledged")
 			}
 		})
+	}
 
+	for _, h := range holds {
 		t.Run(h.name+"/queued report popped during hold", func(t *testing.T) {
 			store := newFakeSnapshotStore()
 			store.setBlocking(true)
@@ -1224,7 +1242,7 @@ func TestTrackerDefersReportDuringHold(t *testing.T) {
 		uploadNow(t, tr, store, nil)
 
 		s2 := committedRef("s2", 2, tr.clock.Now())
-		end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot)
+		end, err := tr.BeginCheckpoint(t.Context(), trackedActorUID, s2.Snapshot, ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
 		if err != nil {
 			t.Fatalf("BeginCheckpoint: %v", err)
 		}

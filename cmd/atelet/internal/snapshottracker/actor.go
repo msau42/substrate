@@ -187,8 +187,8 @@ type holdKind int
 const (
 	holdNone       holdKind = iota
 	holdStart               // Run or Restore
-	holdCheckpoint          // Checkpoint
-	holdPromote             // PromoteSnapshot
+	holdCheckpoint          // Checkpoint under UPLOAD_MODE_DEFERRED
+	holdDurable             // Checkpoint under UPLOAD_MODE_IMMEDIATE, or PromoteSnapshot
 )
 
 // actorSnapshots is what atelet tracks of one actor's snapshots on this node.
@@ -206,8 +206,8 @@ type actorSnapshots struct {
 	op *actorOp
 	// hold records the Run, Restore, Checkpoint, or PromoteSnapshot of the
 	// actor in progress on this node. While set, atelet does not detach the
-	// actor or report its state (nor start a background upload during a
-	// promote), and the entry stays in memory.
+	// actor or report its state (nor start a background upload while the RPC
+	// makes a snapshot durable), and the entry stays in memory.
 	hold holdKind
 	// reportDeferred is set when a report of the actor's state is held back
 	// while hold is set, so holdLocked queues it once the RPC ends.

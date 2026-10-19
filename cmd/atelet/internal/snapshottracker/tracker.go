@@ -103,11 +103,12 @@ type Store interface {
 // Detach runs in the calling goroutine rather than on a worker, so an explicit
 // control-plane call does not wait behind other actors' background work. It
 // does wait for the actor's own background operation in progress, even an
-// upload of an older snapshot; Run, Restore, and Checkpoint wait for a
-// background detach in progress; and PromoteSnapshot waits for a background
-// detach or a background upload of the same snapshot. A worker leaves an actor
-// with an operation in progress to that operation's end, which queues the
-// actor again.
+// upload of an older snapshot, as do a Checkpoint under UPLOAD_MODE_IMMEDIATE
+// and PromoteSnapshot, during which no background upload begins; Run,
+// Restore, and a deferred Checkpoint wait only for a background detach in
+// progress; and Forget cancels any background operation in progress and waits
+// for it to end. A worker leaves an actor with an operation in progress to
+// that operation's end, which queues the actor again.
 type Tracker struct {
 	// ctx bounds background work, and shuts the queues down when it ends.
 	ctx context.Context

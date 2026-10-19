@@ -104,10 +104,12 @@ func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef
 //
 // The operation holds the actor's lock only while it begins and ends, not
 // while it runs:
-//   - Terminate never waits for it.
-//   - Checkpoint never waits for an upload.
-//   - Run, Restore, and Checkpoint wait for a detach to end, so it never
-//     deletes the actor's local snapshots underneath them.
+//   - Forget cancels any operation in progress and waits for it to end.
+//   - A Checkpoint under UPLOAD_MODE_IMMEDIATE and PromoteSnapshot wait for
+//     any operation to end before they begin, and no upload begins until they
+//     end, so none still runs once they make a newer snapshot durable.
+//   - Run, Restore, and a deferred Checkpoint wait only for a detach to end,
+//     so it never deletes the actor's local snapshots underneath them.
 type actorOp struct {
 	kind opKind
 	// target is the snapshot the operation acts on.
@@ -234,9 +236,10 @@ func (t *Tracker) beginDueWork(actorUID string, kind opKind) func() {
 		}
 	case opUpload:
 		if due, ok := t.uploadDueLocked(a); ok && !due.After(now) {
-			if a.hold == holdPromote {
-				// A PromoteSnapshot of the actor is in progress, and queues
-				// the actor again when it ends (see holdLocked).
+			if a.hold == holdDurable {
+				// A Checkpoint under UPLOAD_MODE_IMMEDIATE or a PromoteSnapshot
+				// of the actor is in progress, and queues the actor again when
+				// it ends (see holdLocked).
 				return nil
 			}
 			run := t.beginUploadLocked(t.ctx, a)
@@ -353,13 +356,14 @@ func (t *Tracker) updateOp(actorUID string, op *actorOp, opErr error, fn func(a 
 }
 
 // endOpLocked ends op and returns the actor's entry, or nil once Forget has
-// abandoned op.
+// abandoned op. Either way, op is no longer the actor's operation in progress.
 func (t *Tracker) endOpLocked(actorUID string, op *actorOp) *actorSnapshots {
 	op.cancel()
-	a := t.opEntryLocked(actorUID, op)
-	if a != nil {
-		a.op = nil
+	a := t.findLocked(actorUID)
+	if a == nil || a.op != op {
+		return nil
 	}
+	a.op = nil
 	return a
 }
 
@@ -386,14 +390,22 @@ func (t *Tracker) endOp(actorUID string, op *actorOp, opErr error) (*ateletpb.Ac
 // operation in progress (whether started by a background worker or an atelet
 // RPC), and returns the actor's entry, which may be nil. It releases the
 // actor's lock while it waits, so the actor can change meanwhile, and holds
-// it again when it returns.
-func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string) (*actorSnapshots, error) {
+// it again when it returns. check, if not nil, vets the entry on every pass:
+// an error from it is returned at once, without waiting further. Detach,
+// PromoteSnapshot, and a Checkpoint under UPLOAD_MODE_IMMEDIATE call this
+// first.
+func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string, check func(*actorSnapshots) error) (*actorSnapshots, error) {
 	for {
 		a := t.findLocked(actorUID)
+		if a != nil && check != nil {
+			if err := check(a); err != nil {
+				return nil, err
+			}
+		}
 		if a == nil || a.op == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnOpLocked(ctx, actorUID, a.op.done); err != nil {
 			return nil, err
 		}
 	}
@@ -403,9 +415,9 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string) (*actorSn
 // actor is in progress, and returns the actor's entry, which may be nil. It
 // releases the actor's lock while it waits, and holds it again when it
 // returns. check, if not nil, vets the entry on every pass: an error from it
-// is returned at once, without waiting further. Checkpoint, Run, and Restore
-// call this first so they never race with a detach pruning the actor's local
-// directory, without waiting behind an upload.
+// is returned at once, without waiting further. Run, Restore, and a Checkpoint
+// under UPLOAD_MODE_DEFERRED call this first so they never race with a detach
+// pruning the actor's local directory, without waiting behind an upload.
 func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, check func(*actorSnapshots) error) (*actorSnapshots, error) {
 	for {
 		a := t.findLocked(actorUID)
@@ -417,69 +429,24 @@ func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, chec
 		if a == nil || a.runningDetach() == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnOpLocked(ctx, actorUID, a.op.done); err != nil {
 			return nil, err
 		}
 	}
 }
 
-// waitForDetachOrSnapshotUploadLocked waits, as long as ctx allows, until no
-// detach of the actor and no background upload of snap is in progress, and
-// returns the actor's entry, which may be nil. It checks snap's generation on
-// every pass, so a stale generation fails at once without waiting, and one
-// superseded while waiting fails as soon as the wait ends. PromoteSnapshot
-// calls this first so it never races with a detach or uploads the same
-// snapshot twice.
-func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actorUID string, snap SnapshotRef) (*actorSnapshots, error) {
-	for {
-		a := t.findLocked(actorUID)
-		if a != nil {
-			if err := a.checkGeneration(snap.Snapshot); err != nil {
-				return nil, err
-			}
-		}
-		if a == nil || a.op == nil {
-			return a, nil
-		}
-		switch a.op.kind {
-		case opDetach:
-		case opUpload:
-			if !sameUUID(&a.op.target, &snap) {
-				return a, nil
-			}
-		default:
-			return a, nil
-		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
-			return nil, err
-		}
-	}
-}
-
-// waitOpLocked waits, releasing the actor's lock meanwhile, until op has
-// ended or ctx does.
-func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp) error {
+// waitOnOpLocked waits, releasing the actor's lock meanwhile, until done is
+// closed or ctx ends.
+func (t *Tracker) waitOnOpLocked(ctx context.Context, actorUID string, done <-chan struct{}) error {
 	t.unlock(actorUID)
-	defer t.lock(actorUID)
+	var err error
 	select {
-	case <-op.done:
-		return nil
+	case <-done:
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
 	}
-}
-
-// abandonOpLocked cancels the actor's operation in progress, if any, without
-// waiting for it to end.
-func (t *Tracker) abandonOpLocked(actorUID string) {
-	// An entry with an operation in progress is always in memory.
-	t.mu.Lock()
-	a := t.actors[actorUID]
-	t.mu.Unlock()
-	if a != nil && a.op != nil {
-		a.op.cancel()
-		a.op = nil
-	}
+	t.lock(actorUID)
+	return err
 }
 
 // backOffLocked records a failure of the actor's background work, and holds

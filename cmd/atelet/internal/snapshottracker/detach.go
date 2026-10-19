@@ -52,7 +52,7 @@ func (t *Tracker) Detach(ctx context.Context, actorUID string) (*ateletpb.ActorS
 	// Wait for any operation in progress (from a background worker or
 	// another RPC call) to end first: a detach may leave nothing to detach,
 	// and an upload of the latest local snapshot nothing to upload.
-	a, err := t.waitIdleLocked(ctx, actorUID)
+	a, err := t.waitIdleLocked(ctx, actorUID, nil)
 	if err != nil {
 		t.unlock(actorUID)
 		return nil, err

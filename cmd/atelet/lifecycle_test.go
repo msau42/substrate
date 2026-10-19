@@ -2071,7 +2071,8 @@ func runtimeFor(t *testing.T, sa *ateletpb.SandboxAssets) *ateletpb.SandboxRunti
 }
 
 type gatingTrackerStore struct {
-	inner   snapshottracker.Store
+	inner snapshottracker.Store
+	// objects, if set, fails every upload after the first gated one.
 	objects *recordingObjectStorage
 	started chan struct{}
 	release chan struct{}
@@ -2085,6 +2086,9 @@ func (s *gatingTrackerStore) UploadLocalSnapshot(ctx context.Context, actorUID s
 		return false, ctx.Err()
 	}
 	uploaded, err := s.inner.UploadLocalSnapshot(ctx, actorUID, ref)
+	if s.objects == nil {
+		return uploaded, err
+	}
 	// Fail any second upload attempt so PromoteSnapshot proves it skips
 	// re-uploading once the background upload made the snapshot durable.
 	s.objects.mu.Lock()
@@ -2222,6 +2226,81 @@ func TestCheckpointKeepsSnapshotBeingUploaded(t *testing.T) {
 	})
 	if _, err := os.Stat(ateletpath.LocalSnapshotDir(pluginActorUID, "pause-snap-2")); err != nil {
 		t.Errorf("pause-snap-2 after the upload of pause-snap-1: stat = %v, want it kept", err)
+	}
+}
+
+// TestImmediateCheckpointWaitsForBackgroundUpload suspends a resumed actor
+// with an immediate upload while the background upload of its previous pause
+// snapshot still runs: the checkpoint waits for that upload to end before it
+// checkpoints the worker, so no upload of the older snapshot still runs once
+// the control plane learns the new one is durable.
+func TestImmediateCheckpointWaitsForBackgroundUpload(t *testing.T) {
+	a := runPluginActor(t)
+	clk := clocktesting.NewFakeClock(time.Now())
+	store := &gatingTrackerStore{
+		inner:   &trackerStore{s: a.s},
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+	}
+	a.s.snapshots = snapshottracker.New(t.Context(), store, clk,
+		snapshottracker.WithUploadDelay(time.Second),
+		snapshottracker.WithDetachDelay(time.Hour))
+	a.s.snapshots.Start()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := a.s.snapshots.Wait(ctx); err != nil {
+			t.Errorf("Wait: %v", err)
+		}
+	})
+
+	cpResp, err := a.checkpoint(t, a.snapshot("pause-snap-1", 1), ateletpb.UploadMode_UPLOAD_MODE_DEFERRED)
+	if err != nil {
+		t.Fatalf("Checkpoint (pause-snap-1): %v", err)
+	}
+	stepToUpload(t, clk, cpResp.GetState().GetUploadDueTime().AsTime(), store.started)
+	a.restoreLocal(t, "pause-snap-1", 1)
+	checkpointed := func() bool {
+		a.worker.mu.Lock()
+		defer a.worker.mu.Unlock()
+		_, ok := a.worker.actorDirs["CheckpointWorkload"]
+		return ok
+	}
+	a.worker.mu.Lock()
+	delete(a.worker.actorDirs, "CheckpointWorkload")
+	a.worker.mu.Unlock()
+
+	type checkpointResult struct {
+		state *ateletpb.ActorSnapshotState
+		err   error
+	}
+	resCh := make(chan checkpointResult, 1)
+	go func() {
+		resp, err := a.checkpoint(t, a.snapshot("suspend-snap-2", 2), ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE)
+		resCh <- checkpointResult{resp.GetState(), err}
+	}()
+	select {
+	case res := <-resCh:
+		t.Fatalf("immediate Checkpoint returned (%v, %v) while the background upload was in progress", res.state, res.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if checkpointed() {
+		t.Error("immediate Checkpoint checkpointed the worker during the background upload, want it to wait first")
+	}
+
+	close(store.release)
+	res := <-resCh
+	if res.err != nil {
+		t.Fatalf("Checkpoint (suspend-snap-2): %v", res.err)
+	}
+	if !checkpointed() {
+		t.Error("immediate Checkpoint never checkpointed the worker")
+	}
+	if got := res.state.GetLatestDurable().GetSnapshot().GetSnapshotUuid(); got != "suspend-snap-2" {
+		t.Errorf("latest_durable = %q, want suspend-snap-2", got)
+	}
+	if res.state.GetUploading() != nil {
+		t.Errorf("uploading = %v, want no upload in progress once the checkpoint returns", res.state.GetUploading())
 	}
 }
 
