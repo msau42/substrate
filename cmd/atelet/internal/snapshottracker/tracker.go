@@ -83,9 +83,9 @@ type Store interface {
 //     does not detach an actor whose start has begun, even after a restart or
 //     a failed start; only the actor's next checkpoint schedules a detach
 //     again. A background detach that comes due while a Run, Restore,
-//     Checkpoint, or PromoteSnapshot is in progress (BeginStart,
-//     BeginCheckpoint, or BeginPromote) waits for it to end, which queues the
-//     actor again.
+//     Checkpoint, PromoteSnapshot, or Terminate is in progress (BeginStart,
+//     BeginCheckpoint, BeginPromote, or BeginTerminate) waits for it to end,
+//     which queues the actor again unless Terminate forgot it.
 //  7. A background upload that records a new LatestDurable, or a background
 //     detach that records one or clears LatestLocal, makes a report of the
 //     actor's state due (ReportDueSince), saved with the change so that it
@@ -96,18 +96,45 @@ type Store interface {
 //     startup window, send the actor's whole state through the Reporter, and
 //     retry with per-actor and queue-wide backoff until the control plane
 //     acknowledges or refuses it, a call cancels it, or reporting.giveUpAfter
-//     passes. A report waits while a Run, Restore, Checkpoint, or
-//     PromoteSnapshot is in progress, and a background change made while a
-//     report ran is reported again.
+//     passes. A report waits while a Run, Restore, Checkpoint,
+//     PromoteSnapshot, or Terminate is in progress, and a background change
+//     made while a report ran is reported again.
 //
 // Detach runs in the calling goroutine rather than on a worker, so an explicit
-// control-plane call does not wait behind other actors' background work. It
-// does wait for the actor's own background operation in progress, even an
-// upload of an older snapshot; Run, Restore, and Checkpoint wait for a
-// background detach in progress; and PromoteSnapshot waits for a background
-// detach or a background upload of the same snapshot. A worker leaves an actor
-// with an operation in progress to that operation's end, which queues the
-// actor again.
+// control-plane call does not wait behind other actors' background work.
+//
+// The first table shows how each RPC on an actor treats the actor's upload or
+// detach in progress, and its report due. The RPC waits for the operation to
+// end as it begins (BeginStart, BeginCheckpoint, BeginPromote, or Detach),
+// cancels it and waits for it to stop, or leaves it alone (-). A Checkpoint or
+// PromoteSnapshot cancels once it commits its snapshot, and Terminate cancels
+// in Forget, once the workload is gone. A canceled report is neither sent nor
+// retried, though an attempt under way finishes.
+//
+//	RPC                   upload in progress  detach in progress  report due
+//	Run, Restore          -                   waits               -
+//	deferred Checkpoint   -                   waits               cancels
+//	immediate Checkpoint  cancels             waits               cancels
+//	PromoteSnapshot       waits if the same   waits               cancels if a
+//	                      snapshot, else                          local snapshot
+//	                      cancels                                 is kept
+//	DetachActor           waits               waits               cancels unless
+//	                                                              it fails
+//	Terminate             cancels             cancels             cancels
+//
+// The second table shows whether an upload, detach, or report of the actor
+// that comes due while an RPC or background work of the actor runs begins, or
+// waits for it to end. An upload or detach is the actor's one operation in
+// progress, whether a worker or DetachActor runs it.
+//
+//	running               upload due          detach due          report due
+//	Run, Restore          begins              waits               waits
+//	deferred Checkpoint   begins              waits               waits
+//	immediate Checkpoint  waits               waits               waits
+//	PromoteSnapshot       waits               waits               waits
+//	Terminate             waits               waits               waits
+//	upload or detach      waits               waits               begins
+//	report                begins              begins              waits
 type Tracker struct {
 	// ctx bounds background work, and shuts the queues down when it ends.
 	ctx context.Context
@@ -175,7 +202,7 @@ type Tracker struct {
 	// actors maps actorUID to the entries requeueLocked keeps in memory (see
 	// requeueLocked). requeueLocked drops any other entry, and findLocked then
 	// reads the state from the file. Read and change it through findLocked,
-	// findOrAddLocked, addLocked, dropLocked, and heldLocked.
+	// findOrAddLocked, addLocked, dropLocked, and localInUseLocked.
 	actors map[string]*actorSnapshots
 }
 
@@ -357,14 +384,14 @@ func (t *Tracker) dropLocked(actorUID string) {
 	delete(t.actors, actorUID)
 }
 
-// heldLocked reports whether a Run, Restore, Checkpoint, or PromoteSnapshot of
-// the actor is in progress. An entry with one stays in memory, so this never
-// reads the snapshot state file.
-func (t *Tracker) heldLocked(actorUID string) bool {
+// localInUseLocked reports whether a Run or Restore of the actor in progress
+// may use a superseded local snapshot (see actorSnapshots.localInUse). An
+// entry with one stays in memory, so this never reads the snapshot state file.
+func (t *Tracker) localInUseLocked(actorUID string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	a := t.actors[actorUID]
-	return a != nil && a.hold != holdNone
+	return a != nil && a.localInUse()
 }
 
 // uploadDueLocked returns when the actor's background upload is due, as

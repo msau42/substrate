@@ -431,10 +431,17 @@ func TestDetachDurationOutcomes(t *testing.T) {
 		if run == nil {
 			t.Fatal("beginDueWork returned nil, want due detach")
 		}
-		if err := tr.Forget(trackedActorUID); err != nil {
+		// Forget cancels the detach and waits for it to end, so run the
+		// detach once Forget has abandoned it.
+		forgetDone := make(chan error, 1)
+		go func() { forgetDone <- tr.Forget(trackedActorUID) }()
+		eventually(t, "Forget abandoned the detach", func() bool {
+			return !inMemory(tr)
+		})
+		run()
+		if err := <-forgetDone; err != nil {
 			t.Fatalf("Forget: %v", err)
 		}
-		run()
 		if got, want := errorTypesOf(t, reader, detachDurationMetric), []string{codes.Canceled.String()}; !slices.Equal(got, want) {
 			t.Errorf("error types = %v, want %v", got, want)
 		}

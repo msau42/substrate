@@ -90,8 +90,8 @@ func (k opKind) String() string {
 
 // logOp logs how an upload or detach ended. Foreground failures are returned
 // to the RPC caller, so only background failures are logged here: as a
-// warning, or at info level once ctx has ended, as when Terminate or an atelet
-// shutdown cancels the operation.
+// warning, or at info level once ctx has ended, as when Terminate, an atelet
+// shutdown, or a newer durable snapshot cancels the operation.
 func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef, uploaded, background bool, elapsed time.Duration, err error) {
 	attrs := []any{
 		slog.String("op", kind.String()),
@@ -121,8 +121,14 @@ func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef
 //
 // The operation holds the actor's lock only while it begins and ends, not
 // while it runs:
-//   - Terminate never waits for it.
-//   - Checkpoint never waits for an upload.
+//   - Forget cancels any operation in progress and waits for it to end. No
+//     operation begins during the Terminate that calls it.
+//   - CommitDurable and CommitPromoted cancel an upload of a snapshot older
+//     than LatestDurable and wait for it to stop, though not for it to delete
+//     that snapshot's local copy; a deferred Checkpoint never waits for an
+//     upload.
+//   - No upload begins during a Checkpoint under UPLOAD_MODE_IMMEDIATE or a
+//     PromoteSnapshot, though one already running goes on.
 //   - Run, Restore, and Checkpoint wait for a detach to end, so it never
 //     deletes the actor's local snapshots underneath them.
 type actorOp struct {
@@ -131,8 +137,11 @@ type actorOp struct {
 	target SnapshotRef
 	// cancel ends the context the operation runs under.
 	cancel context.CancelFunc
-	// done is closed once the operation has ended, and has finished any change
-	// it makes to the actor's local snapshots.
+	// stopped is closed once the operation has stopped, and is no longer the
+	// actor's operation in progress (see endOpLocked).
+	stopped chan struct{}
+	// done is closed after stopped, once the operation has also finished any
+	// change it makes to the actor's local snapshots.
 	done chan struct{}
 }
 
@@ -213,8 +222,10 @@ func (t *Tracker) syncActor(actorUID string, kind opKind) {
 // beginDueWork begins the actor's background operation of kind if one is due,
 // and returns the func that runs it. Otherwise it returns nil, and queues the
 // actor for when its next operations are due, unless an operation, Run,
-// Restore, Checkpoint, or PromoteSnapshot in progress on the actor queues it
-// again when it ends.
+// Restore, Checkpoint, PromoteSnapshot, or Terminate in progress on the actor
+// queues it again when it ends. An upload worker that finds no upload due
+// clears a superseded Uploading snapshot instead, unless Terminate holds the
+// actor.
 func (t *Tracker) beginDueWork(actorUID string, kind opKind) func() {
 	if !t.locks.Lock(t.ctx, actorUID) {
 		// atelet is shutting down.
@@ -234,14 +245,13 @@ func (t *Tracker) beginDueWork(actorUID string, kind opKind) func() {
 		return nil
 	}
 	now := t.clock.Now()
-	var cleanup func()
 	switch kind {
 	case opDetach:
 		if due, ok := t.detachDueLocked(a); ok && !due.After(now) {
 			if a.hold != holdNone {
-				// A Run, Restore, Checkpoint, or PromoteSnapshot of the actor
-				// is in progress, and queues the actor again when it ends
-				// (see holdLocked).
+				// A Run, Restore, Checkpoint, PromoteSnapshot, or Terminate of
+				// the actor is in progress, and queues the actor again when it
+				// ends (see holdLocked).
 				return nil
 			}
 			if finish, err := t.beginDetachLocked(t.ctx, a, true); err == nil {
@@ -251,23 +261,30 @@ func (t *Tracker) beginDueWork(actorUID string, kind opKind) func() {
 		}
 	case opUpload:
 		if due, ok := t.uploadDueLocked(a); ok && !due.After(now) {
-			if a.hold == holdPromote {
-				// A PromoteSnapshot of the actor is in progress, and queues
-				// the actor again when it ends (see holdLocked).
+			if a.hold.blocksUploads() {
+				// A Checkpoint under UPLOAD_MODE_IMMEDIATE, a PromoteSnapshot,
+				// or a Terminate of the actor is in progress, and queues the
+				// actor again when it ends (see holdLocked).
 				return nil
 			}
 			run := t.beginUploadLocked(t.ctx, a)
 			t.instruments.recordUploadOverdue(t.ctx, now.Sub(due))
 			return run
 		}
+		if a.hold == holdTerminate {
+			// Terminate prunes the actor's local snapshots once Forget drops
+			// it, or queues the actor again if it fails first (see
+			// holdLocked).
+			return nil
+		}
 		// beginUploadLocked clears any superseded Uploading snapshot before
 		// starting the next upload. When no upload runs (for example after an
 		// immediate checkpoint or promote made a newer snapshot durable,
 		// leaving no upload due), clear a superseded Uploading snapshot here.
-		cleanup = t.cleanupSupersededUploadingLocked(a)
+		t.cleanupSupersededUploadingLocked(a)
 	}
 	t.requeueLocked(a)
-	return cleanup
+	return nil
 }
 
 // nextDueLocked returns when the actor's next background detach or upload is
@@ -283,12 +300,12 @@ func (t *Tracker) nextDueLocked(a *actorSnapshots) (time.Time, bool) {
 // requeueLocked queues the actor on each queue for when its next background
 // operation of that kind is due, if it has one, then drops the actor's entry
 // from memory unless the entry has an operation, or a Run, Restore,
-// Checkpoint, or PromoteSnapshot, in progress, a retry hold, a failed upload
-// kept to retry, or a change that failed to save. An entry whose Uploading is
-// superseded is queued at once on the upload queue and kept in memory until an
-// upload worker cleans it up. A save that finds the actor's directory gone
-// leaves nothing unsaved. requeueLocked runs after a change to the actor is
-// saved, so it must not change what the snapshot state file keeps.
+// Checkpoint, PromoteSnapshot, or Terminate, in progress, a retry hold, a
+// failed upload kept to retry, or a change that failed to save. An entry whose
+// Uploading is superseded is queued at once on the upload queue and kept in
+// memory until an upload worker cleans it up. A save that finds the actor's
+// directory gone leaves nothing unsaved. requeueLocked runs after a change to
+// the actor is saved, so it must not change what the snapshot state file keeps.
 func (t *Tracker) requeueLocked(a *actorSnapshots) {
 	now := t.clock.Now()
 	// CommitDurable and CommitPromoted leave a superseded Uploading snapshot
@@ -317,8 +334,8 @@ func (t *Tracker) requeueLocked(a *actorSnapshots) {
 // operation in progress, started by a background worker or an atelet RPC.
 //
 // The operation keeps the actor's entry in memory until it ends. The caller
-// releases the actor's lock while the operation runs, and closes the
-// operation's done channel once it has ended.
+// releases the actor's lock while the operation runs, ends it with endOpLocked,
+// and closes the operation's done channel once it has ended.
 func (t *Tracker) beginOpLocked(ctx context.Context, a *actorSnapshots, kind opKind, target SnapshotRef) (context.Context, *actorOp) {
 	if a.op != nil {
 		return nil, nil
@@ -329,7 +346,7 @@ func (t *Tracker) beginOpLocked(ctx context.Context, a *actorSnapshots, kind opK
 		a.Uploading = cloned
 		a.uploadingFailed = false
 	}
-	a.op = &actorOp{kind: kind, target: *cloned, cancel: cancel, done: make(chan struct{})}
+	a.op = &actorOp{kind: kind, target: *cloned, cancel: cancel, stopped: make(chan struct{}), done: make(chan struct{})}
 	t.addLocked(a)
 	return ctx, a.op
 }
@@ -369,10 +386,13 @@ func (t *Tracker) updateOp(actorUID string, op *actorOp, opErr error, fn func(a 
 	return nil
 }
 
-// endOpLocked ends op and returns the actor's entry, or nil once Forget has
-// abandoned op.
+// endOpLocked ends op, closing its stopped channel, and returns the actor's
+// entry, or nil once Forget has abandoned op. Either way, op is no longer the
+// actor's operation in progress. A waiter on stopped takes the actor's lock
+// next, so it sees what the caller records of op before releasing it.
 func (t *Tracker) endOpLocked(actorUID string, op *actorOp) *actorSnapshots {
 	op.cancel()
+	close(op.stopped)
 	a := t.opEntryLocked(actorUID, op)
 	if a != nil {
 		a.op = nil
@@ -410,7 +430,7 @@ func (t *Tracker) waitIdleLocked(ctx context.Context, actorUID string) (*actorSn
 		if a == nil || a.op == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnOpLocked(ctx, actorUID, a.op.done); err != nil {
 			return nil, err
 		}
 	}
@@ -434,7 +454,7 @@ func (t *Tracker) waitForDetachLocked(ctx context.Context, actorUID string, chec
 		if a == nil || a.runningDetach() == nil {
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnOpLocked(ctx, actorUID, a.op.done); err != nil {
 			return nil, err
 		}
 	}
@@ -467,36 +487,24 @@ func (t *Tracker) waitForDetachOrSnapshotUploadLocked(ctx context.Context, actor
 		default:
 			return a, nil
 		}
-		if err := t.waitOpLocked(ctx, actorUID, a.op); err != nil {
+		if err := t.waitOnOpLocked(ctx, actorUID, a.op.done); err != nil {
 			return nil, err
 		}
 	}
 }
 
-// waitOpLocked waits, releasing the actor's lock meanwhile, until op has
-// ended or ctx does.
-func (t *Tracker) waitOpLocked(ctx context.Context, actorUID string, op *actorOp) error {
+// waitOnOpLocked waits, releasing the actor's lock meanwhile, until done is
+// closed or ctx ends.
+func (t *Tracker) waitOnOpLocked(ctx context.Context, actorUID string, done <-chan struct{}) error {
 	t.unlock(actorUID)
-	defer t.lock(actorUID)
+	var err error
 	select {
-	case <-op.done:
-		return nil
+	case <-done:
 	case <-ctx.Done():
-		return ctx.Err()
+		err = ctx.Err()
 	}
-}
-
-// abandonOpLocked cancels the actor's operation in progress, if any, without
-// waiting for it to end.
-func (t *Tracker) abandonOpLocked(actorUID string) {
-	// An entry with an operation in progress is always in memory.
-	t.mu.Lock()
-	a := t.actors[actorUID]
-	t.mu.Unlock()
-	if a != nil && a.op != nil {
-		a.op.cancel()
-		a.op = nil
-	}
+	t.lock(actorUID)
+	return err
 }
 
 // backOffLocked records a failure of the actor's background work, and holds
