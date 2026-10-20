@@ -421,27 +421,29 @@ func TestDetachDurationOutcomes(t *testing.T) {
 	t.Run("canceled", func(t *testing.T) {
 		inst, reader := newTestInstruments(t)
 		store := newFakeSnapshotStore()
+		store.setBlocking(true)
+		store.setIgnoreCancel(true)
 		useActorDir(t)
 		tr := newStoreTracker(t, store, WithInstruments(inst))
-		ref := testRef("s1", 1, tr.clock.Now())
-		tr.CommitDurable(trackedActorUID, ref)
-		tr.CommitLocal(trackedActorUID, ref)
+		tr.CommitLocal(trackedActorUID, testRef("s1", 1, tr.clock.Now()))
 		stepTo(tr, detachDueOf(tr, trackedActorUID))
 		run := tr.beginDueWork(trackedActorUID, opDetach)
 		if run == nil {
 			t.Fatal("beginDueWork returned nil, want due detach")
 		}
-		// Forget cancels the detach and waits for it to end, so run the
-		// detach once Forget has abandoned it.
+		go run()
+		waitStarted(t, store)
+		// Forget cancels the detach as its upload finishes, and waits for it
+		// to end.
 		forgetDone := make(chan error, 1)
 		go func() { forgetDone <- tr.Forget(trackedActorUID) }()
-		eventually(t, "Forget abandoned the detach", func() bool {
-			return !inMemory(tr)
+		waitCanceled(t, store)
+		store.release <- nil
+		returnsPromptly(t, "Forget", func() {
+			if err := <-forgetDone; err != nil {
+				t.Errorf("Forget: %v", err)
+			}
 		})
-		run()
-		if err := <-forgetDone; err != nil {
-			t.Fatalf("Forget: %v", err)
-		}
 		if got, want := errorTypesOf(t, reader, detachDurationMetric), []string{codes.Canceled.String()}; !slices.Equal(got, want) {
 			t.Errorf("error types = %v, want %v", got, want)
 		}

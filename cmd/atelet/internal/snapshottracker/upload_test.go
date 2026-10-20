@@ -382,10 +382,10 @@ func TestTrackerFailedUploadKeepsUndurableSince(t *testing.T) {
 	}
 }
 
-// Forget cancels a background upload in progress and waits for it to end. The
-// upload records no state for the actor, and deletes none of its local
-// snapshots, not even one a newer checkpoint superseded: Terminate prunes them.
-// Its metric records error.type Canceled.
+// Forget cancels a background upload in progress and waits for it to end
+// before it drops the actor's state. The upload ends as a canceled one does,
+// deleting the local copy of s1, which a newer checkpoint superseded. Its
+// metric records error.type Canceled.
 func TestTrackerForgetCancelsUpload(t *testing.T) {
 	store := newFakeSnapshotStore()
 	store.setBlocking(true)
@@ -412,7 +412,6 @@ func TestTrackerForgetCancelsUpload(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 	store.release <- context.Canceled
-	waitClosed(t, done, "the cancelled upload")
 	select {
 	case err := <-forgetDone:
 		if err != nil {
@@ -421,14 +420,19 @@ func TestTrackerForgetCancelsUpload(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for Forget to return")
 	}
+	select {
+	case <-done:
+	default:
+		t.Error("Forget returned before the canceled upload ended")
+	}
 	if st := tr.State(trackedActorUID); !proto.Equal(st, &ateletpb.ActorSnapshotState{}) {
 		t.Errorf("state after forget = %v, want empty", st)
 	}
 	if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(trackedActorUID)); !os.IsNotExist(err) {
-		t.Errorf("state file once the cancelled upload ended: stat = %v, want none", err)
+		t.Errorf("state file after Forget: stat = %v, want none", err)
 	}
-	if _, err := os.Stat(ateletpath.LocalSnapshotDir(trackedActorUID, "s1")); err != nil {
-		t.Errorf("s1 once the cancelled upload ended: %v, want it left for Terminate to prune", err)
+	if _, err := os.Stat(ateletpath.LocalSnapshotDir(trackedActorUID, "s1")); !os.IsNotExist(err) {
+		t.Errorf("s1 after Forget: stat = %v, want the canceled upload to delete it", err)
 	}
 	if got, want := recordedErrorTypes(t, reader), []string{codes.Canceled.String()}; !slices.Equal(got, want) {
 		t.Errorf("recorded upload error types = %v, want %v", got, want)

@@ -285,30 +285,24 @@ func (t *Tracker) holdLocked(actorUID string, a *actorSnapshots, kind holdKind) 
 	}
 }
 
-// Forget drops the actor's state, in memory and on disk. It cancels any
-// background upload or detach of the actor in progress, removes the state file
-// so an atelet restart does not resume it, and waits for the operation to end
-// before returning, releasing the actor's lock meanwhile. The operation sees
-// its entry gone when it ends and leaves the actor alone.
+// Forget drops the actor's state, in memory and on disk. It first cancels any
+// background upload or detach of the actor in progress and waits for it to
+// end, releasing the actor's lock meanwhile.
 func (t *Tracker) Forget(actorUID string) error {
 	t.lock(actorUID)
-	a := t.findLocked(actorUID)
-	var op *actorOp
-	if a != nil && a.op != nil {
-		op = a.op
-		a.op = nil
+	defer t.unlock(actorUID)
+	for a := t.findLocked(actorUID); a != nil && a.op != nil; a = t.findLocked(actorUID) {
+		op := a.op
 		op.cancel()
+		t.unlock(actorUID)
+		<-op.done
+		t.lock(actorUID)
 	}
 	t.retries.Forget(actorUID)
 	t.reporting.retries.Forget(actorUID)
 	t.dropLocked(actorUID)
 	t.undurableActorsTally.forget(actorUID)
-	err := removeSnapshotState(actorUID)
-	t.unlock(actorUID)
-	if op != nil {
-		<-op.done
-	}
-	return err
+	return removeSnapshotState(actorUID)
 }
 
 // setLatestLocalLocked records snap as the actor's latest local snapshot and

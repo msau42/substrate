@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"time"
 
-	"go.ate.dev/substrate/internal/apierror"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 )
 
@@ -121,8 +120,9 @@ func logOp(ctx context.Context, actorUID string, kind opKind, target SnapshotRef
 //
 // The operation holds the actor's lock only while it begins and ends, not
 // while it runs:
-//   - Forget cancels any operation in progress and waits for it to end. No
-//     operation begins during the Terminate that calls it.
+//   - Forget cancels any operation in progress and waits for it to end before
+//     it drops the actor's state. No operation begins during the Terminate
+//     that calls it.
 //   - CommitDurable and CommitPromoted cancel an upload of a snapshot older
 //     than LatestDurable and wait for it to stop, though not for it to delete
 //     that snapshot's local copy; a deferred Checkpoint never waits for an
@@ -351,66 +351,34 @@ func (t *Tracker) beginOpLocked(ctx context.Context, a *actorSnapshots, kind opK
 	return ctx, a.op
 }
 
-// opEntryLocked returns the actor's entry while op is still its operation in
-// progress, or nil once Forget has abandoned op.
-func (t *Tracker) opEntryLocked(actorUID string, op *actorOp) *actorSnapshots {
-	a := t.findLocked(actorUID)
-	if a == nil || a.op != op {
-		return nil
-	}
-	return a
-}
-
-// abandonedError returns what an operation on the actor fails with once Forget
-// has abandoned it: opErr if the operation failed already, and otherwise
-// Aborted.
-func abandonedError(actorUID string, opErr error) error {
-	if opErr != nil {
-		return opErr
-	}
-	return apierror.Aborted("actor %s was forgotten during the operation", actorUID)
-}
-
-// updateOp runs fn under the actor's lock and saves the actor's state while op
-// is still the actor's operation in progress. Once Forget has abandoned op, it
-// leaves the actor alone and fails with abandonedError.
-func (t *Tracker) updateOp(actorUID string, op *actorOp, opErr error, fn func(a *actorSnapshots)) error {
+// updateOp runs fn on the actor's entry under the actor's lock, while an
+// operation of the actor runs, and saves the actor's state. The operation keeps
+// the entry in memory (see beginOpLocked).
+func (t *Tracker) updateOp(actorUID string, fn func(a *actorSnapshots)) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
-	a := t.opEntryLocked(actorUID, op)
-	if a == nil {
-		return abandonedError(actorUID, opErr)
-	}
+	a := t.findLocked(actorUID)
 	fn(a)
 	t.saveLocked(a)
-	return nil
 }
 
-// endOpLocked ends op, closing its stopped channel, and returns the actor's
-// entry, or nil once Forget has abandoned op. Either way, op is no longer the
-// actor's operation in progress. A waiter on stopped takes the actor's lock
-// next, so it sees what the caller records of op before releasing it.
+// endOpLocked ends op, the actor's operation in progress, closing its stopped
+// channel, and returns the actor's entry. A waiter on stopped takes the actor's
+// lock next, so it sees what the caller records of op before releasing it.
 func (t *Tracker) endOpLocked(actorUID string, op *actorOp) *actorSnapshots {
 	op.cancel()
 	close(op.stopped)
-	a := t.opEntryLocked(actorUID, op)
-	if a != nil {
-		a.op = nil
-	}
+	a := t.findLocked(actorUID)
+	a.op = nil
 	return a
 }
 
 // endOp ends op, queues the actor for its next background operation and any
-// report due, and returns the actor's state. Once Forget has abandoned op, it
-// leaves the actor alone and fails with abandonedError; otherwise it fails
-// with opErr if non-nil.
+// report due, and returns the actor's state, or opErr if non-nil.
 func (t *Tracker) endOp(actorUID string, op *actorOp, opErr error) (*ateletpb.ActorSnapshotState, error) {
 	t.lock(actorUID)
 	defer t.unlock(actorUID)
 	a := t.endOpLocked(actorUID, op)
-	if a == nil {
-		return nil, abandonedError(actorUID, opErr)
-	}
 	t.requeueLocked(a)
 	t.queueReportLocked(a)
 	if opErr != nil {

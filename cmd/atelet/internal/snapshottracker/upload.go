@@ -116,8 +116,7 @@ func uploadAllowance(size, bytesPerSecond int64) time.Duration {
 // when it began, on a worker. Once the upload succeeds or a newer snapshot
 // replaces target, it removes target's local copy if LatestLocal moved on (see
 // removeSupersededLocalCopy); when the upload fails and LatestLocal cannot
-// replace target, it keeps target in Uploading to retry. An upload Forget
-// abandoned leaves the actor alone.
+// replace target, it keeps target in Uploading to retry.
 func (t *Tracker) backgroundUpload(ctx context.Context, actorUID string, op *actorOp) {
 	defer close(op.done)
 	target := op.target
@@ -126,10 +125,6 @@ func (t *Tracker) backgroundUpload(ctx context.Context, actorUID string, op *act
 
 	t.lock(actorUID)
 	a := t.endOpLocked(actorUID, op)
-	if a == nil {
-		t.unlock(actorUID)
-		return
-	}
 	removeOld := false
 	switch {
 	case err == nil:

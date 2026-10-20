@@ -712,7 +712,7 @@ func TestTrackerLiftsBackoffWithDetach(t *testing.T) {
 
 // Forget cancels a detach in progress and waits for it to end, leaving the
 // forgotten actor's local snapshots for Terminate to prune.
-func TestTrackerForgetAbandonsDetach(t *testing.T) {
+func TestTrackerForgetCancelsDetach(t *testing.T) {
 	store := newFakeSnapshotStore()
 	store.setBlocking(true)
 	store.setIgnoreCancel(true)
