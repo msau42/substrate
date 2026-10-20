@@ -187,16 +187,16 @@ type holdKind int
 const (
 	holdNone       holdKind = iota
 	holdStart               // Run or Restore
-	holdCheckpoint          // Checkpoint
-	holdPromote             // PromoteSnapshot
+	holdCheckpoint          // Checkpoint under UPLOAD_MODE_DEFERRED
+	holdDurable             // Checkpoint under UPLOAD_MODE_IMMEDIATE, or PromoteSnapshot
 	holdTerminate           // Terminate
 )
 
 // blocksUploads reports whether no background upload of the actor starts while
-// an RPC of kind k holds it: PromoteSnapshot, which makes a snapshot durable
-// itself, or Terminate, which forgets the actor.
+// an RPC of kind k holds it: one that makes a snapshot durable, which would
+// only cancel the upload, or Terminate, which forgets the actor.
 func (k holdKind) blocksUploads() bool {
-	return k == holdPromote || k == holdTerminate
+	return k == holdDurable || k == holdTerminate
 }
 
 // actorSnapshots is what atelet tracks of one actor's snapshots on this node.
@@ -385,6 +385,24 @@ func (a *actorSnapshots) runningUpload() *SnapshotRef {
 		return nil
 	}
 	return &a.op.target
+}
+
+// supersededUpload returns the upload in progress when a snapshot newer than
+// the one it uploads is durable, or nil.
+func (a *actorSnapshots) supersededUpload() *actorOp {
+	up := a.runningUpload()
+	if up == nil || a.LatestDurable == nil || up.generation() >= a.LatestDurable.generation() {
+		return nil
+	}
+	return a.op
+}
+
+// localInUse reports whether a Run or Restore of the actor in progress may use
+// a superseded local snapshot. A Restore may read any local snapshot in place,
+// whereas a Checkpoint or PromoteSnapshot only uses its own snapshot, which is
+// never superseded while that RPC holds the actor, and a Terminate uses none.
+func (a *actorSnapshots) localInUse() bool {
+	return a.hold == holdStart
 }
 
 // runningDetach returns the snapshot an opDetach goroutine is currently
