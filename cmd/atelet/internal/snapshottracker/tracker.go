@@ -153,8 +153,9 @@ type Tracker struct {
 	clock clock.WithTicker
 	// fromCurrentBoot reports whether an actor's local snapshot was written
 	// since the node last booted, or is nil without WithBootCheck. When set,
-	// atelet deletes any local snapshot written before the node rebooted (see
-	// prunePreRebootLocalLocked).
+	// Start stops tracking any local snapshot written before the node rebooted
+	// and deletes it in the background (see clearPreRebootLocalLocked and
+	// deletePreRebootLocal).
 	fromCurrentBoot func(actorUID, snapshotUUID string) bool
 	// uploadDelay is how long after UndurableSince the actor's latest local
 	// snapshot becomes due for background upload: DefaultUploadDelay unless

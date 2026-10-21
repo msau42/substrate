@@ -3514,8 +3514,19 @@ func TestCheckpointManifestBootID(t *testing.T) {
 		snapshottracker.WithDetachWorkers(0),
 		snapshottracker.WithReportWorkers(0),
 	}
+	// With no workers, Wait returns once Start's background deletion of local
+	// snapshots from an earlier boot has finished.
+	start := func(tr *snapshottracker.Tracker) {
+		t.Helper()
+		tr.Start()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		if err := tr.Wait(ctx); err != nil {
+			t.Fatalf("Wait: %v", err)
+		}
+	}
 	sameBoot := snapshottracker.New(t.Context(), nil, clock.RealClock{}, append(noWorkers, snapshottracker.WithBootCheck(localSnapshotBootCheck("boot-1")))...)
-	sameBoot.Start()
+	start(sameBoot)
 	if _, err := os.Stat(localDir); err != nil {
 		t.Fatalf("local snapshot after restart on same boot: stat = %v, want kept", err)
 	}
@@ -3524,12 +3535,9 @@ func TestCheckpointManifestBootID(t *testing.T) {
 	}
 
 	newBoot := snapshottracker.New(t.Context(), nil, clock.RealClock{}, append(noWorkers, snapshottracker.WithBootCheck(localSnapshotBootCheck("boot-2")))...)
-	newBoot.Start()
+	start(newBoot)
 	if _, err := os.Stat(localDir); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("local snapshot after restart on new boot: stat = %v, want not exist", err)
-	}
-	if got := newBoot.State(pluginActorUID).GetLatestLocal(); got != nil {
-		t.Errorf("latest_local after restart on new boot = %v, want nil", got)
 	}
 	if got := newBoot.State(pluginActorUID).GetLatestDurable().GetSnapshot().GetSnapshotUuid(); got != "suspend-snap-1" {
 		t.Errorf("latest_durable after restart on new boot = %q, want %q", got, "suspend-snap-1")

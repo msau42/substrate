@@ -80,6 +80,41 @@ func removeLocalCheckpoint(ctx context.Context, actorUID, name string) error {
 	return nil
 }
 
+// deletePreRebootLocal deletes each local snapshot of the actors that was not
+// written on this boot. Start runs it in the background, so a node that
+// rebooted with many large local snapshots does not hold up atelet startup:
+// Start has already stopped tracking them or scheduled their detach, and
+// Restore and uploads refuse them. It takes no locks, as it deletes nothing
+// written on this boot, and stops once the tracker's context ends; the next
+// Start deletes whatever is left.
+func (t *Tracker) deletePreRebootLocal(actorUIDs []string) {
+	for _, actorUID := range actorUIDs {
+		if t.ctx.Err() != nil {
+			return
+		}
+		entries, err := os.ReadDir(ateletpath.LocalCheckpointsDir(actorUID))
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				slog.WarnContext(t.ctx, "Failed to list local snapshots to delete those from before the node rebooted",
+					slog.String("actorUID", actorUID), slog.Any("err", err))
+			}
+			continue
+		}
+		for _, entry := range entries {
+			if t.ctx.Err() != nil {
+				return
+			}
+			if t.fromCurrentBoot(actorUID, entry.Name()) {
+				continue
+			}
+			if err := removeLocalCheckpoint(t.ctx, actorUID, entry.Name()); err != nil {
+				slog.WarnContext(t.ctx, "Failed to delete a local snapshot left by an earlier boot or an interrupted detach",
+					slog.String("actorUID", actorUID), slog.Any("err", err))
+			}
+		}
+	}
+}
+
 // localSnapshotSize returns the disk space allocated to the files of one local
 // snapshot of the actor, nested ones included. Allocated blocks track the data
 // an upload of the snapshot sends, where apparent sizes would count a sparse

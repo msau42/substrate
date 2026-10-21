@@ -139,12 +139,13 @@ type actorOp struct {
 	err   error
 }
 
-// Start reads each actor's snapshot state file on this node, deletes any local
-// snapshot from before a node reboot, queues the actor for when its next
+// Start reads each actor's snapshot state file on this node, stops tracking any
+// local snapshot from before a node reboot, queues the actor for when its next
 // background upload or detach is due and for any report due, so its background
 // work resumes after an atelet restart, and starts each queue's workers and
-// the report workers. With instruments, it also adds each actor's undurable
-// local snapshot to their tally before any worker runs.
+// the report workers. With WithBootCheck, it also deletes the local snapshots
+// from before the reboot in the background. With instruments, it also adds
+// each actor's undurable local snapshot to their tally before any worker runs.
 func (t *Tracker) Start() {
 	if t.store != nil || t.reporting.reporter != nil || t.undurableActorsTally != nil || t.fromCurrentBoot != nil {
 		actorUIDs, err := savedActorUIDs()
@@ -157,12 +158,15 @@ func (t *Tracker) Start() {
 				break
 			}
 			if a := t.findLocked(actorUID); a != nil {
-				t.prunePreRebootLocalLocked(a)
+				t.clearPreRebootLocalLocked(a)
 				t.undurableActorsTally.observe(a)
 				t.enqueueSavedReportLocked(a)
 				t.requeueLocked(a)
 			}
 			t.unlock(actorUID)
+		}
+		if t.fromCurrentBoot != nil {
+			t.workersDone.Go(func() { t.deletePreRebootLocal(actorUIDs) })
 		}
 	}
 	for kind, n := range t.workers {
@@ -177,12 +181,13 @@ func (t *Tracker) Start() {
 	}
 }
 
-// prunePreRebootLocalLocked deletes the actor's local snapshots and stops
-// tracking them when one it tracks was written before the node rebooted, since
-// its files may be torn. A LatestLocal written on this boot stays. A
-// LatestLocal already durable is reported as detached, or detached again later
-// if deleting its files fails. One not yet uploaded is lost.
-func (t *Tracker) prunePreRebootLocalLocked(a *actorSnapshots) {
+// clearPreRebootLocalLocked stops tracking the actor's local snapshots written
+// before the node rebooted, whose files may be torn, and leaves deleting them
+// to deletePreRebootLocal. A LatestLocal written on this boot stays. One
+// already durable is detached at once, which deletes it with the actor's other
+// files on the node and reports the detach: any workload of the actor ended
+// with the reboot. One not yet uploaded is lost.
+func (t *Tracker) clearPreRebootLocalLocked(a *actorSnapshots) {
 	if t.fromCurrentBoot == nil {
 		return
 	}
@@ -192,45 +197,30 @@ func (t *Tracker) prunePreRebootLocalLocked(a *actorSnapshots) {
 		return
 	}
 	t.addLocked(a)
-	// Only LatestLocal can need keeping. Uploading is never newer than
-	// LatestLocal, so it is from an earlier boot whenever LatestLocal is,
-	// except after a detach that atelet stopped partway through deleting the
-	// actor's copies, since a deleted copy counts as from an earlier boot.
-	// That detach made LatestLocal durable first, so deleting Uploading too
-	// finishes it.
-	var keep []string
-	if a.LatestLocal != nil && !localPreReboot {
-		keep = []string{a.LatestLocal.uuid()}
-	}
-	pruneErr := PruneLocalCheckpoints(t.ctx, a.actorUID, keep...)
-	if pruneErr != nil {
-		// Restore and uploads refuse what is left, which the actor's next
-		// checkpoint or terminate deletes.
-		slog.WarnContext(t.ctx, "Failed to delete local snapshots left by an earlier boot or an interrupted detach",
-			slog.String("actorUID", a.actorUID), slog.Any("err", pruneErr))
-	}
 	if uploadingPreReboot {
 		a.Uploading = nil
 	}
+	// A LatestLocal from an earlier boot takes Uploading with it. Uploading is
+	// never newer, so it is from an earlier boot too, except after a detach
+	// that atelet stopped partway through deleting the actor's copies, since a
+	// deleted copy counts as from an earlier boot. That detach made
+	// LatestLocal durable first, and the detach scheduled here finishes it.
 	if localPreReboot {
-		switch {
-		case a.uploadNeeded(*a.LatestLocal):
+		if a.uploadNeeded(*a.LatestLocal) {
 			slog.WarnContext(t.ctx, "Lost a local snapshot that was not uploaded before the node rebooted",
 				slog.String("actorUID", a.actorUID), slog.String("snapshot", a.LatestLocal.uuid()))
 			t.clearLatestLocalLocked(a)
-		case pruneErr != nil:
-			a.DetachAt = later(a.DetachAt, t.backOffLocked(a))
-		default:
-			slog.InfoContext(t.ctx, "Deleted an uploaded local snapshot left by an earlier boot or an interrupted detach",
+		} else {
+			slog.InfoContext(t.ctx, "Detaching an uploaded local snapshot left by an earlier boot or an interrupted detach",
 				slog.String("actorUID", a.actorUID), slog.String("snapshot", a.LatestLocal.uuid()))
-			t.clearLatestLocalLocked(a)
-			t.markReportDueLocked(a)
+			a.DetachAt = t.clock.Now()
 		}
 	}
 	t.saveLocked(a)
 }
 
-// Wait blocks until the workers and any detach a Detach call started have
+// Wait blocks until the workers, Start's background deletion of local
+// snapshots from before a reboot, and any detach a Detach call started have
 // stopped, which they do once the tracker's context ends. It returns ctx's
 // error if ctx ends first. Detach starts nothing after Wait begins.
 func (t *Tracker) Wait(ctx context.Context) error {
