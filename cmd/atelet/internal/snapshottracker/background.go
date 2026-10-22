@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"time"
 
+	"go.ate.dev/substrate/cmd/atelet/internal/actordirs"
 	"go.ate.dev/substrate/internal/proto/ateletpb"
 )
 
@@ -192,17 +193,20 @@ func (t *Tracker) prunePreRebootLocalLocked(a *actorSnapshots) {
 		return
 	}
 	t.addLocked(a)
-	// Only LatestLocal can need keeping. Uploading is never newer than
-	// LatestLocal, so it is from an earlier boot whenever LatestLocal is,
-	// except after a detach that atelet stopped partway through deleting the
-	// actor's copies, since a deleted copy counts as from an earlier boot.
-	// That detach made LatestLocal durable first, so deleting Uploading too
-	// finishes it.
-	var keep []string
-	if a.LatestLocal != nil && !localPreReboot {
-		keep = []string{a.LatestLocal.uuid()}
+	// When LatestLocal is from an earlier boot (or already gone after an
+	// interrupted detach), remove all of the actor's files except its snapshot
+	// state file, as finishDetach does. When LatestLocal is from this boot,
+	// keep it and prune only the stale Uploading checkpoint.
+	var pruneErr error
+	if localPreReboot {
+		pruneErr = actordirs.RemoveActorFilesExceptState(a.actorUID)
+	} else {
+		var keep []string
+		if a.LatestLocal != nil {
+			keep = []string{a.LatestLocal.uuid()}
+		}
+		pruneErr = PruneLocalCheckpoints(t.ctx, a.actorUID, keep...)
 	}
-	pruneErr := PruneLocalCheckpoints(t.ctx, a.actorUID, keep...)
 	if pruneErr != nil {
 		// Restore and uploads refuse what is left, which the actor's next
 		// checkpoint or terminate deletes.
