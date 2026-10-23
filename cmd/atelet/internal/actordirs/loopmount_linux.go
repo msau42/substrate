@@ -252,7 +252,7 @@ func ensureSnapshotLoopMount(actorUID string) error {
 		return err
 	}
 
-	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nobarrier,nodiscard,nodatasum"); err != nil {
+	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nobarrier,nodiscard,nodatacow,commit=5"); err != nil {
 		releaseLVMVolume(actorUID)
 		return fmt.Errorf("mounting btrfs %s on %s: %w", slot.path, snapDir, err)
 	}
