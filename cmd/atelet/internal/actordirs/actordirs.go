@@ -84,9 +84,6 @@ func ResetActorDirsKeepingVolumes(actorUID string) error {
 	if err := ResetDir("bundle dir", ateletpath.OCIBundleDir(actorUID), imagecache.RemoveAllWritable, 0o700); err != nil {
 		return err
 	}
-	if err := ensureSnapshotLoopMount(actorUID); err != nil {
-		return err
-	}
 	if err := ResetDir("checkpoint-state dir", ateletpath.CheckpointStateDir(actorUID), os.RemoveAll, 0o700); err != nil {
 		return err
 	}
@@ -118,9 +115,6 @@ func RemoveActorFilesExceptState(actorUID string) error {
 	volumesDir := ateletpath.ExternalVolumeMountsDir(actorUID)
 	if err := os.Remove(volumesDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("while removing volumes dir: %w", err)
-	}
-	if err := teardownSnapshotLoopMount(actorUID); err != nil {
-		return fmt.Errorf("while tearing down actor snapshot loop mount: %w", err)
 	}
 	if err := os.RemoveAll(ateletpath.ActorSnapshotPath(actorUID)); err != nil {
 		return fmt.Errorf("while deleting actor snapshot dir: %w", err)
