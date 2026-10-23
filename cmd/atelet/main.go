@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -163,6 +164,7 @@ func main() {
 	if err := validateSnapshotWorkerFlags(); err != nil {
 		serverboot.Fatal(ctx, "Invalid snapshot worker flags", err)
 	}
+	ensureDedicatedSnapshotsMount(ctx)
 
 	// Kept separate from ctx so in-flight work (e.g. a Checkpoint/Restore
 	// streaming a multi-GiB snapshot) is not cancelled the moment SIGTERM
@@ -2473,4 +2475,65 @@ func newKubeClients() (*kubernetes.Clientset, versioned.Interface, error) {
 		return nil, nil, fmt.Errorf("create ate clientset: %w", err)
 	}
 	return clientset, ateClient, nil
+}
+
+func ensureDedicatedSnapshotsMount(ctx context.Context) {
+	if entries, err := os.ReadDir(nodepath.SnapshotsDir); err == nil {
+		for _, entry := range entries {
+			sub := filepath.Join(nodepath.SnapshotsDir, entry.Name())
+			_ = syscall.Unmount(sub, syscall.MNT_DETACH)
+		}
+	}
+	for range 4 {
+		if err := syscall.Unmount(nodepath.SnapshotsDir, syscall.MNT_DETACH); err != nil {
+			break
+		}
+		slog.InfoContext(ctx, "Unmounted dedicated snapshots disk to restore baseline boot disk", slog.String("mountpoint", nodepath.SnapshotsDir))
+	}
+	_ = os.RemoveAll(filepath.Join(nodepath.BasePath, "loop-images"))
+	_ = os.RemoveAll(nodepath.SnapshotsDir)
+	if err := os.MkdirAll(nodepath.SnapshotsDir, 0o755); err != nil {
+		serverboot.Fatal(ctx, "Failed to create snapshots dir", err)
+	}
+	_ = os.RemoveAll(nodepath.ActorsDir)
+	if err := os.MkdirAll(nodepath.ActorsDir, 0o755); err != nil {
+		serverboot.Fatal(ctx, "Failed to create actors dir", err)
+	}
+	baseInfo, err := os.Stat(nodepath.BasePath)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to stat base path", err)
+	}
+	snapInfo, err := os.Stat(nodepath.SnapshotsDir)
+	if err != nil {
+		serverboot.Fatal(ctx, "Failed to stat snapshots dir", err)
+	}
+	baseDev := baseInfo.Sys().(*syscall.Stat_t).Dev
+	snapDev := snapInfo.Sys().(*syscall.Stat_t).Dev
+
+	var baseFS, snapFS syscall.Statfs_t
+	_ = syscall.Statfs(nodepath.BasePath, &baseFS)
+	_ = syscall.Statfs(nodepath.SnapshotsDir, &snapFS)
+
+	// Restore Linux default vm dirty sysctls on the host node.
+	for sysctl, val := range map[string]string{
+		"/proc/sys/vm/dirty_background_ratio": "10\n",
+		"/proc/sys/vm/dirty_ratio":            "20\n",
+		"/proc/sys/vm/dirty_expire_centisecs": "3000\n",
+	} {
+		if err := os.WriteFile(sysctl, []byte(val), 0o644); err != nil {
+			slog.WarnContext(ctx, "Failed to restore vm dirty sysctl", slog.String("path", sysctl), slog.Any("err", err))
+		}
+	}
+	bgRatio, _ := os.ReadFile("/proc/sys/vm/dirty_background_ratio")
+	dirtyRatio, _ := os.ReadFile("/proc/sys/vm/dirty_ratio")
+	expireCs, _ := os.ReadFile("/proc/sys/vm/dirty_expire_centisecs")
+
+	slog.InfoContext(ctx, "Storage mounts ready (baseline boot disk)",
+		slog.Bool("same_dev", baseDev == snapDev),
+		slog.Uint64("base_avail_mib", (baseFS.Bavail*uint64(baseFS.Bsize))>>20),
+		slog.Uint64("snapshots_avail_mib", (snapFS.Bavail*uint64(snapFS.Bsize))>>20),
+		slog.Uint64("snapshots_total_mib", (snapFS.Blocks*uint64(snapFS.Bsize))>>20),
+		slog.String("dirty_background_ratio", strings.TrimSpace(string(bgRatio))),
+		slog.String("dirty_ratio", strings.TrimSpace(string(dirtyRatio))),
+		slog.String("dirty_expire_centisecs", strings.TrimSpace(string(expireCs))))
 }
