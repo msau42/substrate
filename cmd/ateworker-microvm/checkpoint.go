@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
@@ -32,6 +33,7 @@ import (
 	"go.ate.dev/substrate/cmd/ateworker-microvm/internal/kata"
 	"go.ate.dev/substrate/internal/ateworker/phaselog"
 	"go.ate.dev/substrate/internal/ateworkervalidation"
+	"go.ate.dev/substrate/internal/btrfssubvol"
 	"go.ate.dev/substrate/internal/imagecache"
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"go.ate.dev/substrate/internal/workerstats"
@@ -164,12 +166,27 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	}
 
 	checkpointDir := actorDirs.GetCheckpointDir()
-	// Start from a clean dir so CH's snapshot files are the only contents.
-	if err := os.RemoveAll(checkpointDir); err != nil {
-		return nil, fmt.Errorf("while clearing checkpoint dir %q: %w", checkpointDir, err)
-	}
-	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
-		return nil, fmt.Errorf("while creating checkpoint dir %q: %w", checkpointDir, err)
+	useBtrfs := isBtrfsSnapshotDir(actorDirs)
+	activeDir := activeSubvolDir(actorDirs)
+	if useBtrfs {
+		if !btrfssubvol.IsSubvolume(activeDir) {
+			if err := btrfssubvol.Create(activeDir); err != nil {
+				return nil, fmt.Errorf("while creating active btrfs subvolume %q: %w", activeDir, err)
+			}
+		}
+		_ = os.Remove(filepath.Join(activeDir, "manifest.json"))
+		_ = os.Remove(filepath.Join(activeDir, btrfsCheckpointTokenFile))
+		if err := btrfssubvol.RemoveAll(checkpointDir); err != nil {
+			return nil, fmt.Errorf("while clearing checkpoint dir %q: %w", checkpointDir, err)
+		}
+	} else {
+		// Start from a clean dir so CH's snapshot files are the only contents.
+		if err := os.RemoveAll(checkpointDir); err != nil {
+			return nil, fmt.Errorf("while clearing checkpoint dir %q: %w", checkpointDir, err)
+		}
+		if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
+			return nil, fmt.Errorf("while creating checkpoint dir %q: %w", checkpointDir, err)
+		}
 	}
 
 	// Capture the snapshot's pieces CONCURRENTLY: the CH snapshot, the
@@ -188,24 +205,43 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	//     volumes — the memory snapshot does not carry rootfs writes. Under
 	//     VOLUMES the workload cold-starts on restore, discarding rootfs state.
 	shipsRootfs := includesRootfs(scope)
+	isIncrementalBtrfs := useBtrfs && ra != nil && ra.restoreSourceDir != ""
 	var durableFiles []string
 	g, gctx := errgroup.WithContext(ctx)
 	if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		g.Go(func() error {
 			t := time.Now()
-			d, err := s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+			var (
+				d   time.Duration
+				err error
+			)
+			if useBtrfs {
+				d, err = s.snapshotVMStateBtrfs(gctx, client, ra, actorUID, activeDir)
+			} else {
+				d, err = s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+			}
 			if err != nil {
 				d = time.Since(t)
 			}
 			dSnapshot = d
 			return err
 		})
+	} else if useBtrfs {
+		for _, f := range []string{baseIDFile, "config.json", "state.json", "memory-ranges"} {
+			_ = os.Remove(filepath.Join(activeDir, f))
+		}
 	}
 	if durable {
 		g.Go(func() error {
 			t := time.Now()
 			var err error
-			durableFiles, err = tarDurableVolumes(gctx, actorDirs.GetDurableDirVolumeMountsDir(), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
+			if isIncrementalBtrfs {
+				durableFiles, err = markBtrfsDurableVolumes(activeDir, durableMountsDir(actorDirs), durableVolumeNames(req.GetSpec().GetContainers()))
+			} else if useBtrfs {
+				durableFiles, err = tarDurableVolumes(gctx, durableMountsDir(actorDirs), activeDir, durableVolumeNames(req.GetSpec().GetContainers()))
+			} else {
+				durableFiles, err = tarDurableVolumes(gctx, durableMountsDir(actorDirs), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
+			}
 			dDurable = time.Since(t)
 			return err
 		})
@@ -213,13 +249,54 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	if shipsRootfs {
 		g.Go(func() error {
 			t := time.Now()
-			err := tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
+			var err error
+			if isIncrementalBtrfs {
+				err = markBtrfsRootfsUpper(activeDir, rootfsUpperDir(actorDirs), containerNames(req.GetSpec().GetContainers()))
+			} else if useBtrfs {
+				err = tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), activeDir, containerNames(req.GetSpec().GetContainers()))
+			} else {
+				err = tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
+			}
 			dUpper = time.Since(t)
 			return err
 		})
+	} else if useBtrfs {
+		for _, cid := range containerNames(req.GetSpec().GetContainers()) {
+			if name, err := rootfsUpperTarFile(cid); err == nil {
+				_ = os.Remove(filepath.Join(activeDir, name))
+			}
+		}
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+
+	// Tear down the VMM and overlay mounts before taking the btrfs snapshot so
+	// activeDir is completely quiescent and can be kept in place for the next
+	// RestoreWorkload without destroying and re-snapshotting it.
+	tTeardown := time.Now()
+	if err := s.terminateWorkloadAfterCheckpoint(ctx, attribution, actorDirs, !useBtrfs); err != nil {
+		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
+			slog.String("actor", attribution.Ref.String()),
+			slog.String("actorUID", actorUID),
+			slog.Any("err", err))
+	}
+	dTeardown = time.Since(tTeardown)
+
+	if useBtrfs {
+		if shipsRootfs {
+			for _, cid := range containerNames(req.GetSpec().GetContainers()) {
+				_ = os.RemoveAll(filepath.Join(activeDir, "rootfs-upper", cid, "work"))
+			}
+		} else {
+			_ = os.RemoveAll(filepath.Join(activeDir, "rootfs-upper"))
+		}
+		if err := writeBtrfsCheckpointToken(activeDir); err != nil {
+			return nil, fmt.Errorf("while writing btrfs checkpoint token: %w", err)
+		}
+		if err := btrfssubvol.Snapshot(activeDir, checkpointDir); err != nil {
+			return nil, fmt.Errorf("while snapshotting active btrfs subvolume: %w", err)
+		}
 	}
 
 	// Report exactly the files we wrote so atelet ships precisely this snapshot:
@@ -230,17 +307,6 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	if err != nil {
 		return nil, fmt.Errorf("while listing snapshot files: %w", err)
 	}
-
-	// Tear down: the actor returns to "available". Best-effort; the snapshot is
-	// already on disk for atelet to ship.
-	tTeardown := time.Now()
-	if err := s.terminateWorkload(ctx, attribution, actorDirs); err != nil {
-		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
-			slog.String("actor", attribution.Ref.String()),
-			slog.String("actorUID", actorUID),
-			slog.Any("err", err))
-	}
-	dTeardown = time.Since(tTeardown)
 
 	s.actorLogger.EmitLifecycleLog(ctx, "Actor checkpointed", attribution)
 	slog.InfoContext(ctx, "Actor checkpointed", slog.String("id", actorUID), slog.Any("snapshot_files", snapshotFiles),
@@ -307,6 +373,29 @@ func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Clien
 	return dSnapshot, nil
 }
 
+func (s *AteWorkerService) snapshotVMStateBtrfs(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, activeDir string) (time.Duration, error) {
+	baseID := actorUID
+	if ra != nil && ra.baseID != "" {
+		baseID = ra.baseID
+	}
+	if err := os.WriteFile(filepath.Join(activeDir, baseIDFile), []byte(baseID), 0o600); err != nil {
+		return 0, fmt.Errorf("while writing %s: %w", baseIDFile, err)
+	}
+
+	// Keep active/memory-ranges in place: it is the VM's live MAP_SHARED
+	// backing file, so cloud-hypervisor skips writing memory-ranges during
+	// vm.snapshot and only writes config.json and state.json.
+	for _, f := range []string{"config.json", "state.json"} {
+		_ = os.Remove(filepath.Join(activeDir, f))
+	}
+	slog.InfoContext(ctx, "Snapshotting guest into active btrfs subvolume", slog.String("id", actorUID), slog.String("dir", activeDir))
+	tSnapshot := time.Now()
+	if err := client.Snapshot(ctx, activeDir); err != nil {
+		return 0, fmt.Errorf("while snapshotting guest: %w", err)
+	}
+	return time.Since(tSnapshot), nil
+}
+
 // mergeOnDemandDelta merges the OnDemand delta in checkpointDir with the base in
 // restoreSourceDir. A preserved base is copied, never modified in place.
 func mergeOnDemandDelta(ctx context.Context, restoreSourceDir, checkpointDir string, preserveRestoreSource bool) error {
@@ -326,7 +415,7 @@ func listFiles(dir string) ([]string, error) {
 	}
 	var files []string
 	for _, e := range entries {
-		if e.Type().IsRegular() {
+		if e.Type().IsRegular() && !strings.HasPrefix(e.Name(), ".") {
 			files = append(files, e.Name())
 		}
 	}
@@ -335,7 +424,7 @@ func listFiles(dir string) ([]string, error) {
 
 // teardownActor stops the ateworker-owned CH VMM for an actor. ra may be
 // nil (e.g. ateworker restarted and lost in-memory state).
-func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor) error {
+func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor, removeActive bool) error {
 	// Stop offering the guest to GetWorkloadStats first, before anything below
 	// makes it stop answering. Clearing it here rather than alongside the
 	// attribution is what keeps a poll that lands mid-teardown on the
@@ -377,11 +466,13 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 	// corrupt the mount rather than delete the files).
 	s.cleanupSandboxState(ctx, id)
 
-	// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
-	// doesn't know it — and its absence is what marks a worker as holding no
-	// disk-backed upper. Runs after the checkpoint tar, which is already on disk.
-	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
-		slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
+	if removeActive {
+		// Remove the rootfs upper dir (or active btrfs subvolume): ateworker owns it
+		// — atelet's actor-dir reset doesn't know it — and its absence is what marks
+		// a worker as holding no disk-backed upper.
+		if err := cleanupActiveOrRootfsUpper(actorDirs); err != nil {
+			slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
+		}
 	}
 
 	// Detach the bundle rootfs overlays composed in buildActorContainers, so
@@ -433,7 +524,7 @@ func (s *AteWorkerService) endPreviousActivation(ctx context.Context, actorUID s
 		if old != nil {
 			s.readFinal(ctx, old)
 		}
-		if err := s.teardownActor(ctx, actorUID, actorDirs, ra); err != nil {
+		if err := s.teardownActor(ctx, actorUID, actorDirs, ra, true); err != nil {
 			return fmt.Errorf("while stopping the actor's previous micro-VM: %w", err)
 		}
 	}
@@ -444,13 +535,17 @@ func (s *AteWorkerService) endPreviousActivation(ctx context.Context, actorUID s
 }
 
 func (s *AteWorkerService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) error {
+	return s.terminateWorkloadAfterCheckpoint(ctx, actor, actorDirs, true)
+}
+
+func (s *AteWorkerService) terminateWorkloadAfterCheckpoint(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs, removeActive bool) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
 
 	actorUID := actor.UID
-	if err := s.teardownActor(ctx, actorUID, actorDirs, s.runningVM(actorUID)); err != nil {
+	if err := s.teardownActor(ctx, actorUID, actorDirs, s.runningVM(actorUID), removeActive); err != nil {
 		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
 	}
 	// Remove attribution after teardown; a failed checkpoint may leave the VM running.

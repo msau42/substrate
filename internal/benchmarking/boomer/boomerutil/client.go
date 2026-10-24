@@ -15,9 +15,13 @@
 package boomerutil
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 
 	"go.ate.dev/substrate/internal/ateapiauth"
+	"go.ate.dev/substrate/internal/credbundle"
 	_ "go.ate.dev/substrate/internal/k8sresolver"
 	"go.ate.dev/substrate/pkg/proto/ateapipb"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
@@ -37,7 +41,41 @@ const (
 	// ateapiServerName is the DNS SAN on the apiserver's serving cert, which
 	// is shorter than the endpoint the benchmark dials.
 	ateapiServerName = "api.ate-system.svc"
+	routerServerName = "atenet-router.ate-system.svc"
 )
+
+// RouterTLSConfig returns an mTLS client configuration for dialing atenet-router.
+func RouterTLSConfig() (*tls.Config, error) {
+	loadRootCAs := credbundle.PoolLoader(ateapiCAFile)
+	if _, err := loadRootCAs(); err != nil {
+		return nil, fmt.Errorf("loading CA file: %w", err)
+	}
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         routerServerName,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			pool, err := loadRootCAs()
+			if err != nil {
+				return err
+			}
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("server presented no certificate")
+			}
+			inter := x509.NewCertPool()
+			for _, c := range cs.PeerCertificates[1:] {
+				inter.AddCert(c)
+			}
+			_, err = cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+				Roots:         pool,
+				Intermediates: inter,
+				DNSName:       routerServerName,
+			})
+			return err
+		},
+		GetClientCertificate: credbundle.ClientLoader(ateapiCredBundle),
+	}, nil
+}
 
 // DialControl opens an authenticated gRPC connection to ateapi.
 //

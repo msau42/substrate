@@ -50,6 +50,7 @@ import (
 	"go.ate.dev/substrate/internal/ateattr"
 	"go.ate.dev/substrate/internal/ateinterceptors"
 	"go.ate.dev/substrate/internal/atelet"
+	"go.ate.dev/substrate/internal/btrfssubvol"
 	"go.ate.dev/substrate/internal/clustertrustbundle"
 	"go.ate.dev/substrate/internal/credbundle"
 	"go.ate.dev/substrate/internal/imagecache"
@@ -1219,6 +1220,7 @@ func toWorkerFidelity(fidelity ateletpb.SnapshotFidelity) ateworkerpb.SnapshotFi
 }
 
 func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord) error {
+	checkpointAbs := ateletpath.CheckpointStateDir(req.GetActorUid())
 	snapshotRoot := ateletpath.ActorSnapshotPath(req.GetActorUid())
 	root, err := os.OpenRoot(snapshotRoot)
 	if err != nil {
@@ -1226,7 +1228,7 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	}
 	defer root.Close()
 
-	checkpointDir, err := filepath.Rel(snapshotRoot, ateletpath.CheckpointStateDir(req.GetActorUid()))
+	checkpointDir, err := filepath.Rel(snapshotRoot, checkpointAbs)
 	if err != nil {
 		return err
 	}
@@ -1234,6 +1236,42 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	localDir, err := filepath.Rel(snapshotRoot, ateletpath.LocalSnapshotDir(req.GetActorUid(), snapshotName))
 	if err != nil {
 		return err
+	}
+
+	// Write the self-describing snapshot manifest beside the images, stamped
+	// with this boot so a reader can tell whether the node has rebooted since.
+	local := *rec
+	local.BootID = s.bootID
+	manifest, err := json.Marshal(&local)
+	if err != nil {
+		return fmt.Errorf("while marshaling snapshot manifest: %w", err)
+	}
+
+	if btrfssubvol.IsSubvolume(checkpointAbs) {
+		for _, fileName := range rec.SnapshotFiles {
+			src := filepath.Join(checkpointDir, fileName)
+			info, err := root.Lstat(src)
+			if err != nil {
+				return fmt.Errorf("while inspecting checkpoint file %s: %w", fileName, err)
+			}
+			if !info.Mode().IsRegular() {
+				return fmt.Errorf("checkpoint file %s is not a regular file", fileName)
+			}
+			recordSnapshotSize(ctx, fileName, sparsefile.AllocatedBytes(info), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
+		}
+		if err := root.WriteFile(filepath.Join(checkpointDir, sandboxManifestName), manifest, 0o600); err != nil {
+			return fmt.Errorf("while writing snapshot manifest: %w", err)
+		}
+		if err := root.MkdirAll(filepath.Dir(localDir), 0o700); err != nil {
+			return fmt.Errorf("while creating local checkpoint directory: %w", err)
+		}
+		if err := root.Rename(checkpointDir, localDir); err != nil {
+			return fmt.Errorf("failed to move btrfs subvolume %s to %s: %w", checkpointDir, localDir, err)
+		}
+		if err := root.MkdirAll(checkpointDir, 0o700); err != nil {
+			return fmt.Errorf("while recreating checkpoint directory: %w", err)
+		}
+		return nil
 	}
 
 	// Stage the files worker reported and the snapshot manifest inside
@@ -1268,14 +1306,6 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 		}
 	}
 
-	// Write the self-describing snapshot manifest beside the images, stamped
-	// with this boot so a reader can tell whether the node has rebooted since.
-	local := *rec
-	local.BootID = s.bootID
-	manifest, err := json.Marshal(&local)
-	if err != nil {
-		return fmt.Errorf("while marshaling snapshot manifest: %w", err)
-	}
 	if err := root.WriteFile(filepath.Join(stageDir, sandboxManifestName), manifest, 0o600); err != nil {
 		return fmt.Errorf("while writing snapshot manifest: %w", err)
 	}

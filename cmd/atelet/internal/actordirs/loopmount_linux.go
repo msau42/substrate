@@ -39,8 +39,8 @@ var btrfsTemplateGzip []byte
 
 const (
 	lvmVGDir            = "/host/dev/vg_snapshots"
-	lvmVolumeSize       = 8192 << 20 // 8192 MiB (8 GiB) per LV on the dedicated snapshot disk
-	loopPoolDefaultSize = 20
+	lvmVolumeSize       = 2200 << 20 // 2200 MiB per LV on the dedicated snapshot disk
+	loopPoolDefaultSize = 160
 )
 
 type sparseExtent struct {
@@ -129,16 +129,20 @@ func prewarmLVMVolume(lvPath string, extents []sparseExtent) error {
 func initLoopPool() {
 	start := time.Now()
 
-	// Unmount any orphaned snapshot mounts left over from dead actors.
+	// Unmount any snapshot mounts left over from a previous atelet run before
+	// reformatting all LVM slots into loopPoolFree.
 	snapshotsRoot := filepath.Dir(ateletpath.ActorSnapshotPath("dummy"))
 	if entries, err := os.ReadDir(snapshotsRoot); err == nil {
 		for _, entry := range entries {
 			uid := entry.Name()
+			if uid == ".cache" || uid == "lost+found" {
+				continue
+			}
+			snapDir := ateletpath.ActorSnapshotPath(uid)
+			if mounted, _ := isMountPoint(snapDir); mounted {
+				_ = unix.Unmount(snapDir, unix.MNT_DETACH)
+			}
 			if _, err := os.Stat(ateletpath.ActorPath(uid)); errors.Is(err, os.ErrNotExist) {
-				snapDir := ateletpath.ActorSnapshotPath(uid)
-				if mounted, _ := isMountPoint(snapDir); mounted {
-					_ = unix.Unmount(snapDir, unix.MNT_DETACH)
-				}
 				_ = os.RemoveAll(snapDir)
 			}
 		}
@@ -155,23 +159,34 @@ func initLoopPool() {
 		"slots", loopPoolDefaultSize,
 		"slot_size_mib", lvmVolumeSize>>20,
 	)
-	for i := 0; i < loopPoolDefaultSize && i < len(slotTemplates); i++ {
-		slotPath := filepath.Join(lvmVGDir, fmt.Sprintf("slot-%02d", i))
-		slotStart := time.Now()
-		if err := prewarmLVMVolume(slotPath, slotTemplates[i]); err != nil {
-			slog.Error("Failed to initialize LVM btrfs pool slot", "slot", slotPath, "err", err)
-			continue
-		}
-		loopPoolMu.Lock()
-		loopPoolFree = append(loopPoolFree, lvmSlot{index: i, path: slotPath})
-		freeCount := len(loopPoolFree)
-		loopPoolMu.Unlock()
-		slog.Info("Pre-warmed snapshot loop image slot",
-			"slot", slotPath,
-			"free_slots", freeCount,
-			"duration", time.Since(slotStart),
-		)
+	totalSlots := loopPoolDefaultSize
+	if len(slotTemplates) < totalSlots {
+		totalSlots = len(slotTemplates)
 	}
+	ch := make(chan int, totalSlots)
+	for i := 0; i < totalSlots; i++ {
+		ch <- i
+	}
+	close(ch)
+
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range ch {
+				slotPath := filepath.Join(lvmVGDir, fmt.Sprintf("slot-%02d", i))
+				if err := prewarmLVMVolume(slotPath, slotTemplates[i]); err != nil {
+					slog.Error("Failed to initialize LVM btrfs pool slot", "slot", slotPath, "err", err)
+					continue
+				}
+				loopPoolMu.Lock()
+				loopPoolFree = append(loopPoolFree, lvmSlot{index: i, path: slotPath})
+				loopPoolMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 	slog.Info("Finished pre-warming snapshot loop image pool",
 		"slots", len(loopPoolFree),
 		"duration", time.Since(start),
@@ -252,7 +267,7 @@ func ensureSnapshotLoopMount(actorUID string) error {
 		return err
 	}
 
-	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nobarrier,nodiscard,nodatacow,commit=5"); err != nil {
+	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nobarrier,nodiscard,nodatasum,commit=5"); err != nil {
 		releaseLVMVolume(actorUID)
 		return fmt.Errorf("mounting btrfs %s on %s: %w", slot.path, snapDir, err)
 	}
@@ -273,8 +288,10 @@ func teardownSnapshotLoopMount(actorUID string) error {
 		return fmt.Errorf("checking snapshot mountpoint %s: %w", snapDir, err)
 	}
 	if mounted {
-		if err := unix.Unmount(snapDir, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
-			return fmt.Errorf("unmounting snapshot LVM mount %s: %w", snapDir, err)
+		if err := unix.Unmount(snapDir, 0); err != nil {
+			if err := unix.Unmount(snapDir, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+				return fmt.Errorf("unmounting snapshot LVM mount %s: %w", snapDir, err)
+			}
 		}
 	}
 	releaseLVMVolume(actorUID)

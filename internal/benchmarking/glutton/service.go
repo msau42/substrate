@@ -56,9 +56,10 @@ type Service struct {
 	ram map[string][]byte
 	// ramCursor is each array's next WRITE_MODE_OVERWRITE_ROTATE offset.
 	// Absent means 0; invalidated whenever the array is reallocated.
-	ramCursor map[string]int
-	fds       []*os.File
-	peers     map[string]*peerGossip
+	ramCursor  map[string]int
+	diskCursor map[string]int64
+	fds        []*os.File
+	peers      map[string]*peerGossip
 
 	cpu cpuLoad
 
@@ -91,10 +92,11 @@ func WithWritableReadyz() Option {
 // Close to stop any running gossip goroutines.
 func New(dir string, opts ...Option) (*Service, error) {
 	s := &Service{
-		dataDir:   dir,
-		ram:       make(map[string][]byte),
-		ramCursor: make(map[string]int),
-		peers:     make(map[string]*peerGossip),
+		dataDir:    dir,
+		ram:        make(map[string][]byte),
+		ramCursor:  make(map[string]int),
+		diskCursor: make(map[string]int64),
+		peers:      make(map[string]*peerGossip),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -245,11 +247,17 @@ func (s *Service) WriteDisk(ctx context.Context, req *gluttonpb.WriteDiskRequest
 	}
 
 	path := filepath.Join(s.dataDir, req.GetKey())
+	if req.GetWriteMode() == gluttonpb.WriteMode_WRITE_MODE_OVERWRITE_ROTATE {
+		return s.rotateDisk(ctx, req.GetKey(), path, int64(req.GetSize()))
+	}
 
 	var flag int
 	switch req.GetWriteMode() {
 	case gluttonpb.WriteMode_WRITE_MODE_TRUNCATE:
 		flag = os.O_RDWR | os.O_CREATE | os.O_TRUNC
+		s.mu.Lock()
+		delete(s.diskCursor, req.GetKey())
+		s.mu.Unlock()
 	case gluttonpb.WriteMode_WRITE_MODE_OVERWRITE:
 		// No O_TRUNC: writes go from offset 0 but any bytes beyond size remain.
 		flag = os.O_RDWR | os.O_CREATE
@@ -287,6 +295,62 @@ func (s *Service) WriteDisk(ctx context.Context, req *gluttonpb.WriteDiskRequest
 
 	s.diskWriteBytes.Add(ctx, int64(req.GetSize()))
 	return &gluttonpb.WriteDiskResponse{Size: size, Sha256: h.Sum(nil)}, nil
+}
+
+func (s *Service) rotateDisk(ctx context.Context, key, path string, size int64) (*gluttonpb.WriteDiskResponse, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "open %s: %v", path, err)
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "stat %s: %v", path, err)
+	}
+	fileLen := st.Size()
+	if fileLen <= 0 {
+		return nil, status.Errorf(codes.NotFound, "rotate needs an existing non-empty file %q", key)
+	}
+	if size > fileLen {
+		size = fileLen
+	}
+
+	s.mu.Lock()
+	start := s.diskCursor[key] % fileLen
+	s.diskCursor[key] = (start + size) % fileLen
+	s.mu.Unlock()
+
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
+		return nil, status.Errorf(codes.Internal, "seek %s: %v", path, err)
+	}
+	headLen := min(size, fileLen-start)
+	if err := streamRandomBytes(f, headLen); err != nil {
+		return nil, status.Errorf(codes.Internal, "write %s: %v", path, err)
+	}
+	if wrapped := size - headLen; wrapped > 0 {
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, status.Errorf(codes.Internal, "seek %s: %v", path, err)
+		}
+		if err := streamRandomBytes(f, wrapped); err != nil {
+			return nil, status.Errorf(codes.Internal, "write %s: %v", path, err)
+		}
+	}
+	if s.syncWrites {
+		if err := f.Sync(); err != nil {
+			return nil, status.Errorf(codes.Internal, "sync %s: %v", path, err)
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, status.Errorf(codes.Internal, "seek %s: %v", path, err)
+	}
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, status.Errorf(codes.Internal, "hash %s: %v", path, err)
+	}
+
+	s.diskWriteBytes.Add(ctx, size)
+	return &gluttonpb.WriteDiskResponse{Size: fileLen, Sha256: h.Sum(nil)}, nil
 }
 
 func (s *Service) ReadDisk(ctx context.Context, req *gluttonpb.ReadDiskRequest) (*gluttonpb.ReadDiskResponse, error) {

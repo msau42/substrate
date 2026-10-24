@@ -64,12 +64,22 @@ type CpusConfig struct {
 	MaxVcpus  int32 `json:"max_vcpus"`
 }
 
+// MemoryZoneConfig configures a guest RAM zone in cloud-hypervisor.
+type MemoryZoneConfig struct {
+	ID     string `json:"id"`
+	Size   int64  `json:"size"`
+	File   string `json:"file,omitempty"`
+	Shared bool   `json:"shared,omitempty"`
+}
+
 // MemoryConfig sets guest RAM. Shared=true makes CH back RAM with a memfd, which
 // is what lets vm.snapshot write a SPARSE image (the memory-only snapshot the
-// rest of ateworker relies on).
+// rest of ateworker relies on). When Zones is set, Size is 0 and each zone
+// configures its own backing file and sharing mode.
 type MemoryConfig struct {
-	Size   int64 `json:"size"`
-	Shared bool  `json:"shared"`
+	Size   int64              `json:"size"`
+	Shared bool               `json:"shared,omitempty"`
+	Zones  []MemoryZoneConfig `json:"zones,omitempty"`
 }
 
 // PayloadConfig points at the guest kernel + its cmdline (initramfs/firmware

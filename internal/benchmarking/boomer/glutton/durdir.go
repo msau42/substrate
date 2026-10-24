@@ -319,7 +319,13 @@ func (u *durDirUser) step(ctx context.Context, dynCfg durDirKnobs) {
 	}
 
 	// 5. Overwrite file with fresh random bytes
-	if err := u.writeDisk(ctx, "DurDirOverwrite", fileSize, gluttonpb.WriteMode_WRITE_MODE_TRUNCATE); err != nil {
+	writeSize := fileSize
+	writeMode := gluttonpb.WriteMode_WRITE_MODE_TRUNCATE
+	if dynCfg.ChurnSize > 0 {
+		writeSize = dynCfg.ChurnSize
+		writeMode = gluttonpb.WriteMode_WRITE_MODE_OVERWRITE_ROTATE
+	}
+	if err := u.writeDisk(ctx, "DurDirOverwrite", writeSize, writeMode); err != nil {
 		return
 	}
 }
@@ -356,6 +362,11 @@ func (u *durDirUser) writeDisk(ctx context.Context, metricName string, size int6
 		return err
 	}
 
+	wantSize := size
+	if mode != gluttonpb.WriteMode_WRITE_MODE_TRUNCATE && u.expectedSize > size {
+		wantSize = u.expectedSize
+	}
+
 	var newDigest string
 	var newSize int64
 	_, err = u.httpProtoCall(ctx, metricName, writeDiskRoute, body, func(respBytes []byte) error {
@@ -363,8 +374,8 @@ func (u *durDirUser) writeDisk(ctx context.Context, metricName string, size int6
 		if err := proto.Unmarshal(respBytes, &resp); err != nil {
 			return fmt.Errorf("unmarshal WriteDiskResponse: %w", err)
 		}
-		if resp.GetSize() != size {
-			return fmt.Errorf("WriteDisk size mismatch: got %d, want %d", resp.GetSize(), size)
+		if resp.GetSize() != wantSize {
+			return fmt.Errorf("WriteDisk size mismatch: got %d, want %d", resp.GetSize(), wantSize)
 		}
 		if len(resp.GetSha256()) == 0 {
 			return fmt.Errorf("WriteDisk sha256 is empty")

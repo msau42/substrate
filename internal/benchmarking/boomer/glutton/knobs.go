@@ -98,6 +98,9 @@ type durDirKnobs struct {
 	// FileSize is the file written and re-read each cycle, in bytes; 0
 	// falls back to defaultFileSize.
 	FileSize int64 `json:"durdir_file_size_bytes"`
+	// ChurnSize is the bytes overwritten each cycle after bootstrap; 0
+	// rewrites the whole FileSize with TRUNCATE.
+	ChurnSize int64 `json:"durdir_churn_bytes"`
 	// ReadMode is readModeData or readModeDigest; empty reads as data.
 	ReadMode string `json:"durdir_read_mode"`
 	// Template is the ActorTemplate name; empty falls back to
@@ -118,6 +121,12 @@ var durDirCodec = dynconfig.Typed[durDirKnobs]{
 		}
 		if k.FileSize > math.MaxInt32 {
 			return fmt.Errorf("durdir_file_size_bytes cannot exceed %d (2 GiB), got: %d", math.MaxInt32, k.FileSize)
+		}
+		if k.ChurnSize < 0 {
+			return fmt.Errorf("durdir_churn_bytes cannot be negative: %d", k.ChurnSize)
+		}
+		if k.ChurnSize > math.MaxInt32 {
+			return fmt.Errorf("durdir_churn_bytes cannot exceed %d (2 GiB), got: %d", math.MaxInt32, k.ChurnSize)
 		}
 		if k.ReadMode != "" && k.ReadMode != readModeData && k.ReadMode != readModeDigest {
 			return fmt.Errorf("invalid durdir_read_mode %q: must be %q or %q", k.ReadMode, readModeData, readModeDigest)

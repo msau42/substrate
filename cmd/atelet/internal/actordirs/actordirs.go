@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
+	"go.ate.dev/substrate/internal/btrfssubvol"
 	"go.ate.dev/substrate/internal/imagecache"
 )
 
@@ -87,10 +88,10 @@ func ResetActorDirsKeepingVolumes(actorUID string) error {
 	if err := ensureSnapshotLoopMount(actorUID); err != nil {
 		return err
 	}
-	if err := ResetDir("checkpoint-state dir", ateletpath.CheckpointStateDir(actorUID), os.RemoveAll, 0o700); err != nil {
+	if err := ResetDir("checkpoint-state dir", ateletpath.CheckpointStateDir(actorUID), btrfssubvol.RemoveAll, 0o700); err != nil {
 		return err
 	}
-	if err := ResetDir("restore-state dir", ateletpath.RestoreStateDir(actorUID), os.RemoveAll, 0o700); err != nil {
+	if err := ResetDir("restore-state dir", ateletpath.RestoreStateDir(actorUID), btrfssubvol.RemoveAll, 0o700); err != nil {
 		return err
 	}
 	if err := ResetDir("durable-dir volumes mount dir", ateletpath.DurableDirVolumeMountsDir(actorUID), os.RemoveAll, 0o755); err != nil {

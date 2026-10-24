@@ -25,6 +25,7 @@ import (
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
 	"go.ate.dev/substrate/cmd/atelet/internal/sparsefile"
+	"go.ate.dev/substrate/internal/btrfssubvol"
 )
 
 // PruneLocalCheckpoints removes every local snapshot of the actor, as a detach
@@ -46,7 +47,7 @@ func pruneLocalCheckpointDir(ctx context.Context, dir string) error {
 	var errs []error
 	for _, entry := range entries {
 		path := filepath.Join(dir, entry.Name())
-		if err := os.RemoveAll(path); err != nil {
+		if err := btrfssubvol.RemoveAll(path); err != nil {
 			errs = append(errs, fmt.Errorf("while pruning local checkpoint %s: %w", path, err))
 			continue
 		}
@@ -65,7 +66,7 @@ func pruneLocalCheckpointDir(ctx context.Context, dir string) error {
 // snapshot is not an error.
 func removeLocalCheckpoint(ctx context.Context, actorUID, name string) error {
 	path := ateletpath.LocalSnapshotDir(actorUID, name)
-	if err := os.RemoveAll(path); err != nil {
+	if err := btrfssubvol.RemoveAll(path); err != nil {
 		return fmt.Errorf("while removing local checkpoint %s: %w", path, err)
 	}
 	slog.InfoContext(ctx, "removed local checkpoint", slog.String("path", path))
