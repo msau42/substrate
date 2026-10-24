@@ -2499,10 +2499,10 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 	if err != nil {
 		devPath = "/host/dev/nvme0n3"
 	}
-	if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "ext4", syscall.MS_NOATIME, "nobarrier"); err != nil {
+	if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "ext4", 0, ""); err != nil {
 		serverboot.Fatal(ctx, "Failed to mount dedicated snapshots scratch disk", err)
 	}
-	slog.InfoContext(ctx, "Mounted dedicated ext4 -O ^has_journal disk at snapshots dir",
+	slog.InfoContext(ctx, "Mounted dedicated ext4 disk at snapshots dir",
 		slog.String("device", devPath),
 		slog.String("mountpoint", nodepath.SnapshotsDir))
 
@@ -2547,7 +2547,7 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 	dirtyRatio, _ := os.ReadFile("/proc/sys/vm/dirty_ratio")
 	expireCs, _ := os.ReadFile("/proc/sys/vm/dirty_expire_centisecs")
 
-	slog.InfoContext(ctx, "Storage mounts ready (dedicated ext4 -O ^has_journal disk, no PR #2529)",
+	slog.InfoContext(ctx, "Storage mounts ready (dedicated journaled ext4 disk, no PR #2529)",
 		slog.Bool("same_dev", baseDev == snapDev),
 		slog.Uint64("base_avail_mib", (baseFS.Bavail*uint64(baseFS.Bsize))>>20),
 		slog.Uint64("snapshots_avail_mib", (snapFS.Bavail*uint64(snapFS.Bsize))>>20),
