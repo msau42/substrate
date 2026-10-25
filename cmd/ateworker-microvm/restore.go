@@ -156,7 +156,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		size:             sizing.FromLimits(req.GetResources().GetLimits()),
 	}
 	restoreDir := p.actorDirs.GetRestoreDir()
-	durableDir := p.actorDirs.GetDurableDirVolumeMountsDir()
+	durableDir := durableMountsDir(p.actorDirs)
 	tStart := time.Now()
 
 	attribution := p.actorAttribution()
@@ -178,9 +178,14 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 			// Detached: the RPC's context may be what failed it.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cleanupCancel()
+			_ = cleanupActiveOrRootfsUpper(p.actorDirs)
 			_ = s.unhostActor(cleanupCtx, attribution.UID)
 		}
 	}()
+
+	if err := prepareActiveForRestore(p.actorDirs, restoreDir, p.containers); err != nil {
+		return nil, err
+	}
 
 	// Restore the durable-dir volumes before anything can observe them: for MEMORY
 	// that means before the share's virtiofsd starts, for the lower fidelities
@@ -280,7 +285,8 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// Repoint the snapshot's per-actor paths to this actor's: its VMDir
 	// sockets and files, and the kernel and guest image atelet staged under
 	// this actor's own directory.
-	if err := rewriteSnapshotPaths(restoreDir, actorUID, kernel, image); err != nil {
+	memFile := guestMemoryFile(p.actorDirs)
+	if err := rewriteSnapshotPathsWithMemFile(restoreDir, actorUID, kernel, image, memFile); err != nil {
 		return fmt.Errorf("while rewriting snapshot paths: %w", err)
 	}
 	srcID := actorUID
@@ -305,7 +311,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	untarDone := make(chan error, 1)
 	untarJoined := false
 	go func() {
-		untarDone <- untarRootfsUpper(rootfsUpperDir(p.actorDirs), restoreDir, containerNames(p.containers))
+		untarDone <- untarRootfsUpperWithPreserve(rootfsUpperDir(p.actorDirs), restoreDir, containerNames(p.containers), preserveRestoreDir)
 	}()
 	defer func() {
 		if !untarJoined {
@@ -422,7 +428,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// When the restore dir is not preserved, dropping ahead of Resume means a
 	// failure after this point costs a re-download of the snapshot on retry.
 	maybeDropStagedMemoryImage(ctx, restoreDir, memMode, preserveRestoreDir)
-	dropActorSnapshotCacheAsync(restoreDir, memMode == ch.MemRestoreEager)
+	dropActorSnapshotCacheAsync(restoreDir, memFile == "" && memMode == ch.MemRestoreEager)
 	if err := client.Resume(ctx); err != nil {
 		return restoreGuestReadyError(ctx, "resuming restored guest", err)
 	}
@@ -509,7 +515,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		chProc: chProc, vfsdProc: vfsdProc,
 		apiSocket: apiSocket, baseID: srcID, restoreSourceDir: restoreDir,
 		preserveRestoreSource:   preserveRestoreDir,
-		snapshotIsSelfContained: memMode == ch.MemRestoreEager,
+		snapshotIsSelfContained: memFile != "" || memMode == ch.MemRestoreEager,
 		// Signaling an id the agent does not know fails the whole graceful
 		// shutdown with InvalidContainerId, so these must be what the guest runs.
 		workloadIDs: workloadIDs(ctrs),
@@ -564,7 +570,7 @@ func maybeDropStagedMemoryImage(ctx context.Context, restoreDir, memMode string,
 // actor's VMM and virtiofsd and drained the upper dir's untar first.
 func (s *AteWorkerService) cleanupFailedRestoreRootfs(ctx context.Context, actorUID string, actorDirs *ateworkerpb.ActorDirs) {
 	s.cleanupSandboxState(ctx, actorUID)
-	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
+	if err := cleanupActiveOrRootfsUpper(actorDirs); err != nil {
 		slog.WarnContext(ctx, "Failed to remove rootfs upper dir after Restore failure", slog.String("actorUID", actorUID), slog.Any("err", err))
 	}
 	if err := imagecache.UnmountAllUnder(actorDirs.GetOciBundleDir()); err != nil {
@@ -621,6 +627,10 @@ func restoreGuestReadyError(ctx context.Context, step string, err error) error {
 // identifies the runtime (asset URLs today, a SandboxConfig hash later)
 // changes none of this. The overlay has no per-actor disk to repoint.
 func rewriteSnapshotPaths(snapshotDir, id, kernel, image string) error {
+	return rewriteSnapshotPathsWithMemFile(snapshotDir, id, kernel, image, "")
+}
+
+func rewriteSnapshotPathsWithMemFile(snapshotDir, id, kernel, image, memFile string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -710,6 +720,24 @@ func rewriteSnapshotPaths(snapshotDir, id, kernel, image string) error {
 	}
 	if !guestImage {
 		return fmt.Errorf("snapshot config %q has no %q pmem device", cfgPath, guestImagePmemID)
+	}
+	if memFile != "" {
+		if mem, ok := cfg["memory"].(map[string]any); ok {
+			if zones, ok := mem["zones"].([]any); ok {
+				for _, z := range zones {
+					zm, ok := z.(map[string]any)
+					if !ok {
+						continue
+					}
+					if zm["id"] == guestMemoryZoneID {
+						if got, _ := zm["file"].(string); got != "" && got != memFile {
+							zm["file"] = memFile
+							changed = true
+						}
+					}
+				}
+			}
+		}
 	}
 	if !changed {
 		// Same-actor resume: nothing to rewrite, so leave a preserved snapshot untouched.

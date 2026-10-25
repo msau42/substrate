@@ -85,8 +85,8 @@ func TestVirtiofsdArgs(t *testing.T) {
 		SocketPath: "/run/vm/virtiofsd.sock",
 		SharedDir:  "/run/kata-containers/shared/sandboxes/uid/shared",
 	})
-	if !slices.Contains(args, "--cache=auto") {
-		t.Errorf("args %v do not contain --cache=auto", args)
+	if !slices.Contains(args, "--cache=never") {
+		t.Errorf("args %v do not contain --cache=never", args)
 	}
 	// The host kernel owns the overlay; the guest needs no xattr passthrough, so
 	// the flag must never be emitted.

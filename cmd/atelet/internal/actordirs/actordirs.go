@@ -91,6 +91,9 @@ func ResetActorDirsKeepingVolumes(actorUID string) error {
 	if err := os.RemoveAll(filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper")); err != nil {
 		return fmt.Errorf("while deleting rootfs-upper dir: %w", err)
 	}
+	if err := os.RemoveAll(filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active")); err != nil {
+		return fmt.Errorf("while deleting active snapshot dir: %w", err)
+	}
 	return nil
 }
 

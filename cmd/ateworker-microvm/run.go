@@ -286,10 +286,14 @@ func (s *AteWorkerService) RunWorkload(ctx context.Context, req *ateworkerpb.Run
 			// Detached: the RPC's context may be what failed it.
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cleanupCancel()
+			_ = cleanupActiveOrRootfsUpper(p.actorDirs)
 			_ = s.unhostActor(cleanupCtx, attribution.UID)
 		}
 	}()
 
+	if err := prepareActiveForRun(p.actorDirs, p.containers); err != nil {
+		return nil, err
+	}
 	if err := s.coldBootActorRetrying(ctx, p); err != nil {
 		return nil, err
 	}
@@ -528,6 +532,21 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 	consoleLog := kata.ConsoleLogPath(actorUID)
 	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, consoleLog, memMiB, vcpus,
 		agentInit(ctx, client.Info()), s.guestDebug)
+	if memFile := guestMemoryFile(p.actorDirs); memFile != "" {
+		memBytes := int64(memMiB) * 1024 * 1024
+		if err := prepareGuestMemoryFile(memFile, memBytes); err != nil {
+			return err
+		}
+		vmCfg.Memory = ch.MemoryConfig{
+			Size: 0,
+			Zones: []ch.MemoryZoneConfig{{
+				ID:     guestMemoryZoneID,
+				Size:   memBytes,
+				File:   memFile,
+				Shared: true,
+			}},
+		}
+	}
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return fmt.Errorf("while creating VM: %w", err)
 	}
@@ -698,7 +717,7 @@ func (s *AteWorkerService) stageMergedRootfs(ctx context.Context, rr resolvedRun
 		}
 	}
 	if hasDurableVolumes(containers) {
-		if err := s.stageDurableVolumes(ctx, id, actorDirs.GetDurableDirVolumeMountsDir()); err != nil {
+		if err := s.stageDurableVolumes(ctx, id, durableMountsDir(actorDirs)); err != nil {
 			return nil, fmt.Errorf("while staging durable-dir volumes: %w", err)
 		}
 	}

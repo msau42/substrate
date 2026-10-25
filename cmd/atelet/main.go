@@ -1354,15 +1354,33 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 		}
 		if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
 			vol = strings.TrimSuffix(vol, ".tar")
-			volDir := ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
-			if err := tarutil.CreateWithRoot(ctx, tarPath, volDir); err != nil {
+			volDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "durable-dir", vol)
+			if st, serr := os.Stat(volDir); serr != nil || !st.IsDir() {
+				volDir = ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
+			}
+			tmpPath := tarPath + ".tmp"
+			if err := tarutil.CreateWithRoot(ctx, tmpPath, volDir); err != nil {
+				_ = os.Remove(tmpPath)
 				return fmt.Errorf("while archiving durable-dir volume %q for upload: %w", vol, err)
+			}
+			if err := os.Rename(tmpPath, tarPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("while placing durable-dir archive %q for upload: %w", vol, err)
 			}
 		} else if cid, ok := strings.CutPrefix(fileName, "rootfs-upper-"); ok && strings.HasSuffix(cid, ".tar") {
 			cid = strings.TrimSuffix(cid, ".tar")
-			upperDir := filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
-			if err := tarutil.CreateWithRoot(ctx, tarPath, upperDir); err != nil {
+			upperDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "rootfs-upper", cid, "fs")
+			if st, serr := os.Stat(upperDir); serr != nil || !st.IsDir() {
+				upperDir = filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
+			}
+			tmpPath := tarPath + ".tmp"
+			if err := tarutil.CreateWithRoot(ctx, tmpPath, upperDir); err != nil {
+				_ = os.Remove(tmpPath)
 				return fmt.Errorf("while archiving rootfs upper %q for upload: %w", cid, err)
+			}
+			if err := os.Rename(tmpPath, tarPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("while placing rootfs upper archive %q for upload: %w", cid, err)
 			}
 		}
 	}
@@ -1740,6 +1758,9 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 		}
 		if err := os.RemoveAll(filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper")); err != nil {
 			return nil, fmt.Errorf("while resetting rootfs-upper dir: %w", err)
+		}
+		if err := os.RemoveAll(filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active")); err != nil {
+			return nil, fmt.Errorf("while resetting active snapshot dir: %w", err)
 		}
 		if errors.Is(localErr, errUnusableLocalSnapshot) {
 			// The next checkpoint or terminate prunes the unusable copy.

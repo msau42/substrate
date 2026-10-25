@@ -197,7 +197,7 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
 		g.Go(func() error {
 			t := time.Now()
-			d, err := s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+			d, err := s.snapshotVMState(gctx, client, ra, actorUID, actorDirs, checkpointDir)
 			if err != nil {
 				d = time.Since(t)
 			}
@@ -210,9 +210,9 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 			t := time.Now()
 			var err error
 			if tarForUpload {
-				durableFiles, err = tarDurableVolumes(gctx, actorDirs.GetDurableDirVolumeMountsDir(), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
+				durableFiles, err = tarDurableVolumes(gctx, durableMountsDir(actorDirs), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
 			} else {
-				durableFiles, err = markDurableVolumes(checkpointDir, actorDirs.GetDurableDirVolumeMountsDir(), durableVolumeNames(req.GetSpec().GetContainers()))
+				durableFiles, err = markDurableVolumes(checkpointDir, durableMountsDir(actorDirs), durableVolumeNames(req.GetSpec().GetContainers()))
 			}
 			dDurable = time.Since(t)
 			return err
@@ -278,7 +278,7 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 // snapshotVMState captures the paused guest into checkpointDir: the CH snapshot
 // (config.json + state.json + memory-ranges) plus the base-id the restore side
 // needs, and returns how long the snapshot itself took.
-func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID, checkpointDir string) (time.Duration, error) {
+func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Client, ra *runningActor, actorUID string, actorDirs *ateworkerpb.ActorDirs, checkpointDir string) (time.Duration, error) {
 	// Record the FROZEN base id (the id the guest's virtio-fs find-paths are pinned
 	// to, <baseID>/rootfs). For a cold-run actor this is its own id; for a restored
 	// actor it is the golden id propagated via ra.baseID (set from the snapshot we
@@ -298,6 +298,14 @@ func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Clien
 	tSnapshot := time.Now()
 	if err := client.Snapshot(ctx, checkpointDir); err != nil {
 		return 0, fmt.Errorf("while snapshotting guest: %w", err)
+	}
+	if memFile := guestMemoryFile(actorDirs); memFile != "" {
+		dst := filepath.Join(checkpointDir, memoryRangesFile)
+		if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+			if err := os.Link(memFile, dst); err != nil {
+				return 0, fmt.Errorf("while linking guest memory file into checkpoint dir: %w", err)
+			}
+		}
 	}
 	dSnapshot := time.Since(tSnapshot)
 
@@ -398,10 +406,10 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 	s.cleanupSandboxState(ctx, id)
 
 	if removeRootfsUpper {
-		// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
-		// doesn't know it — and its absence is what marks a worker as holding no
-		// disk-backed upper. Runs after the checkpoint tar, which is already on disk.
-		if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
+		// Remove the rootfs upper dir (or active snapshot directory): ateworker
+		// owns it — atelet's actor-dir reset doesn't know it — and its absence is
+		// what marks a worker as holding no disk-backed upper.
+		if err := cleanupActiveOrRootfsUpper(actorDirs); err != nil {
 			slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
 		}
 	}
