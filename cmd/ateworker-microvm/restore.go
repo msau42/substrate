@@ -183,7 +183,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 		}
 	}()
 
-	if err := prepareActiveForRestore(p.actorDirs, restoreDir, p.containers); err != nil {
+	if err := prepareActiveForRestore(p.actorDirs, restoreDir, p.containers, req.GetPreserveRestoreDir()); err != nil {
 		return nil, err
 	}
 

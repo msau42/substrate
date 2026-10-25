@@ -1276,9 +1276,16 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 		if err := root.Rename(src, dst); err != nil {
 			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
 		}
-		if info.Size() > 0 && isDirectoryTarFile(fileName) {
-			if err := root.WriteFile(dst, nil, 0o600); err != nil {
-				return fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
+		if isDirectoryTarFile(fileName) {
+			if st, terr := root.Lstat(src + ".tree"); terr == nil && st.IsDir() {
+				if err := root.Rename(src+".tree", dst+".tree"); err != nil {
+					return fmt.Errorf("failed to move %s.tree to %s.tree: %w", src, dst, err)
+				}
+			}
+			if info.Size() > 0 {
+				if err := root.WriteFile(dst, nil, 0o600); err != nil {
+					return fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
+				}
 			}
 		}
 	}
@@ -1340,7 +1347,11 @@ func isDirectoryTarFile(fileName string) bool {
 func truncateSnapshotTars(srcDir string, files []string) {
 	for _, fileName := range files {
 		if isDirectoryTarFile(fileName) {
-			_ = os.Truncate(filepath.Join(srcDir, fileName), 0)
+			dst := filepath.Join(srcDir, fileName)
+			tmp := dst + ".empty"
+			if err := os.WriteFile(tmp, nil, 0o600); err == nil {
+				_ = os.Rename(tmp, dst)
+			}
 		}
 	}
 }
@@ -1352,11 +1363,15 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 		if err != nil || info.Size() > 0 {
 			continue
 		}
+		treeDir := tarPath + ".tree"
 		if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
 			vol = strings.TrimSuffix(vol, ".tar")
-			volDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "durable-dir", vol)
+			volDir := treeDir
 			if st, serr := os.Stat(volDir); serr != nil || !st.IsDir() {
-				volDir = ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
+				volDir = filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "durable-dir", vol)
+				if st, serr := os.Stat(volDir); serr != nil || !st.IsDir() {
+					volDir = ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
+				}
 			}
 			tmpPath := tarPath + ".tmp"
 			if err := tarutil.CreateWithRoot(ctx, tmpPath, volDir); err != nil {
@@ -1369,9 +1384,12 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 			}
 		} else if cid, ok := strings.CutPrefix(fileName, "rootfs-upper-"); ok && strings.HasSuffix(cid, ".tar") {
 			cid = strings.TrimSuffix(cid, ".tar")
-			upperDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "rootfs-upper", cid, "fs")
+			upperDir := treeDir
 			if st, serr := os.Stat(upperDir); serr != nil || !st.IsDir() {
-				upperDir = filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
+				upperDir = filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "rootfs-upper", cid, "fs")
+				if st, serr := os.Stat(upperDir); serr != nil || !st.IsDir() {
+					upperDir = filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
+				}
 			}
 			tmpPath := tarPath + ".tmp"
 			if err := tarutil.CreateWithRoot(ctx, tmpPath, upperDir); err != nil {
@@ -2574,10 +2592,15 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 	if err != nil {
 		devPath = "/host/dev/nvme0n3"
 	}
-	if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "ext4", syscall.MS_NOATIME, "nobarrier"); err != nil {
-		serverboot.Fatal(ctx, "Failed to mount dedicated snapshots scratch disk", err)
+	fstype := "xfs"
+	if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "xfs", syscall.MS_NOATIME, ""); err != nil {
+		fstype = "ext4"
+		if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "ext4", syscall.MS_NOATIME, "nobarrier"); err != nil {
+			serverboot.Fatal(ctx, "Failed to mount dedicated snapshots scratch disk", err)
+		}
 	}
-	slog.InfoContext(ctx, "Mounted dedicated ext4 -O ^has_journal disk at snapshots dir",
+	slog.InfoContext(ctx, "Mounted dedicated snapshots disk at snapshots dir",
+		slog.String("fstype", fstype),
 		slog.String("device", devPath),
 		slog.String("mountpoint", nodepath.SnapshotsDir))
 

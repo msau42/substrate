@@ -134,6 +134,9 @@ func markDurableVolumes(checkpointDir, dir string, volumes []string) ([]string, 
 		if st, err := os.Stat(volDir); err != nil || !st.IsDir() {
 			return nil, fmt.Errorf("while checking durable-dir volume %q: %w", vol, err)
 		}
+		if err := cloneDirTreeCoW(volDir, filepath.Join(checkpointDir, name+".tree")); err != nil {
+			return nil, fmt.Errorf("while cloning durable-dir volume %q: %w", vol, err)
+		}
 		if err := os.WriteFile(filepath.Join(checkpointDir, name), nil, 0o600); err != nil {
 			return nil, fmt.Errorf("while writing durable-dir marker %q: %w", vol, err)
 		}
@@ -165,6 +168,14 @@ func untarDurableVolumes(dir, snapshotDir string, volumes []string, preserveRest
 		if preserveRestoreDir || tarInfo.Size() == 0 {
 			if st, serr := os.Stat(volDir); serr == nil && st.IsDir() {
 				continue
+			}
+			if treeDir := tarPath + ".tree"; tarInfo.Size() == 0 {
+				if st, serr := os.Stat(treeDir); serr == nil && st.IsDir() {
+					if err := cloneDirTreeCoW(treeDir, volDir); err != nil {
+						return fmt.Errorf("while restoring durable-dir volume %q from tree: %w", vol, err)
+					}
+					continue
+				}
 			}
 		}
 		if err := os.MkdirAll(volDir, 0o700); err != nil {

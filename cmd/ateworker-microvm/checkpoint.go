@@ -302,8 +302,8 @@ func (s *AteWorkerService) snapshotVMState(ctx context.Context, client *ch.Clien
 	if memFile := guestMemoryFile(actorDirs); memFile != "" {
 		dst := filepath.Join(checkpointDir, memoryRangesFile)
 		if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
-			if err := os.Link(memFile, dst); err != nil {
-				return 0, fmt.Errorf("while linking guest memory file into checkpoint dir: %w", err)
+			if err := cloneFileCoW(memFile, dst); err != nil {
+				return 0, fmt.Errorf("while cloning guest memory file into checkpoint dir: %w", err)
 			}
 		}
 	}

@@ -137,6 +137,9 @@ func markRootfsUpper(checkpointDir, dir string, containers []string) error {
 		if st, err := os.Stat(upper); err != nil || !st.IsDir() {
 			return fmt.Errorf("while checking rootfs upper %q: %w", upper, err)
 		}
+		if err := cloneDirTreeCoW(upper, filepath.Join(checkpointDir, name+".tree")); err != nil {
+			return fmt.Errorf("while cloning rootfs upper %q: %w", cid, err)
+		}
 		if err := os.WriteFile(filepath.Join(checkpointDir, name), nil, 0o600); err != nil {
 			return fmt.Errorf("while writing rootfs upper marker %q: %w", cid, err)
 		}
@@ -197,7 +200,18 @@ func untarRootfsUpperWithPreserve(dir, snapshotDir string, containers []string, 
 		if err != nil {
 			return fmt.Errorf("while creating rootfs upper for %q: %w", cid, err)
 		}
-		if err := tarutil.Extract(filepath.Join(snapshotDir, name), upper); err != nil {
+		tarPath := filepath.Join(snapshotDir, name)
+		if info, serr := os.Stat(tarPath); serr == nil && info.Size() == 0 {
+			if treeDir := tarPath + ".tree"; true {
+				if st, terr := os.Stat(treeDir); terr == nil && st.IsDir() {
+					if err := cloneDirTreeCoW(treeDir, upper); err != nil {
+						return fmt.Errorf("while restoring rootfs upper %q from tree: %w", upper, err)
+					}
+					continue
+				}
+			}
+		}
+		if err := tarutil.Extract(tarPath, upper); err != nil {
 			return fmt.Errorf("while restoring rootfs upper %q: %w", upper, err)
 		}
 	}
