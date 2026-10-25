@@ -127,6 +127,41 @@ func tarRootfsUpper(ctx context.Context, dir, checkpointDir string, containers [
 	return nil
 }
 
+func markRootfsUpper(checkpointDir, dir string, containers []string) error {
+	for _, cid := range containers {
+		name, err := rootfsUpperTarFile(cid)
+		if err != nil {
+			return err
+		}
+		upper, _ := kata.UpperWorkDirs(dir, cid)
+		if st, err := os.Stat(upper); err != nil || !st.IsDir() {
+			return fmt.Errorf("while checking rootfs upper %q: %w", upper, err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, name), nil, 0o600); err != nil {
+			return fmt.Errorf("while writing rootfs upper marker %q: %w", cid, err)
+		}
+	}
+	return nil
+}
+
+func canSkipUntarRootfsUpper(dir, snapshotDir string, containers []string) bool {
+	for _, cid := range containers {
+		name, err := rootfsUpperTarFile(cid)
+		if err != nil {
+			return false
+		}
+		info, err := os.Stat(filepath.Join(snapshotDir, name))
+		if err != nil || info.Size() > 0 {
+			return false
+		}
+		upper, _ := kata.UpperWorkDirs(dir, cid)
+		if st, err := os.Stat(upper); err != nil || !st.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
 // untarRootfsUpper restores each container's rootfs upperdir from the snapshot
 // into the actor's host directory. It must run before the merged overlays are
 // mounted (the mounts consume these contents). The directory is recreated from
@@ -134,6 +169,15 @@ func tarRootfsUpper(ctx context.Context, dir, checkpointDir string, containers [
 // would corrupt the overlay state the guest's find-paths re-opens. Every
 // directory above the upperdirs is created here, never taken from the tar.
 func untarRootfsUpper(dir, snapshotDir string, containers []string) error {
+	if canSkipUntarRootfsUpper(dir, snapshotDir, containers) {
+		for _, cid := range containers {
+			_, work := kata.UpperWorkDirs(dir, cid)
+			if err := os.MkdirAll(work, 0o755); err != nil {
+				return fmt.Errorf("while creating rootfs workdir for %q: %w", cid, err)
+			}
+		}
+		return nil
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		return fmt.Errorf("while clearing rootfs upper dir %q: %w", dir, err)
 	}

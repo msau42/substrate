@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go.ate.dev/substrate/internal/apierror"
@@ -164,6 +165,9 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	}
 
 	checkpointDir := actorDirs.GetCheckpointDir()
+	_, tarMarkerErr := os.Stat(filepath.Join(checkpointDir, ".tar-for-upload"))
+	tarForUpload := tarMarkerErr == nil
+
 	// Start from a clean dir so CH's snapshot files are the only contents.
 	if err := os.RemoveAll(checkpointDir); err != nil {
 		return nil, fmt.Errorf("while clearing checkpoint dir %q: %w", checkpointDir, err)
@@ -205,7 +209,11 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 		g.Go(func() error {
 			t := time.Now()
 			var err error
-			durableFiles, err = tarDurableVolumes(gctx, actorDirs.GetDurableDirVolumeMountsDir(), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
+			if tarForUpload {
+				durableFiles, err = tarDurableVolumes(gctx, actorDirs.GetDurableDirVolumeMountsDir(), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
+			} else {
+				durableFiles, err = markDurableVolumes(checkpointDir, actorDirs.GetDurableDirVolumeMountsDir(), durableVolumeNames(req.GetSpec().GetContainers()))
+			}
 			dDurable = time.Since(t)
 			return err
 		})
@@ -213,7 +221,12 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	if shipsRootfs {
 		g.Go(func() error {
 			t := time.Now()
-			err := tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
+			var err error
+			if tarForUpload {
+				err = tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
+			} else {
+				err = markRootfsUpper(checkpointDir, rootfsUpperDir(actorDirs), containerNames(req.GetSpec().GetContainers()))
+			}
 			dUpper = time.Since(t)
 			return err
 		})
@@ -232,13 +245,20 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	}
 
 	// Tear down: the actor returns to "available". Best-effort; the snapshot is
-	// already on disk for atelet to ship.
+	// already on disk for atelet to ship. Keep rootfs-upper in place for warm
+	// local restores when shipsRootfs is true.
 	tTeardown := time.Now()
-	if err := s.terminateWorkload(ctx, attribution, actorDirs); err != nil {
+	if err := s.terminateWorkloadAfterCheckpoint(ctx, attribution, actorDirs, !shipsRootfs); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
 			slog.String("actor", attribution.Ref.String()),
 			slog.String("actorUID", actorUID),
 			slog.Any("err", err))
+	}
+	if shipsRootfs {
+		for _, cid := range containerNames(req.GetSpec().GetContainers()) {
+			_, work := kata.UpperWorkDirs(rootfsUpperDir(actorDirs), cid)
+			_ = os.RemoveAll(work)
+		}
 	}
 	dTeardown = time.Since(tTeardown)
 
@@ -326,7 +346,7 @@ func listFiles(dir string) ([]string, error) {
 	}
 	var files []string
 	for _, e := range entries {
-		if e.Type().IsRegular() {
+		if e.Type().IsRegular() && !strings.HasPrefix(e.Name(), ".") {
 			files = append(files, e.Name())
 		}
 	}
@@ -335,7 +355,7 @@ func listFiles(dir string) ([]string, error) {
 
 // teardownActor stops the ateworker-owned CH VMM for an actor. ra may be
 // nil (e.g. ateworker restarted and lost in-memory state).
-func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor) error {
+func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDirs *ateworkerpb.ActorDirs, ra *runningActor, removeRootfsUpper bool) error {
 	// Stop offering the guest to GetWorkloadStats first, before anything below
 	// makes it stop answering. Clearing it here rather than alongside the
 	// attribution is what keeps a poll that lands mid-teardown on the
@@ -377,11 +397,13 @@ func (s *AteWorkerService) teardownActor(ctx context.Context, id string, actorDi
 	// corrupt the mount rather than delete the files).
 	s.cleanupSandboxState(ctx, id)
 
-	// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
-	// doesn't know it — and its absence is what marks a worker as holding no
-	// disk-backed upper. Runs after the checkpoint tar, which is already on disk.
-	if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
-		slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
+	if removeRootfsUpper {
+		// Remove the rootfs upper dir: ateworker owns it — atelet's actor-dir reset
+		// doesn't know it — and its absence is what marks a worker as holding no
+		// disk-backed upper. Runs after the checkpoint tar, which is already on disk.
+		if err := os.RemoveAll(rootfsUpperDir(actorDirs)); err != nil {
+			slog.WarnContext(ctx, "Failed to remove rootfs upper dir", slog.String("actorUID", id), slog.Any("err", err))
+		}
 	}
 
 	// Detach the bundle rootfs overlays composed in buildActorContainers, so
@@ -433,7 +455,7 @@ func (s *AteWorkerService) endPreviousActivation(ctx context.Context, actorUID s
 		if old != nil {
 			s.readFinal(ctx, old)
 		}
-		if err := s.teardownActor(ctx, actorUID, actorDirs, ra); err != nil {
+		if err := s.teardownActor(ctx, actorUID, actorDirs, ra, true); err != nil {
 			return fmt.Errorf("while stopping the actor's previous micro-VM: %w", err)
 		}
 	}
@@ -444,13 +466,17 @@ func (s *AteWorkerService) endPreviousActivation(ctx context.Context, actorUID s
 }
 
 func (s *AteWorkerService) terminateWorkload(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs) error {
+	return s.terminateWorkloadAfterCheckpoint(ctx, actor, actorDirs, true)
+}
+
+func (s *AteWorkerService) terminateWorkloadAfterCheckpoint(ctx context.Context, actor resources.ActorAttribution, actorDirs *ateworkerpb.ActorDirs, removeRootfsUpper bool) error {
 	var errs []error
 	if err := s.tunnel.Deactivate(ctx, actor); err != nil {
 		errs = append(errs, fmt.Errorf("while deactivating actor networking: %w", err))
 	}
 
 	actorUID := actor.UID
-	if err := s.teardownActor(ctx, actorUID, actorDirs, s.runningVM(actorUID)); err != nil {
+	if err := s.teardownActor(ctx, actorUID, actorDirs, s.runningVM(actorUID), removeRootfsUpper); err != nil {
 		errs = append(errs, fmt.Errorf("while tearing down actor: %w", err))
 	}
 	// Remove attribution after teardown; a failed checkpoint may leave the VM running.

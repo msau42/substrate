@@ -69,10 +69,35 @@ func ResetActorDirs(actorUID string) error {
 	return removeEmptyVolumeDirs(actorUID)
 }
 
-// ResetActorDirsKeepingVolumes is ResetActorDirs for Run and Restore, which
-// leave the external volume mount points alone: a failed earlier attempt can
-// leave a volume published there, and publishing it again is a no-op.
+// ResetActorDirsKeepingDurable is ResetActorDirs for local checkpoints, keeping
+// durable-dir and rootfs-upper in place for warm local restores.
+func ResetActorDirsKeepingDurable(actorUID string) error {
+	if err := ResetActorDirsKeepingVolumesAndDurable(actorUID); err != nil {
+		return err
+	}
+	return removeEmptyVolumeDirs(actorUID)
+}
+
+// ResetActorDirsKeepingVolumes is ResetActorDirs for Run and cold Restore,
+// which leave the external volume mount points alone: a failed earlier attempt
+// can leave a volume published there, and publishing it again is a no-op.
 func ResetActorDirsKeepingVolumes(actorUID string) error {
+	if err := ResetActorDirsKeepingVolumesAndDurable(actorUID); err != nil {
+		return err
+	}
+	if err := ResetDir("durable-dir volumes mount dir", ateletpath.DurableDirVolumeMountsDir(actorUID), os.RemoveAll, 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper")); err != nil {
+		return fmt.Errorf("while deleting rootfs-upper dir: %w", err)
+	}
+	return nil
+}
+
+// ResetActorDirsKeepingVolumesAndDurable resets the actor's transient bundle,
+// checkpoint-state, restore-state, and system-info directories while keeping
+// external volumes, durable-dir, and rootfs-upper intact.
+func ResetActorDirsKeepingVolumesAndDurable(actorUID string) error {
 	// Explicitly leave runsc logs dir untouched.
 
 	// RemoveAllWritable, not os.RemoveAll: the bundle's upper dir can hold
@@ -90,8 +115,8 @@ func ResetActorDirsKeepingVolumes(actorUID string) error {
 	if err := ResetDir("restore-state dir", ateletpath.RestoreStateDir(actorUID), os.RemoveAll, 0o700); err != nil {
 		return err
 	}
-	if err := ResetDir("durable-dir volumes mount dir", ateletpath.DurableDirVolumeMountsDir(actorUID), os.RemoveAll, 0o755); err != nil {
-		return err
+	if err := os.MkdirAll(ateletpath.DurableDirVolumeMountsDir(actorUID), 0o755); err != nil {
+		return fmt.Errorf("while creating durable-dir volumes mount dir: %w", err)
 	}
 	// World-readable (0o755): bind-mounted read-only into the actor, whose
 	// workload reads it through the gofer.

@@ -123,22 +123,50 @@ func tarDurableVolumes(ctx context.Context, dir, checkpointDir string, volumes [
 	return files, nil
 }
 
+func markDurableVolumes(checkpointDir, dir string, volumes []string) ([]string, error) {
+	var files []string
+	for _, vol := range volumes {
+		name, err := durableTarFile(vol)
+		if err != nil {
+			return nil, err
+		}
+		volDir := filepath.Join(dir, vol)
+		if st, err := os.Stat(volDir); err != nil || !st.IsDir() {
+			return nil, fmt.Errorf("while checking durable-dir volume %q: %w", vol, err)
+		}
+		if err := os.WriteFile(filepath.Join(checkpointDir, name), nil, 0o600); err != nil {
+			return nil, fmt.Errorf("while writing durable-dir marker %q: %w", vol, err)
+		}
+		files = append(files, name)
+	}
+	return files, nil
+}
+
 // untarDurableVolumes restores each durable-dir volume from the snapshot into
 // its directory under dir, which atelet has already created, empty. A volume
 // with no tar in the snapshot (added to the template since) stays empty. It
 // must run before the durable share's virtiofsd starts, so the guest never
 // observes the directory mid-restore.
-func untarDurableVolumes(dir, snapshotDir string, volumes []string) error {
+func untarDurableVolumes(dir, snapshotDir string, volumes []string, preserveRestoreDir bool) error {
 	for _, vol := range volumes {
 		name, err := durableTarFile(vol)
 		if err != nil {
 			return err
 		}
 		tarPath := filepath.Join(snapshotDir, name)
-		if _, err := os.Stat(tarPath); errors.Is(err, fs.ErrNotExist) {
+		tarInfo, err := os.Stat(tarPath)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			return fmt.Errorf("while inspecting durable-dir archive %q: %w", tarPath, err)
+		}
 		volDir := filepath.Join(dir, vol)
+		if preserveRestoreDir || tarInfo.Size() == 0 {
+			if st, serr := os.Stat(volDir); serr == nil && st.IsDir() {
+				continue
+			}
+		}
 		if err := os.MkdirAll(volDir, 0o700); err != nil {
 			return fmt.Errorf("while creating durable-dir volume dir %q: %w", volDir, err)
 		}

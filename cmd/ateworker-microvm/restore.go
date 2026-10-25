@@ -186,7 +186,7 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	// that means before the share's virtiofsd starts, for the lower fidelities
 	// before the workload cold-starts.
 	if hasDurableVolumes(p.containers) {
-		if err := untarDurableVolumes(durableDir, restoreDir, durableVolumeNames(p.containers)); err != nil {
+		if err := untarDurableVolumes(durableDir, restoreDir, durableVolumeNames(p.containers), req.GetPreserveRestoreDir()); err != nil {
 			return nil, err
 		}
 	}
