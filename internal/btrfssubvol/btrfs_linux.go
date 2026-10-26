@@ -122,6 +122,9 @@ func Snapshot(srcSubvolPath, dstPath string) error {
 		return fmt.Errorf("opening source subvolume %s: %w", srcSubvolPath, err)
 	}
 	defer srcFile.Close()
+	if err := unix.Syncfs(int(srcFile.Fd())); err != nil {
+		return fmt.Errorf("syncing source subvolume %s before snapshot: %w", srcSubvolPath, err)
+	}
 	args.Fd = int64(srcFile.Fd())
 
 	parentFile, err := os.OpenFile(parentDir, os.O_RDONLY|unix.O_DIRECTORY, 0)

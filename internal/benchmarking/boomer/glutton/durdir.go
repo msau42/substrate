@@ -194,12 +194,12 @@ func (u *durDirUser) create(ctx context.Context) error {
 	})
 }
 
-func (u *durDirUser) resume(ctx context.Context, mode string) bool {
+func (u *durDirUser) resume(ctx context.Context, mode, metricName string) bool {
 	// In implicit mode, the actor stays suspended until router traffic wakes it.
 	if mode == dynconfig.ResumeModeImplicit {
 		return true
 	}
-	err := u.tracedCall(ctx, "ResumeActor", func(callCtx context.Context, tr *metadata.MD) error {
+	err := u.tracedCall(ctx, metricName, func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.ResumeActor(callCtx, &ateapipb.ResumeActorRequest{
 			Actor: u.ref(),
 		}, grpc.Trailer(tr))
@@ -304,7 +304,7 @@ func (u *durDirUser) step(ctx context.Context, dynCfg durDirKnobs) {
 	u.hibernate(ctx, dynCfg)
 
 	// 2. Resume — a no-op in implicit mode, where router traffic wakes the actor.
-	if !u.resume(ctx, dynCfg.ResumeMode) {
+	if !u.resume(ctx, dynCfg.ResumeMode, "ResumeActor") {
 		return
 	}
 
@@ -333,7 +333,7 @@ func (u *durDirUser) step(ctx context.Context, dynCfg durDirKnobs) {
 func (u *durDirUser) bootstrap(ctx context.Context, dynCfg durDirKnobs) error {
 	fileSize, readMode := u.params(dynCfg)
 
-	if !u.resume(ctx, dynCfg.ResumeMode) {
+	if !u.resume(ctx, dynCfg.ResumeMode, "ResumeActorFirstResume") {
 		return fmt.Errorf("initial resume failed")
 	}
 

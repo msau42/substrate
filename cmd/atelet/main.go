@@ -1268,6 +1268,12 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 		if err := root.Rename(checkpointDir, localDir); err != nil {
 			return fmt.Errorf("failed to move btrfs subvolume %s to %s: %w", checkpointDir, localDir, err)
 		}
+		if err := syncRootPath(root, filepath.Join(localDir, sandboxManifestName)); err != nil {
+			return fmt.Errorf("while syncing snapshot manifest: %w", err)
+		}
+		if err := syncRootPath(root, filepath.Dir(localDir)); err != nil {
+			return fmt.Errorf("while syncing local checkpoint parent dir: %w", err)
+		}
 		if err := root.MkdirAll(checkpointDir, 0o700); err != nil {
 			return fmt.Errorf("while recreating checkpoint directory: %w", err)
 		}
@@ -1316,8 +1322,23 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	if err := root.Rename(stageDir, localDir); err != nil {
 		return fmt.Errorf("failed to move %s to %s: %w", stageDir, localDir, err)
 	}
+	if err := syncRootPath(root, filepath.Join(localDir, sandboxManifestName)); err != nil {
+		return fmt.Errorf("while syncing snapshot manifest: %w", err)
+	}
+	if err := syncRootPath(root, filepath.Dir(localDir)); err != nil {
+		return fmt.Errorf("while syncing local checkpoint parent dir: %w", err)
+	}
 
 	return nil
+}
+
+func syncRootPath(root *os.Root, relPath string) error {
+	f, err := root.Open(relPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // shouldHaveSnapshots returns true if the checkpoint request is expected to produce snapshot files.

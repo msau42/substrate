@@ -33,14 +33,24 @@ import (
 // written. Best-effort: if writing fails, the entry stays in memory and atelet
 // carries on from it, and a restart loses what changed.
 func (t *Tracker) saveLocked(a *actorSnapshots) {
-	if err := t.writeStateLocked(a); err != nil {
+	if err := t.writeStateModeLocked(a, false); err != nil {
 		slog.Warn("Failed to save the actor's snapshot state", slog.String("actorUID", a.actorUID), slog.Any("err", err))
+	}
+}
+
+func (t *Tracker) saveSyncLocked(a *actorSnapshots) {
+	if err := t.writeStateModeLocked(a, true); err != nil {
+		slog.Warn("Failed to sync the actor's snapshot state", slog.String("actorUID", a.actorUID), slog.Any("err", err))
 	}
 }
 
 // writeStateLocked writes the actor's snapshot state file as saveLocked does,
 // and returns the error if writing fails.
 func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
+	return t.writeStateModeLocked(a, false)
+}
+
+func (t *Tracker) writeStateModeLocked(a *actorSnapshots, sync bool) error {
 	if _, err := os.Stat(ateletpath.ActorPath(a.actorUID)); errors.Is(err, os.ErrNotExist) {
 		slog.Warn("Dropping the snapshot state of an actor whose directory is gone", slog.String("actorUID", a.actorUID))
 		a.unsaved = false
@@ -52,7 +62,11 @@ func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
 	t.undurableActorsTally.observe(a)
 	data, err := json.Marshal(a.actorSnapshotsRecord)
 	if err == nil {
-		err = atomicfile.Write(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		if sync {
+			err = atomicfile.WriteSync(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		} else {
+			err = atomicfile.Write(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		}
 	}
 	a.unsaved = err != nil
 	return err

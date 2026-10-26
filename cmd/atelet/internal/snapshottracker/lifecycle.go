@@ -70,7 +70,7 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.Actor
 		t.resetBackoffLocked(a)
 	}
 	t.cancelReportLocked(a)
-	t.saveLocked(a)
+	t.saveSyncLocked(a)
 	t.requeueLocked(a)
 	return t.stateLocked(a)
 }
