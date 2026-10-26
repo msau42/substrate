@@ -38,9 +38,19 @@ func (t *Tracker) saveLocked(a *actorSnapshots) {
 	}
 }
 
+func (t *Tracker) saveSyncLocked(a *actorSnapshots) {
+	if err := t.writeStateOptLocked(a, true); err != nil {
+		slog.Warn("Failed to save the actor's snapshot state", slog.String("actorUID", a.actorUID), slog.Any("err", err))
+	}
+}
+
 // writeStateLocked writes the actor's snapshot state file as saveLocked does,
 // and returns the error if writing fails.
 func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
+	return t.writeStateOptLocked(a, false)
+}
+
+func (t *Tracker) writeStateOptLocked(a *actorSnapshots, sync bool) error {
 	if _, err := os.Stat(ateletpath.ActorPath(a.actorUID)); errors.Is(err, os.ErrNotExist) {
 		slog.Warn("Dropping the snapshot state of an actor whose directory is gone", slog.String("actorUID", a.actorUID))
 		a.unsaved = false
@@ -52,7 +62,11 @@ func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
 	t.undurableActorsTally.observe(a)
 	data, err := json.Marshal(a.actorSnapshotsRecord)
 	if err == nil {
-		err = atomicfile.Write(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		if sync {
+			err = atomicfile.WriteSync(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		} else {
+			err = atomicfile.Write(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
+		}
 	}
 	a.unsaved = err != nil
 	return err

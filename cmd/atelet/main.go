@@ -1258,6 +1258,7 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 		return fmt.Errorf("while creating local checkpoint staging directory: %w", err)
 	}
 
+	var dataFilesToSync []string
 	for _, fileName := range rec.SnapshotFiles {
 		src := filepath.Join(checkpointDir, fileName)
 		dst := filepath.Join(stageDir, fileName)
@@ -1287,6 +1288,8 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 					return fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
 				}
 			}
+		} else if fileName != "memory-ranges" && info.Size() > 0 {
+			dataFilesToSync = append(dataFilesToSync, dst)
 		}
 	}
 
@@ -1298,8 +1301,23 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	if err != nil {
 		return fmt.Errorf("while marshaling snapshot manifest: %w", err)
 	}
-	if err := root.WriteFile(filepath.Join(stageDir, sandboxManifestName), manifest, 0o600); err != nil {
+	manifestPath := filepath.Join(stageDir, sandboxManifestName)
+	if err := root.WriteFile(manifestPath, manifest, 0o600); err != nil {
 		return fmt.Errorf("while writing snapshot manifest: %w", err)
+	}
+	dataFilesToSync = append(dataFilesToSync, manifestPath)
+
+	// Flush all non-cloned metadata file data to the block device before the
+	// directory rename, then force the XFS journal once via local-checkpoint.
+	for _, p := range dataFilesToSync {
+		if err := syncFileRangeRootPath(root, p, syncFileRangeWrite); err != nil {
+			return fmt.Errorf("while starting writeback for %s: %w", p, err)
+		}
+	}
+	for _, p := range dataFilesToSync {
+		if err := syncFileRangeRootPath(root, p, syncFileRangeWaitBefore|syncFileRangeWrite|syncFileRangeWaitAfter); err != nil {
+			return fmt.Errorf("while waiting for writeback of %s: %w", p, err)
+		}
 	}
 
 	if err := root.MkdirAll(filepath.Dir(localDir), 0o700); err != nil {
@@ -1308,8 +1326,35 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	if err := root.Rename(stageDir, localDir); err != nil {
 		return fmt.Errorf("failed to move %s to %s: %w", stageDir, localDir, err)
 	}
+	if err := syncRootPath(root, filepath.Dir(localDir)); err != nil {
+		return fmt.Errorf("while syncing local checkpoints parent directory: %w", err)
+	}
 
 	return nil
+}
+
+const (
+	syncFileRangeWaitBefore = 1
+	syncFileRangeWrite      = 2
+	syncFileRangeWaitAfter  = 4
+)
+
+func syncFileRangeRootPath(root *os.Root, path string, flags int) error {
+	f, err := root.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return syscall.SyncFileRange(int(f.Fd()), 0, 0, flags)
+}
+
+func syncRootPath(root *os.Root, path string) error {
+	f, err := root.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }
 
 // shouldHaveSnapshots returns true if the checkpoint request is expected to produce snapshot files.
