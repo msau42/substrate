@@ -29,19 +29,22 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unsafe"
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
 	"golang.org/x/sys/unix"
 )
 
 //go:embed ext4_template.bin.gz
-var ext4TemplateGzip []byte
+var xfsTemplateGzip []byte
 
 const (
 	lvmVGDir            = "/host/dev/vg_snapshots"
-	lvmVolumeSize       = 5056 << 20 // 5056 MiB per LV on the dedicated snapshot disk
-	loopPoolDefaultSize = 20
-	metadataResetSize   = 4 << 20 // 4 MiB covers all flex_bg bitmaps and inode tables
+	lvmVolumeSize       = 2200 << 20 // 2200 MiB per LV on the dedicated snapshot disk
+	loopPoolDefaultSize = 160
+	ioctlBlkZeroOut     = 0x127f
+	xfsLogRegionOffset  = 1153433600 // AG 2 start (550 MiB * 2), followed by 64 MiB internal log
+	xfsLogRegionLen     = 68 << 20   // 68 MiB covers AG 2 header + 64 MiB internal log
 )
 
 type sparseExtent struct {
@@ -50,8 +53,8 @@ type sparseExtent struct {
 }
 
 var (
-	loadExt4Template = sync.OnceValues(func() ([]sparseExtent, error) {
-		zr, err := gzip.NewReader(bytes.NewReader(ext4TemplateGzip))
+	loadXFSTemplate = sync.OnceValues(func() ([]sparseExtent, error) {
+		zr, err := gzip.NewReader(bytes.NewReader(xfsTemplateGzip))
 		if err != nil {
 			return nil, err
 		}
@@ -60,13 +63,21 @@ var (
 		if err != nil {
 			return nil, err
 		}
+		if len(raw) < 8 {
+			return nil, fmt.Errorf("truncated xfs template header")
+		}
+		count := int(binary.LittleEndian.Uint64(raw[0:8]))
+		raw = raw[8:]
 		var extents []sparseExtent
-		for len(raw) >= 16 {
+		for j := 0; j < count; j++ {
+			if len(raw) < 16 {
+				return nil, fmt.Errorf("truncated xfs extent header at %d", j)
+			}
 			off := int64(binary.LittleEndian.Uint64(raw[0:8]))
 			n := int(binary.LittleEndian.Uint64(raw[8:16]))
 			raw = raw[16:]
 			if len(raw) < n {
-				return nil, fmt.Errorf("truncated ext4 template extent at offset %d", off)
+				return nil, fmt.Errorf("truncated xfs template extent at offset %d", off)
 			}
 			extents = append(extents, sparseExtent{
 				offset: off,
@@ -76,8 +87,6 @@ var (
 		}
 		return extents, nil
 	})
-
-	zeroChunk = make([]byte, 4<<20) // 4 MiB zero buffer
 
 	loopPoolMu       sync.Mutex
 	loopPoolFree     []string
@@ -91,22 +100,19 @@ func PrewarmLoopPool() {
 	}
 }
 
-// resetAndWriteTemplate zeroes the first 4 MiB of the LVM block device (wiping
-// all flex_bg block/inode bitmaps, inode tables, root dir, and superblock) and
-// stamps the fresh journal-less ext4 template onto it.
+// resetAndWriteTemplate zeroes the XFS internal log region via BLKZEROOUT and
+// stamps the pristine XFS superblocks, AG headers, and root inode onto the LVM
+// block device.
 func resetAndWriteTemplate(f *os.File, extents []sparseExtent) error {
-	for off := int64(0); off < metadataResetSize; off += int64(len(zeroChunk)) {
-		n := int64(len(zeroChunk))
-		if off+n > metadataResetSize {
-			n = metadataResetSize - off
-		}
-		if _, err := f.WriteAt(zeroChunk[:n], off); err != nil {
-			return fmt.Errorf("zeroing metadata region at %d: %w", off, err)
-		}
+	var zeroRange [2]uint64
+	zeroRange[0] = xfsLogRegionOffset
+	zeroRange[1] = xfsLogRegionLen
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), uintptr(ioctlBlkZeroOut), uintptr(unsafe.Pointer(&zeroRange[0]))); errno != 0 {
+		return fmt.Errorf("blkzeroout xfs log region: %w", errno)
 	}
 	for _, ext := range extents {
 		if _, err := f.WriteAt(ext.data, ext.offset); err != nil {
-			return fmt.Errorf("writing ext4 template extent at %d: %w", ext.offset, err)
+			return fmt.Errorf("writing xfs template extent at %d: %w", ext.offset, err)
 		}
 	}
 	if err := unix.Fdatasync(int(f.Fd())); err != nil {
@@ -128,49 +134,60 @@ func prewarmLVMVolume(lvPath string, extents []sparseExtent) error {
 func initLoopPool() {
 	start := time.Now()
 
-	// Unmount any orphaned snapshot mounts left over from dead actors.
+	// Unmount any snapshot mounts left over from a previous atelet run before
+	// reformatting all LVM slots into loopPoolFree.
 	snapshotsRoot := filepath.Dir(ateletpath.ActorSnapshotPath("dummy"))
 	if entries, err := os.ReadDir(snapshotsRoot); err == nil {
 		for _, entry := range entries {
 			uid := entry.Name()
+			if uid == ".cache" || uid == "lost+found" {
+				continue
+			}
+			snapDir := ateletpath.ActorSnapshotPath(uid)
+			if mounted, _ := isMountPoint(snapDir); mounted {
+				_ = unix.Unmount(snapDir, unix.MNT_DETACH)
+			}
 			if _, err := os.Stat(ateletpath.ActorPath(uid)); errors.Is(err, os.ErrNotExist) {
-				snapDir := ateletpath.ActorSnapshotPath(uid)
-				if mounted, _ := isMountPoint(snapDir); mounted {
-					_ = unix.Unmount(snapDir, unix.MNT_DETACH)
-				}
 				_ = os.RemoveAll(snapDir)
 			}
 		}
 	}
 
-	extents, err := loadExt4Template()
+	extents, err := loadXFSTemplate()
 	if err != nil {
-		slog.Error("Failed to load ext4 template for LVM pool", "err", err)
+		slog.Error("Failed to load xfs template for LVM pool", "err", err)
 		return
 	}
 
-	slog.Info("Pre-warming snapshot LVM logical volume pool",
+	slog.Info("Pre-warming snapshot LVM xfs logical volume pool",
 		"vg_dir", lvmVGDir,
 		"slots", loopPoolDefaultSize,
 		"slot_size_mib", lvmVolumeSize>>20,
 	)
+	ch := make(chan int, loopPoolDefaultSize)
 	for i := 0; i < loopPoolDefaultSize; i++ {
-		slotPath := filepath.Join(lvmVGDir, fmt.Sprintf("slot-%02d", i))
-		slotStart := time.Now()
-		if err := prewarmLVMVolume(slotPath, extents); err != nil {
-			slog.Error("Failed to initialize LVM pool slot", "slot", slotPath, "err", err)
-			continue
-		}
-		loopPoolMu.Lock()
-		loopPoolFree = append(loopPoolFree, slotPath)
-		freeCount := len(loopPoolFree)
-		loopPoolMu.Unlock()
-		slog.Info("Pre-warmed snapshot loop image slot",
-			"slot", slotPath,
-			"free_slots", freeCount,
-			"duration", time.Since(slotStart),
-		)
+		ch <- i
 	}
+	close(ch)
+
+	var wg sync.WaitGroup
+	for w := 0; w < 16; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range ch {
+				slotPath := filepath.Join(lvmVGDir, fmt.Sprintf("slot-%02d", i))
+				if err := prewarmLVMVolume(slotPath, extents); err != nil {
+					slog.Error("Failed to initialize LVM xfs pool slot", "slot", slotPath, "err", err)
+					continue
+				}
+				loopPoolMu.Lock()
+				loopPoolFree = append(loopPoolFree, slotPath)
+				loopPoolMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
 	slog.Info("Finished pre-warming snapshot loop image pool",
 		"slots", len(loopPoolFree),
 		"duration", time.Since(start),
@@ -204,7 +221,7 @@ func releaseLVMVolume(actorUID string) {
 	delete(loopPoolAssigned, actorUID)
 	loopPoolMu.Unlock()
 
-	extents, err := loadExt4Template()
+	extents, err := loadXFSTemplate()
 	if err == nil {
 		if f, err := os.OpenFile(lvPath, os.O_RDWR, 0o600); err == nil {
 			_ = resetAndWriteTemplate(f, extents)
@@ -252,11 +269,11 @@ func ensureSnapshotLoopMount(actorUID string) error {
 		return err
 	}
 
-	if err := unix.Mount(lvPath, snapDir, "ext4", unix.MS_NOATIME|unix.MS_NODIRATIME, "nobarrier,nodiscard,noauto_da_alloc"); err != nil {
+	if err := unix.Mount(lvPath, snapDir, "xfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nodiscard,nouuid"); err != nil {
 		releaseLVMVolume(actorUID)
-		return fmt.Errorf("mounting %s on %s: %w", lvPath, snapDir, err)
+		return fmt.Errorf("mounting xfs %s on %s: %w", lvPath, snapDir, err)
 	}
-	slog.Info("Mounted per-actor snapshot LVM logical volume",
+	slog.Info("Mounted per-actor snapshot LVM xfs logical volume",
 		"actor_uid", actorUID,
 		"device", lvPath,
 	)
@@ -273,8 +290,10 @@ func teardownSnapshotLoopMount(actorUID string) error {
 		return fmt.Errorf("checking snapshot mountpoint %s: %w", snapDir, err)
 	}
 	if mounted {
-		if err := unix.Unmount(snapDir, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
-			return fmt.Errorf("unmounting snapshot LVM mount %s: %w", snapDir, err)
+		if err := unix.Unmount(snapDir, 0); err != nil {
+			if err := unix.Unmount(snapDir, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
+				return fmt.Errorf("unmounting snapshot LVM mount %s: %w", snapDir, err)
+			}
 		}
 	}
 	releaseLVMVolume(actorUID)

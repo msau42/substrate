@@ -2633,30 +2633,6 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 	if err := os.MkdirAll(nodepath.SnapshotsDir, 0o755); err != nil {
 		serverboot.Fatal(ctx, "Failed to create snapshots dir", err)
 	}
-	devPath, err := filepath.EvalSymlinks("/host/dev/disk/by-id/google-ate-snapshots-scratch")
-	if err != nil {
-		devPath = "/host/dev/nvme0n3"
-	}
-	fstype := "xfs"
-	if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "xfs", syscall.MS_NOATIME, ""); err != nil {
-		fstype = "ext4"
-		if err := syscall.Mount(devPath, nodepath.SnapshotsDir, "ext4", syscall.MS_NOATIME, "nobarrier"); err != nil {
-			serverboot.Fatal(ctx, "Failed to mount dedicated snapshots scratch disk", err)
-		}
-	}
-	slog.InfoContext(ctx, "Mounted dedicated snapshots disk at snapshots dir",
-		slog.String("fstype", fstype),
-		slog.String("device", devPath),
-		slog.String("mountpoint", nodepath.SnapshotsDir))
-
-	if entries, err := os.ReadDir(nodepath.SnapshotsDir); err == nil {
-		for _, e := range entries {
-			if e.Name() == "lost+found" {
-				continue
-			}
-			_ = os.RemoveAll(filepath.Join(nodepath.SnapshotsDir, e.Name()))
-		}
-	}
 	_ = os.RemoveAll(nodepath.ActorsDir)
 	if err := os.MkdirAll(nodepath.ActorsDir, 0o755); err != nil {
 		serverboot.Fatal(ctx, "Failed to create actors dir", err)
@@ -2690,7 +2666,7 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 	dirtyRatio, _ := os.ReadFile("/proc/sys/vm/dirty_ratio")
 	expireCs, _ := os.ReadFile("/proc/sys/vm/dirty_expire_centisecs")
 
-	slog.InfoContext(ctx, "Storage mounts ready (dedicated ext4 -O ^has_journal disk)",
+	slog.InfoContext(ctx, "Storage mounts ready (per-actor LVM xfs pool)",
 		slog.Bool("same_dev", baseDev == snapDev),
 		slog.Uint64("base_avail_mib", (baseFS.Bavail*uint64(baseFS.Bsize))>>20),
 		slog.Uint64("snapshots_avail_mib", (snapFS.Bavail*uint64(snapFS.Bsize))>>20),
@@ -2698,4 +2674,6 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 		slog.String("dirty_background_ratio", strings.TrimSpace(string(bgRatio))),
 		slog.String("dirty_ratio", strings.TrimSpace(string(dirtyRatio))),
 		slog.String("dirty_expire_centisecs", strings.TrimSpace(string(expireCs))))
+
+	go actordirs.PrewarmLoopPool()
 }
