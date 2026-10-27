@@ -77,8 +77,14 @@ func TestDurDirLoopSequence(t *testing.T) {
 			}
 			du := newTestDurDirUser(t, srv, cfg)
 			du.expectedDigest = srv.HexDigest()
+			if !du.firstSuspend {
+				t.Fatalf("firstSuspend = false before first step, want true")
+			}
 
 			du.step(context.Background(), dynconfig.Get[durDirKnobs](cfg.Dyn))
+			if du.firstSuspend {
+				t.Errorf("firstSuspend = true after first step, want false")
+			}
 
 			if got := fakeCtrl.recordedCalls(); !reflect.DeepEqual(got, tc.wantGRPCCall) {
 				t.Errorf("gRPC calls: got %v, want %v", got, tc.wantGRPCCall)

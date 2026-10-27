@@ -212,9 +212,10 @@ func (r *taskRuntime) startUser(ctx context.Context) (*gluttonUser, error) {
 	var lastCreateErr error
 	for i := 0; i < n; i++ {
 		a := &gluttonActor{
-			cfg:         r.cfg,
-			actorName:   "sb-" + uuid.NewString(),
-			firstResume: true,
+			cfg:          r.cfg,
+			actorName:    "sb-" + uuid.NewString(),
+			firstResume:  true,
+			firstSuspend: true,
 		}
 		// Ensuring the atespace is idempotent (swallows AlreadyExists), so
 		// doing it once per VU is enough — subsequent actors would just make
@@ -309,9 +310,10 @@ func (u *gluttonUser) replaceActor(ctx context.Context, broken *gluttonActor) {
 		broken.deleted = true
 	}
 	replacement := &gluttonActor{
-		cfg:         broken.cfg,
-		actorName:   "sb-" + uuid.NewString(),
-		firstResume: true,
+		cfg:          broken.cfg,
+		actorName:    "sb-" + uuid.NewString(),
+		firstResume:  true,
+		firstSuspend: true,
 	}
 	if err := replacement.create(ctx); err != nil {
 		slog.Warn("glutton actor replacement create failed; will retry on next failure",
@@ -333,6 +335,7 @@ type gluttonActor struct {
 	cfg          *userclass.Config
 	actorName    string
 	firstResume  bool
+	firstSuspend bool
 	actorRunning bool
 	ramFilled    bool
 	cpuLoaded    bool
@@ -469,7 +472,11 @@ func (u *gluttonActor) hibernate(ctx context.Context) error {
 }
 
 func (u *gluttonActor) pause(ctx context.Context) error {
-	err := u.tracedCall(ctx, "SuspendActorAsync", func(callCtx context.Context, tr *metadata.MD) error {
+	metricName := "SuspendActorAsync"
+	if u.firstSuspend {
+		metricName = "SuspendActorAsyncFirstSuspend"
+	}
+	err := u.tracedCall(ctx, metricName, func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.SuspendActor(callCtx, &ateapipb.SuspendActorRequest{
 			Actor:   u.ref(),
 			Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_ASYNCHRONOUS},
@@ -479,13 +486,18 @@ func (u *gluttonActor) pause(ctx context.Context) error {
 	u.actorRunning = false
 	u.hibernatePending = err != nil
 	if err == nil {
+		u.firstSuspend = false
 		u.noteSuccess()
 	}
 	return err
 }
 
 func (u *gluttonActor) suspend(ctx context.Context) error {
-	err := u.tracedCall(ctx, "SuspendActor", func(callCtx context.Context, tr *metadata.MD) error {
+	metricName := "SuspendActor"
+	if u.firstSuspend {
+		metricName = "SuspendActorFirstSuspend"
+	}
+	err := u.tracedCall(ctx, metricName, func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.SuspendActor(callCtx, &ateapipb.SuspendActorRequest{
 			Actor:   u.ref(),
 			Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
@@ -495,6 +507,7 @@ func (u *gluttonActor) suspend(ctx context.Context) error {
 	u.actorRunning = false
 	u.hibernatePending = err != nil
 	if err == nil {
+		u.firstSuspend = false
 		u.noteSuccess()
 	}
 	return err

@@ -266,8 +266,16 @@ func TestGluttonIterate_RetriesStrandedHibernate(t *testing.T) {
 	rt := &taskRuntime{cfg: cfg}
 
 	rt.iterate() // resume, ping, suspend → suspend fails
+	val, _ := rt.users.Load(boomerutil.GoroutineID())
+	actor := val.(*gluttonUser).actors[0]
+	if !actor.firstSuspend {
+		t.Errorf("firstSuspend = false after failed first suspend, want true")
+	}
 	before := fakeCtrl.recordedCalls()
 	rt.iterate() // must re-drive the suspend, not resume
+	if actor.firstSuspend {
+		t.Errorf("firstSuspend = true after successful first suspend retry, want false")
+	}
 
 	after := fakeCtrl.recordedCalls()
 	if got := after[len(after)-1]; got != "SuspendActor" {

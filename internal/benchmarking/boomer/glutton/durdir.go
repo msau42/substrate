@@ -122,6 +122,7 @@ func (r *durDirRuntime) startUser(ctx context.Context, dynCfg durDirKnobs) (*dur
 		actorName:    "sb-" + uuid.NewString(),
 		templateName: tmpl,
 		userClass:    durDirUserClass,
+		firstSuspend: true,
 	}
 	bmetrics.UpdateUsers(durDirUserClass, 1)
 	if err := u.ensureAtespace(ctx); err != nil {
@@ -155,6 +156,7 @@ type durDirUser struct {
 	actorName      string
 	templateName   string
 	userClass      string
+	firstSuspend   bool
 	expectedDigest string
 	expectedSize   int64
 }
@@ -209,23 +211,37 @@ func (u *durDirUser) resume(ctx context.Context, mode, metricName string) bool {
 }
 
 func (u *durDirUser) pause(ctx context.Context) {
-	_ = u.tracedCall(ctx, "SuspendActorAsync", func(callCtx context.Context, tr *metadata.MD) error {
+	metricName := "SuspendActorAsync"
+	if u.firstSuspend {
+		metricName = "SuspendActorAsyncFirstSuspend"
+	}
+	err := u.tracedCall(ctx, metricName, func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.SuspendActor(callCtx, &ateapipb.SuspendActorRequest{
 			Actor:   u.ref(),
 			Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_ASYNCHRONOUS},
 		}, grpc.Trailer(tr))
 		return err
 	})
+	if err == nil {
+		u.firstSuspend = false
+	}
 }
 
 func (u *durDirUser) suspend(ctx context.Context) {
-	_ = u.tracedCall(ctx, "SuspendActor", func(callCtx context.Context, tr *metadata.MD) error {
+	metricName := "SuspendActor"
+	if u.firstSuspend {
+		metricName = "SuspendActorFirstSuspend"
+	}
+	err := u.tracedCall(ctx, metricName, func(callCtx context.Context, tr *metadata.MD) error {
 		_, err := u.cfg.APIStub.SuspendActor(callCtx, &ateapipb.SuspendActorRequest{
 			Actor:   u.ref(),
 			Options: &ateapipb.SuspendOptions{Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS},
 		}, grpc.Trailer(tr))
 		return err
 	})
+	if err == nil {
+		u.firstSuspend = false
+	}
 }
 
 func (u *durDirUser) hibernate(ctx context.Context, dynCfg durDirKnobs) {

@@ -165,6 +165,7 @@ func newTestDurDirUser(t *testing.T, srv *fake.Server, cfg *userclass.Config) *d
 		actorName:    "duractor",
 		templateName: defaultDurTemplate,
 		userClass:    durDirUserClass,
+		firstSuspend: true,
 		expectedSize: int64(len(srv.Data)),
 	}
 }
