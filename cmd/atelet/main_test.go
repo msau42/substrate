@@ -917,14 +917,14 @@ func TestResetActorDirsCreatesBothTrees(t *testing.T) {
 	}
 	for root, dirs := range map[string]map[string]string{
 		ateletpath.ActorSnapshotPath(actorUID): {
-			"CheckpointStateDir": ateletpath.CheckpointStateDir(actorUID),
-			"RestoreStateDir":    ateletpath.RestoreStateDir(actorUID),
+			"CheckpointStateDir":        ateletpath.CheckpointStateDir(actorUID),
+			"RestoreStateDir":           ateletpath.RestoreStateDir(actorUID),
+			"DurableDirVolumeMountsDir": ateletpath.DurableDirVolumeMountsDir(actorUID),
 		},
 		ateletpath.ActorPath(actorUID): {
-			"OCIBundleDir":              ateletpath.OCIBundleDir(actorUID),
-			"DurableDirVolumeMountsDir": ateletpath.DurableDirVolumeMountsDir(actorUID),
-			"SystemInfoVolumeRootsDir":  ateletpath.SystemInfoVolumeRootsDir(actorUID),
-			"ExternalVolumeMountsDir":   ateletpath.ExternalVolumeMountsDir(actorUID),
+			"OCIBundleDir":             ateletpath.OCIBundleDir(actorUID),
+			"SystemInfoVolumeRootsDir": ateletpath.SystemInfoVolumeRootsDir(actorUID),
+			"ExternalVolumeMountsDir":  ateletpath.ExternalVolumeMountsDir(actorUID),
 		},
 	} {
 		for name, dir := range dirs {

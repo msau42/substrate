@@ -35,17 +35,17 @@ func TestActorDirs(t *testing.T) {
 	}
 
 	underActorRoot := map[string]string{
-		"oci_bundle_dir":                actorDirs.GetOciBundleDir(),
-		"durable_dir_volume_mounts_dir": actorDirs.GetDurableDirVolumeMountsDir(),
-		"system_info_volume_roots_dir":  actorDirs.GetSystemInfoVolumeRootsDir(),
-		"external_volume_mounts_dir":    actorDirs.GetExternalVolumeMountsDir(),
-		"sandbox_assets_dir":            actorDirs.GetSandboxAssetsDir(),
+		"oci_bundle_dir":               actorDirs.GetOciBundleDir(),
+		"system_info_volume_roots_dir": actorDirs.GetSystemInfoVolumeRootsDir(),
+		"external_volume_mounts_dir":   actorDirs.GetExternalVolumeMountsDir(),
+		"sandbox_assets_dir":           actorDirs.GetSandboxAssetsDir(),
 	}
 	underSnapshotRoot := map[string]string{
-		"checkpoint_dir":        actorDirs.GetCheckpointDir(),
-		"restore_dir":           actorDirs.GetRestoreDir(),
-		"local_checkpoints_dir": LocalCheckpointsDir(actorUID),
-		"local_snapshot_dir":    LocalSnapshotDir(actorUID, "snap-1"),
+		"checkpoint_dir":                actorDirs.GetCheckpointDir(),
+		"restore_dir":                   actorDirs.GetRestoreDir(),
+		"durable_dir_volume_mounts_dir": actorDirs.GetDurableDirVolumeMountsDir(),
+		"local_checkpoints_dir":         LocalCheckpointsDir(actorUID),
+		"local_snapshot_dir":            LocalSnapshotDir(actorUID, "snap-1"),
 	}
 
 	seen := map[string]string{}

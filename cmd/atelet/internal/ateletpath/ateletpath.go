@@ -164,7 +164,7 @@ func LocalSnapshotDir(actorUID, snapshotName string) string {
 // volumes are mounted.
 func DurableDirVolumeMountsDir(actorUID string) string {
 	return filepath.Join(
-		ActorPath(actorUID),
+		ActorSnapshotPath(actorUID),
 		"durable-dir",
 	)
 }
