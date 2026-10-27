@@ -2557,9 +2557,9 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 
 	// Restore Linux default vm dirty sysctls on the host node.
 	for sysctl, val := range map[string]string{
-		"/proc/sys/vm/dirty_background_ratio": "10\n",
-		"/proc/sys/vm/dirty_ratio":            "20\n",
-		"/proc/sys/vm/dirty_expire_centisecs": "3000\n",
+		"/proc/sys/vm/dirty_background_ratio": "25\n",
+		"/proc/sys/vm/dirty_ratio":            "40\n",
+		"/proc/sys/vm/dirty_expire_centisecs": "6000\n",
 	} {
 		if err := os.WriteFile(sysctl, []byte(val), 0o644); err != nil {
 			slog.WarnContext(ctx, "Failed to restore vm dirty sysctl", slog.String("path", sysctl), slog.Any("err", err))
