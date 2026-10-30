@@ -1393,6 +1393,7 @@ func truncateSnapshotTars(srcDir string, files []string) {
 	for _, fileName := range files {
 		if isDirectoryTarFile(fileName) {
 			dst := filepath.Join(srcDir, fileName)
+			_ = os.Remove(dst + ".tmp")
 			tmp := dst + ".empty"
 			if err := os.WriteFile(tmp, nil, 0o600); err == nil {
 				_ = os.Rename(tmp, dst)
@@ -1609,10 +1610,10 @@ func (s *Atelet) uploadLocalCheckpointDir(ctx context.Context, req *ateletpb.Pro
 
 	// The local snapshot stays until the upload succeeds, so a retry can
 	// upload it again.
+	defer truncateSnapshotTars(localDir, rec.SnapshotFiles)
 	if err := pluginsocket.CallError(s.uploadSnapshot(ctx, actor, uri, localDir, rec)); err != nil {
 		return rec.SandboxClass, false, err
 	}
-	truncateSnapshotTars(localDir, rec.SnapshotFiles)
 	return rec.SandboxClass, true, nil
 }
 
