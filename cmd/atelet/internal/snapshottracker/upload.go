@@ -133,6 +133,13 @@ func (t *Tracker) backgroundUpload(ctx context.Context, actorUID string, op *act
 		a.uploadingFailed = false
 		t.saveLocked(a)
 		t.requeueLocked(a)
+	case target.InPlace && ctx.Err() != nil && t.ctx.Err() == nil:
+		// BeginStart canceled the in-place upload so the waking actor can
+		// resume without mutating active/ under the upload.
+		a.Uploading = nil
+		a.uploadingFailed = false
+		t.saveLocked(a)
+		t.requeueLocked(a)
 	default:
 		if t.ctx.Err() == nil {
 			a.uploadingFailed = true

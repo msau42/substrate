@@ -30,6 +30,7 @@ import (
 // PruneLocalCheckpoints removes every local snapshot of the actor, as a detach
 // or terminate does. A missing directory is not an error, so retries are safe.
 func PruneLocalCheckpoints(ctx context.Context, actorUID string) error {
+	_ = os.RemoveAll(filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active"))
 	return pruneLocalCheckpointDir(ctx, ateletpath.LocalCheckpointsDir(actorUID))
 }
 

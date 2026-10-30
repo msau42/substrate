@@ -75,6 +75,65 @@ func (t *Tracker) CommitLocal(actorUID string, snap SnapshotRef) *ateletpb.Actor
 	return t.stateLocked(a)
 }
 
+// ShouldMaterializeCheckpoint reports whether a deferred Checkpoint of
+// actorUID should materialize a self-contained local snapshot (independent
+// memory-ranges and tar archives) so a background upload can upload it even
+// while the actor resumes and mutates active/.
+func (t *Tracker) ShouldMaterializeCheckpoint(actorUID string) bool {
+	t.lock(actorUID)
+	defer t.unlock(actorUID)
+	if t.store == nil {
+		return false
+	}
+	a := t.findLocked(actorUID)
+	if a != nil && a.Uploading != nil && !a.Uploading.InPlace && a.keepUploading() {
+		return false
+	}
+	if t.uploadDelay <= 0 {
+		return true
+	}
+	if a == nil || a.UndurableSince.IsZero() {
+		return false
+	}
+	return !t.clock.Now().Before(a.UndurableSince.Add(t.uploadDelay))
+}
+
+// UploadingInPlaceUUID returns the snapshot UUID of an in-place snapshot
+// currently being uploaded for actorUID, or "" if none.
+func (t *Tracker) UploadingInPlaceUUID(actorUID string) string {
+	t.lock(actorUID)
+	defer t.unlock(actorUID)
+	a := t.findLocked(actorUID)
+	if a == nil {
+		return ""
+	}
+	if up := a.runningUpload(); up != nil && up.InPlace {
+		return up.uuid()
+	}
+	return ""
+}
+
+// MarkSnapshotMaterialized records that snapshotUUID's local checkpoint files
+// have been materialized independently of active/ (tars built and memory-ranges
+// unlinked from active/memory-ranges).
+func (t *Tracker) MarkSnapshotMaterialized(actorUID, snapshotUUID string) {
+	t.lock(actorUID)
+	defer t.unlock(actorUID)
+	a := t.findLocked(actorUID)
+	if a == nil {
+		return
+	}
+	if a.LatestLocal != nil && a.LatestLocal.uuid() == snapshotUUID {
+		a.LatestLocal.InPlace = false
+	}
+	if a.Uploading != nil && a.Uploading.uuid() == snapshotUUID {
+		a.Uploading.InPlace = false
+	}
+	if a.op != nil && a.op.target.uuid() == snapshotUUID {
+		a.op.target.InPlace = false
+	}
+}
+
 // CommitDurable records snap, just uploaded by a Checkpoint under
 // UPLOAD_MODE_IMMEDIATE, as the actor's latest durable snapshot, and returns
 // the actor's state. A commit of a snapshot already durable or older than
@@ -225,9 +284,16 @@ func (t *Tracker) BeginStart(ctx context.Context, actorUID, snapshotUUID string)
 		// either changed: only then is there a change to save. If the save
 		// fails, put them and unsaved back as they were, matching the state
 		// file, so the detach stays scheduled.
-		if detachAt, started, unsaved := a.DetachAt, a.Started, a.unsaved; a.markStarted() {
+		detachAt, started, uploading, uploadingFailed, unsaved := a.DetachAt, a.Started, a.Uploading, a.uploadingFailed, a.unsaved
+		changed := a.markStarted()
+		if a.Uploading != nil && a.Uploading.InPlace && a.runningUpload() == nil {
+			a.Uploading = nil
+			a.uploadingFailed = false
+			changed = true
+		}
+		if changed {
 			if err := t.writeStateLocked(a); err != nil {
-				a.DetachAt, a.Started, a.unsaved = detachAt, started, unsaved
+				a.DetachAt, a.Started, a.Uploading, a.uploadingFailed, a.unsaved = detachAt, started, uploading, uploadingFailed, unsaved
 				return false, nil, apierror.Unavailable("while recording the start of actor %s: %v", actorUID, err)
 			}
 		}

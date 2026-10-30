@@ -737,6 +737,9 @@ type Atelet struct {
 	// of each local snapshot. A local snapshot recording another, or none,
 	// was written before the node last rebooted.
 	bootID string
+	// materializeMu serializes materializing an in-place local snapshot for
+	// upload against Run and Restore.
+	materializeMu sync.Mutex
 }
 
 var _ ateletpb.AteletServer = (*Atelet)(nil)
@@ -818,6 +821,11 @@ func (s *Atelet) Run(ctx context.Context, req *ateletpb.RunRequest) (resp *atele
 		return nil, err
 	}
 	defer endStart()
+	if u := s.snapshots.UploadingInPlaceUUID(actorUID); u != "" {
+		if err := s.materializeUploadingInPlaceSnapshot(ctx, actorUID, u); err != nil {
+			return nil, err
+		}
+	}
 
 	// Fetched before the reset below, into a staging dir, so a failed fetch
 	// leaves a live activation as it was. The staged set is swapped in only
@@ -1057,7 +1065,9 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		return nil, apierror.InvalidArgument("invalid workload spec: %v", err)
 	}
 
-	if req.GetUploadConfig().GetMode() == ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE {
+	materializeForUpload := req.GetUploadConfig().GetMode() == ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE ||
+		s.snapshots.ShouldMaterializeCheckpoint(actorUID)
+	if materializeForUpload {
 		if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
 			return nil, fmt.Errorf("while creating checkpoint dir: %w", err)
 		}
@@ -1086,7 +1096,11 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 	}
 	// The snapshot commits on this node once worker has written it, in either
 	// upload mode.
-	snap := snapshottracker.SnapshotRef{Snapshot: req.GetSnapshot(), CommitTime: time.Now(), Actor: actorRef}
+	snap := snapshottracker.SnapshotRef{
+		Snapshot:   req.GetSnapshot(),
+		CommitTime: time.Now(),
+		Actor:      actorRef,
+	}
 
 	s.systemInfoVolumes.Deregister(actorUID)
 
@@ -1105,10 +1119,12 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 	var state *ateletpb.ActorSnapshotState
 	switch mode := req.GetUploadConfig().GetMode(); mode {
 	case ateletpb.UploadMode_UPLOAD_MODE_DEFERRED:
-		if err := s.moveLocalCheckpoint(ctx, req, sandboxRec); err != nil {
+		inPlace, err := s.moveLocalCheckpoint(ctx, req, sandboxRec, !materializeForUpload)
+		if err != nil {
 			dPersist = time.Since(tPersist)
 			return nil, fmt.Errorf("while moving to local snapshot: %w", err)
 		}
+		snap.InPlace = inPlace
 		state = s.snapshots.CommitLocal(actorUID, snap)
 	case ateletpb.UploadMode_UPLOAD_MODE_IMMEDIATE:
 		// CheckpointWorkload has already deleted the workload, so a retried
@@ -1126,9 +1142,10 @@ func (s *Atelet) Checkpoint(ctx context.Context, req *ateletpb.CheckpointRequest
 		// The snapshot is durable now, so the local copy only saves a
 		// download: failing to keep it must not fail the checkpoint.
 		// RemoveActorFilesExceptState cleans up checkpointDir if the move fails.
-		if err := s.moveLocalCheckpoint(ctx, req, sandboxRec); err != nil {
+		if inPlace, err := s.moveLocalCheckpoint(ctx, req, sandboxRec, true); err != nil {
 			slog.WarnContext(ctx, "Failed to keep a local copy of the uploaded snapshot", slog.Any("actor", actorRef), slog.Any("err", err))
 		} else {
+			snap.InPlace = inPlace
 			state = s.snapshots.CommitLocal(actorUID, snap)
 		}
 	default:
@@ -1228,22 +1245,22 @@ func toWorkerFidelity(fidelity ateletpb.SnapshotFidelity) ateworkerpb.SnapshotFi
 	}
 }
 
-func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord) error {
+func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.CheckpointRequest, rec *sandboxAssetsRecord, truncateTars bool) (bool, error) {
 	snapshotRoot := ateletpath.ActorSnapshotPath(req.GetActorUid())
 	root, err := os.OpenRoot(snapshotRoot)
 	if err != nil {
-		return fmt.Errorf("while opening actor snapshot directory: %w", err)
+		return false, fmt.Errorf("while opening actor snapshot directory: %w", err)
 	}
 	defer root.Close()
 
 	checkpointDir, err := filepath.Rel(snapshotRoot, ateletpath.CheckpointStateDir(req.GetActorUid()))
 	if err != nil {
-		return err
+		return false, err
 	}
 	snapshotName := req.GetSnapshot().GetSnapshotUuid()
 	localDir, err := filepath.Rel(snapshotRoot, ateletpath.LocalSnapshotDir(req.GetActorUid(), snapshotName))
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Stage the files worker reported and the snapshot manifest inside
@@ -1252,33 +1269,43 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	// checkpointDir up.
 	stageDir := filepath.Join(checkpointDir, ".staged")
 	if err := root.RemoveAll(stageDir); err != nil {
-		return fmt.Errorf("while clearing local checkpoint staging directory: %w", err)
+		return false, fmt.Errorf("while clearing local checkpoint staging directory: %w", err)
 	}
 	if err := root.MkdirAll(stageDir, 0o700); err != nil {
-		return fmt.Errorf("while creating local checkpoint staging directory: %w", err)
+		return false, fmt.Errorf("while creating local checkpoint staging directory: %w", err)
 	}
 
+	activeMemInfo, _ := root.Lstat(filepath.Join("active", "memory-ranges"))
+	inPlace := false
 	for _, fileName := range rec.SnapshotFiles {
 		src := filepath.Join(checkpointDir, fileName)
 		dst := filepath.Join(stageDir, fileName)
 		info, err := root.Lstat(src)
 		if err != nil {
-			return fmt.Errorf("while inspecting checkpoint file %s: %w", fileName, err)
+			return false, fmt.Errorf("while inspecting checkpoint file %s: %w", fileName, err)
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("checkpoint file %s is not a regular file", fileName)
+			return false, fmt.Errorf("checkpoint file %s is not a regular file", fileName)
 		}
 		recordSnapshotSize(ctx, fileName, sparsefile.AllocatedBytes(info), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
 
 		if err := root.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return fmt.Errorf("while creating parent directory for %s: %w", dst, err)
+			return false, fmt.Errorf("while creating parent directory for %s: %w", dst, err)
 		}
 		if err := root.Rename(src, dst); err != nil {
-			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
+			return false, fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
 		}
-		if info.Size() > 0 && isDirectoryTarFile(fileName) {
-			if err := root.WriteFile(dst, nil, 0o600); err != nil {
-				return fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
+		if fileName == "memory-ranges" && activeMemInfo != nil && os.SameFile(info, activeMemInfo) {
+			inPlace = true
+		}
+		if isDirectoryTarFile(fileName) {
+			if truncateTars && info.Size() > 0 {
+				if err := root.WriteFile(dst, nil, 0o600); err != nil {
+					return false, fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
+				}
+				inPlace = true
+			} else if info.Size() == 0 {
+				inPlace = true
 			}
 		}
 	}
@@ -1289,20 +1316,20 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	local.BootID = s.bootID
 	manifest, err := json.Marshal(&local)
 	if err != nil {
-		return fmt.Errorf("while marshaling snapshot manifest: %w", err)
+		return false, fmt.Errorf("while marshaling snapshot manifest: %w", err)
 	}
 	if err := root.WriteFile(filepath.Join(stageDir, sandboxManifestName), manifest, 0o600); err != nil {
-		return fmt.Errorf("while writing snapshot manifest: %w", err)
+		return false, fmt.Errorf("while writing snapshot manifest: %w", err)
 	}
 
 	if err := root.MkdirAll(filepath.Dir(localDir), 0o700); err != nil {
-		return fmt.Errorf("while creating local checkpoint directory: %w", err)
+		return false, fmt.Errorf("while creating local checkpoint directory: %w", err)
 	}
 	if err := root.Rename(stageDir, localDir); err != nil {
-		return fmt.Errorf("failed to move %s to %s: %w", stageDir, localDir, err)
+		return false, fmt.Errorf("failed to move %s to %s: %w", stageDir, localDir, err)
 	}
 
-	return nil
+	return inPlace, nil
 }
 
 // shouldHaveSnapshots returns true if the checkpoint request is expected to produce snapshot files.
@@ -1340,9 +1367,36 @@ func isDirectoryTarFile(fileName string) bool {
 func truncateSnapshotTars(srcDir string, files []string) {
 	for _, fileName := range files {
 		if isDirectoryTarFile(fileName) {
-			_ = os.Truncate(filepath.Join(srcDir, fileName), 0)
+			dst := filepath.Join(srcDir, fileName)
+			tmp := dst + ".empty"
+			if err := os.WriteFile(tmp, nil, 0o600); err == nil {
+				_ = os.Rename(tmp, dst)
+			}
 		}
 	}
+}
+
+func (s *Atelet) materializeUploadingInPlaceSnapshot(ctx context.Context, actorUID, snapshotUUID string) error {
+	s.materializeMu.Lock()
+	defer s.materializeMu.Unlock()
+
+	localDir := ateletpath.LocalSnapshotDir(actorUID, snapshotUUID)
+	if manifest, err := readSnapshotManifest(localDir); err == nil {
+		if rec, err := unmarshalSandboxRecord(manifest); err == nil {
+			if err := ensureSnapshotTarsForUpload(ctx, actorUID, localDir, rec.SnapshotFiles); err != nil {
+				return err
+			}
+		}
+	}
+	localMem := filepath.Join(localDir, "memory-ranges")
+	activeMem := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "memory-ranges")
+	if lInfo, lerr := os.Stat(localMem); lerr == nil {
+		if aInfo, aerr := os.Stat(activeMem); aerr == nil && os.SameFile(lInfo, aInfo) {
+			_ = os.Remove(activeMem)
+		}
+	}
+	s.snapshots.MarkSnapshotMaterialized(actorUID, snapshotUUID)
+	return nil
 }
 
 func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, files []string) error {
@@ -1354,15 +1408,33 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 		}
 		if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
 			vol = strings.TrimSuffix(vol, ".tar")
-			volDir := ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
-			if err := tarutil.CreateWithRoot(ctx, tarPath, volDir); err != nil {
+			volDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "durable-dir", vol)
+			if st, serr := os.Stat(volDir); serr != nil || !st.IsDir() {
+				volDir = ateletpath.DurableDirVolumeMountPoint(actorUID, vol)
+			}
+			tmpPath := tarPath + ".tmp"
+			if err := tarutil.CreateWithRoot(ctx, tmpPath, volDir); err != nil {
+				_ = os.Remove(tmpPath)
 				return fmt.Errorf("while archiving durable-dir volume %q for upload: %w", vol, err)
+			}
+			if err := os.Rename(tmpPath, tarPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("while placing durable-dir archive %q for upload: %w", vol, err)
 			}
 		} else if cid, ok := strings.CutPrefix(fileName, "rootfs-upper-"); ok && strings.HasSuffix(cid, ".tar") {
 			cid = strings.TrimSuffix(cid, ".tar")
-			upperDir := filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
-			if err := tarutil.CreateWithRoot(ctx, tarPath, upperDir); err != nil {
+			upperDir := filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active", "rootfs-upper", cid, "fs")
+			if st, serr := os.Stat(upperDir); serr != nil || !st.IsDir() {
+				upperDir = filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper", cid, "fs")
+			}
+			tmpPath := tarPath + ".tmp"
+			if err := tarutil.CreateWithRoot(ctx, tmpPath, upperDir); err != nil {
+				_ = os.Remove(tmpPath)
 				return fmt.Errorf("while archiving rootfs upper %q for upload: %w", cid, err)
+			}
+			if err := os.Rename(tmpPath, tarPath); err != nil {
+				_ = os.Remove(tmpPath)
+				return fmt.Errorf("while placing rootfs upper archive %q for upload: %w", cid, err)
 			}
 		}
 	}
@@ -1377,7 +1449,10 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 // overwrite the deterministic object names. opts are passed to every plugin
 // call, and plugin errors are returned as uploadSnapshotFiles returns them.
 func (s *Atelet) uploadSnapshot(ctx context.Context, actor actorRef, uri resources.SnapshotURI, srcDir string, rec *sandboxAssetsRecord, opts ...grpc.CallOption) error {
-	if err := ensureSnapshotTarsForUpload(ctx, actor.uid, srcDir, rec.SnapshotFiles); err != nil {
+	s.materializeMu.Lock()
+	err := ensureSnapshotTarsForUpload(ctx, actor.uid, srcDir, rec.SnapshotFiles)
+	s.materializeMu.Unlock()
+	if err != nil {
 		return err
 	}
 	if err := s.uploadSnapshotFiles(ctx, actor, uri.String(), srcDir, rec.SnapshotFiles, opts...); err != nil {
@@ -1674,6 +1749,11 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 		return nil, err
 	}
 	defer endStart()
+	if u := s.snapshots.UploadingInPlaceUUID(actorUID); u != "" {
+		if err := s.materializeUploadingInPlaceSnapshot(ctx, actorUID, u); err != nil {
+			return nil, err
+		}
+	}
 
 	// Not crashing the actor, because terminal errors here indicate problems with atelet,
 	// node or the disk itself.
@@ -1740,6 +1820,9 @@ func (s *Atelet) Restore(ctx context.Context, req *ateletpb.RestoreRequest) (res
 		}
 		if err := os.RemoveAll(filepath.Join(ateletpath.ActorPath(actorUID), "rootfs-upper")); err != nil {
 			return nil, fmt.Errorf("while resetting rootfs-upper dir: %w", err)
+		}
+		if err := os.RemoveAll(filepath.Join(ateletpath.ActorSnapshotPath(actorUID), "active")); err != nil {
+			return nil, fmt.Errorf("while resetting active snapshot dir: %w", err)
 		}
 		if errors.Is(localErr, errUnusableLocalSnapshot) {
 			// The next checkpoint or terminate prunes the unusable copy.

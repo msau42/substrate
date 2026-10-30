@@ -305,7 +305,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	untarDone := make(chan error, 1)
 	untarJoined := false
 	go func() {
-		untarDone <- untarRootfsUpper(rootfsUpperDir(p.actorDirs), restoreDir, containerNames(p.containers))
+		untarDone <- untarRootfsUpperWithPreserve(rootfsUpperDir(p.actorDirs), restoreDir, containerNames(p.containers), preserveRestoreDir)
 	}()
 	defer func() {
 		if !untarJoined {

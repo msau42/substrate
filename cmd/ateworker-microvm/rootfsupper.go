@@ -144,14 +144,14 @@ func markRootfsUpper(checkpointDir, dir string, containers []string) error {
 	return nil
 }
 
-func canSkipUntarRootfsUpper(dir, snapshotDir string, containers []string) bool {
+func canSkipUntarRootfsUpper(dir, snapshotDir string, containers []string, preserveRestoreDir bool) bool {
 	for _, cid := range containers {
 		name, err := rootfsUpperTarFile(cid)
 		if err != nil {
 			return false
 		}
 		info, err := os.Stat(filepath.Join(snapshotDir, name))
-		if err != nil || info.Size() > 0 {
+		if err != nil || (!preserveRestoreDir && info.Size() > 0) {
 			return false
 		}
 		upper, _ := kata.UpperWorkDirs(dir, cid)
@@ -169,7 +169,11 @@ func canSkipUntarRootfsUpper(dir, snapshotDir string, containers []string) bool 
 // would corrupt the overlay state the guest's find-paths re-opens. Every
 // directory above the upperdirs is created here, never taken from the tar.
 func untarRootfsUpper(dir, snapshotDir string, containers []string) error {
-	if canSkipUntarRootfsUpper(dir, snapshotDir, containers) {
+	return untarRootfsUpperWithPreserve(dir, snapshotDir, containers, false)
+}
+
+func untarRootfsUpperWithPreserve(dir, snapshotDir string, containers []string, preserveRestoreDir bool) error {
+	if canSkipUntarRootfsUpper(dir, snapshotDir, containers, preserveRestoreDir) {
 		for _, cid := range containers {
 			_, work := kata.UpperWorkDirs(dir, cid)
 			if err := os.MkdirAll(work, 0o755); err != nil {

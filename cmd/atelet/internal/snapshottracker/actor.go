@@ -41,6 +41,11 @@ type SnapshotRef struct {
 	// the snapshot can act for the actor the way an RPC for it would. The
 	// Checkpoint or PromoteSnapshot that commits the snapshot sets it.
 	Actor resources.ActorRef
+	// InPlace reports whether the snapshot's local checkpoint shares files
+	// in-place with active/ (hard-linked memory-ranges and 0-byte tar markers).
+	// An in-place snapshot may only be uploaded while the actor is not running
+	// (!Started).
+	InPlace bool
 }
 
 // snapshotRefJSON is a SnapshotRef as the snapshot state file stores it.
@@ -51,6 +56,7 @@ type snapshotRefJSON struct {
 	UploadTime time.Time       `json:"uploadTime,omitzero"`
 	Atespace   string          `json:"atespace,omitempty"`
 	ActorName  string          `json:"actorName,omitempty"`
+	InPlace    bool            `json:"inPlace,omitempty"`
 }
 
 // MarshalJSON encodes r as a snapshotRefJSON.
@@ -59,7 +65,7 @@ func (r SnapshotRef) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(snapshotRefJSON{Snapshot: snap, CommitTime: r.CommitTime, UploadTime: r.UploadTime, Atespace: r.Actor.Atespace, ActorName: r.Actor.Name})
+	return json.Marshal(snapshotRefJSON{Snapshot: snap, CommitTime: r.CommitTime, UploadTime: r.UploadTime, Atespace: r.Actor.Atespace, ActorName: r.Actor.Name, InPlace: r.InPlace})
 }
 
 // UnmarshalJSON decodes a snapshotRefJSON into r.
@@ -72,7 +78,7 @@ func (r *SnapshotRef) UnmarshalJSON(data []byte) error {
 	if err := protojson.Unmarshal(rec.Snapshot, snap); err != nil {
 		return err
 	}
-	*r = SnapshotRef{Snapshot: snap, CommitTime: rec.CommitTime, UploadTime: rec.UploadTime, Actor: resources.ActorRef{Atespace: rec.Atespace, Name: rec.ActorName}}
+	*r = SnapshotRef{Snapshot: snap, CommitTime: rec.CommitTime, UploadTime: rec.UploadTime, Actor: resources.ActorRef{Atespace: rec.Atespace, Name: rec.ActorName}, InPlace: rec.InPlace}
 	return nil
 }
 
@@ -314,9 +320,13 @@ func (a *actorSnapshots) uploadNeeded(ref SnapshotRef) bool {
 }
 
 // canUpload reports whether ref is non-nil, still needs uploading, and names
-// an object storage location where atelet can upload it.
+// an object storage location where atelet can upload it. An in-place snapshot
+// cannot be uploaded while the actor is running.
 func (a *actorSnapshots) canUpload(ref *SnapshotRef) bool {
 	if ref == nil || !a.uploadNeeded(*ref) || ref.uri() == "" {
+		return false
+	}
+	if ref.InPlace && a.Started {
 		return false
 	}
 	_, err := a.isLatestDurable(*ref)
@@ -514,7 +524,7 @@ func (a *actorSnapshots) uploadSucceeded(now time.Time) {
 // keeps snap's Snapshot and CommitTime only: UploadTime is only valid for
 // durable snapshots.
 func (a *actorSnapshots) setLatestLocal(snap SnapshotRef, detachAt time.Time) {
-	a.LatestLocal = &SnapshotRef{Snapshot: proto.CloneOf(snap.Snapshot), CommitTime: snap.CommitTime, Actor: snap.Actor}
+	a.LatestLocal = &SnapshotRef{Snapshot: proto.CloneOf(snap.Snapshot), CommitTime: snap.CommitTime, Actor: snap.Actor, InPlace: snap.InPlace}
 	a.DetachAt = detachAt
 }
 
