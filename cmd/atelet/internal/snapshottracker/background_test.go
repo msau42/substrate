@@ -288,7 +288,7 @@ func TestStartPrunesLocalSnapshotsFromEarlierBoot(t *testing.T) {
 		{"actor-suspended-old", "s1", suspendedOldDir},
 		{"actor-running-old", "s2", runningOldDir},
 	} {
-		for _, path := range []string{tc.dir, ateletpath.ActorSnapshotPath(tc.actorUID), ateletpath.OCIBundleDir(tc.actorUID)} {
+		for _, path := range []string{tc.dir, ateletpath.LocalCheckpointsDir(tc.actorUID), ateletpath.OCIBundleDir(tc.actorUID)} {
 			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("%s stat(%s) = %v, want not exist", tc.actorUID, path, err)
 			}
@@ -311,7 +311,7 @@ func TestStartPrunesLocalSnapshotsFromEarlierBoot(t *testing.T) {
 		t.Errorf("actor-same-boot latest_local = %q, want s3", got)
 	}
 
-	for _, path := range []string{undurableOldDir, ateletpath.ActorSnapshotPath("actor-undurable-old"), ateletpath.OCIBundleDir("actor-undurable-old")} {
+	for _, path := range []string{undurableOldDir, ateletpath.LocalCheckpointsDir("actor-undurable-old"), ateletpath.OCIBundleDir("actor-undurable-old")} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("actor-undurable-old stat(%s) = %v, want not exist", path, err)
 		}

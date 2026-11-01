@@ -18,6 +18,13 @@ package atomicfile
 import (
 	"os"
 	"path/filepath"
+	"syscall"
+)
+
+const (
+	syncFileRangeWaitBefore = 1
+	syncFileRangeWrite      = 2
+	syncFileRangeWaitAfter  = 4
 )
 
 // Write writes data to path by writing a temp file in the same directory and
@@ -53,7 +60,7 @@ func write(path string, data []byte, perm os.FileMode, sync bool) error {
 		return err
 	}
 	if sync {
-		if err := f.Sync(); err != nil {
+		if err := syscall.SyncFileRange(int(f.Fd()), 0, 0, syncFileRangeWaitBefore|syncFileRangeWrite|syncFileRangeWaitAfter); err != nil {
 			f.Close()
 			return err
 		}

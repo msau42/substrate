@@ -1326,9 +1326,6 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 	if err := root.Rename(stageDir, localDir); err != nil {
 		return fmt.Errorf("failed to move %s to %s: %w", stageDir, localDir, err)
 	}
-	if err := syncRootPath(root, filepath.Dir(localDir)); err != nil {
-		return fmt.Errorf("while syncing local checkpoints parent directory: %w", err)
-	}
 
 	return nil
 }
@@ -1346,15 +1343,6 @@ func syncFileRangeRootPath(root *os.Root, path string, flags int) error {
 	}
 	defer f.Close()
 	return syscall.SyncFileRange(int(f.Fd()), 0, 0, flags)
-}
-
-func syncRootPath(root *os.Root, path string) error {
-	f, err := root.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
 }
 
 // shouldHaveSnapshots returns true if the checkpoint request is expected to produce snapshot files.
