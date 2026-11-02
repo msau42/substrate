@@ -1098,8 +1098,14 @@ func TestTrackerDetachCleansUpActorDirectory(t *testing.T) {
 
 	assertActorFilesCleanedExceptState := func(t *testing.T, actorUID string) {
 		t.Helper()
-		if _, err := os.Stat(ateletpath.ActorSnapshotPath(actorUID)); !os.IsNotExist(err) {
-			t.Errorf("actor snapshot dir still exists before report: %v", err)
+		for _, p := range []string{
+			ateletpath.LocalCheckpointsDir(actorUID),
+			ateletpath.CheckpointStateDir(actorUID),
+			ateletpath.RestoreStateDir(actorUID),
+		} {
+			if _, err := os.Stat(p); !os.IsNotExist(err) {
+				t.Errorf("actor snapshot subdir %s still exists before report: %v", p, err)
+			}
 		}
 		if _, err := os.Stat(ateletpath.SandboxAssetsDir(actorUID)); !os.IsNotExist(err) {
 			t.Errorf("sandbox assets dir still exists before report: %v", err)

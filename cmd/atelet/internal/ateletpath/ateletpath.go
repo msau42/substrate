@@ -104,11 +104,12 @@ func ActorSandboxAssetsFile(actorUID string) string {
 
 // ActorSnapshotStateFile is the per-actor file where atelet keeps what it
 // tracks of the actor's snapshots: its latest local and durable snapshots, so
-// a restarted atelet still knows them. Like ActorSandboxAssetsFile it lives
-// directly under ActorPath, outside the subdirs actordirs.ResetActorDirs wipes.
+// a restarted atelet still knows them. It lives directly under
+// ActorSnapshotPath on the dedicated snapshot disk, outside the subdirs
+// actordirs.ResetActorDirs wipes.
 func ActorSnapshotStateFile(actorUID string) string {
 	return filepath.Join(
-		ActorPath(actorUID),
+		ActorSnapshotPath(actorUID),
 		"snapshot-state.json",
 	)
 }

@@ -50,6 +50,12 @@ func (t *Tracker) writeStateLocked(a *actorSnapshots) error {
 	// The tally follows the entry, which atelet carries on from even if the
 	// write fails.
 	t.undurableActorsTally.observe(a)
+	if _, err := os.Stat(ateletpath.ActorSnapshotPath(a.actorUID)); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(ateletpath.ActorSnapshotPath(a.actorUID), 0o700); err != nil {
+			a.unsaved = true
+			return err
+		}
+	}
 	data, err := json.Marshal(a.actorSnapshotsRecord)
 	if err == nil {
 		err = atomicfile.Write(ateletpath.ActorSnapshotStateFile(a.actorUID), data, 0o600)
@@ -92,6 +98,9 @@ func removeDetachedActorState(actorUID string) {
 		slog.Warn("Failed to remove the detached actor's snapshot state", slog.String("actorUID", actorUID), slog.Any("err", err))
 		return
 	}
+	if err := os.Remove(ateletpath.ActorSnapshotPath(actorUID)); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
+		slog.Warn("Failed to remove the detached actor's snapshot directory", slog.String("actorUID", actorUID), slog.Any("err", err))
+	}
 	if err := os.Remove(ateletpath.ActorPath(actorUID)); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
 		slog.Warn("Failed to remove the detached actor's directory", slog.String("actorUID", actorUID), slog.Any("err", err))
 	}
@@ -101,22 +110,26 @@ func removeDetachedActorState(actorUID string) {
 // this node. A node with no actor directories yet has none. An actor whose
 // file cannot be checked is included, so reading the file reports why.
 func savedActorUIDs() ([]string, error) {
-	entries, err := os.ReadDir(nodepath.ActorsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("while listing actor directories: %w", err)
-	}
+	seen := map[string]bool{}
 	var actorUIDs []string
-	for _, entry := range entries {
-		if !entry.IsDir() {
+	for _, rootDir := range []string{nodepath.SnapshotsDir, nodepath.ActorsDir} {
+		entries, err := os.ReadDir(rootDir)
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
-		if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(entry.Name())); errors.Is(err, os.ErrNotExist) {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("while listing actor directories: %w", err)
 		}
-		actorUIDs = append(actorUIDs, entry.Name())
+		for _, entry := range entries {
+			if !entry.IsDir() || seen[entry.Name()] {
+				continue
+			}
+			if _, err := os.Stat(ateletpath.ActorSnapshotStateFile(entry.Name())); errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			seen[entry.Name()] = true
+			actorUIDs = append(actorUIDs, entry.Name())
+		}
 	}
 	return actorUIDs, nil
 }

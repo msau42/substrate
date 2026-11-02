@@ -46,6 +46,7 @@ func TestActorDirs(t *testing.T) {
 		"restore_dir":           actorDirs.GetRestoreDir(),
 		"local_checkpoints_dir": LocalCheckpointsDir(actorUID),
 		"local_snapshot_dir":    LocalSnapshotDir(actorUID, "snap-1"),
+		"snapshot_state_file":   ActorSnapshotStateFile(actorUID),
 	}
 
 	seen := map[string]string{}

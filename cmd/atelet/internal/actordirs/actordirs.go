@@ -116,11 +116,28 @@ func RemoveActorFilesExceptState(actorUID string) error {
 	if err := os.Remove(volumesDir); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("while removing volumes dir: %w", err)
 	}
-	if err := os.RemoveAll(ateletpath.ActorSnapshotPath(actorUID)); err != nil {
-		return fmt.Errorf("while deleting actor snapshot dir: %w", err)
+	stateFile := filepath.Base(ateletpath.ActorSnapshotStateFile(actorUID))
+	snapshotDir := ateletpath.ActorSnapshotPath(actorUID)
+	if entries, err := os.ReadDir(snapshotDir); err == nil {
+		hasState := false
+		for _, entry := range entries {
+			if entry.Name() == stateFile {
+				hasState = true
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(snapshotDir, entry.Name())); err != nil {
+				return fmt.Errorf("while deleting actor snapshot dir: %w", err)
+			}
+		}
+		if !hasState {
+			if err := os.Remove(snapshotDir); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("while deleting actor snapshot dir: %w", err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("while reading actor snapshot dir: %w", err)
 	}
 	actorDir := ateletpath.ActorPath(actorUID)
-	stateFile := filepath.Base(ateletpath.ActorSnapshotStateFile(actorUID))
 	entries, err := os.ReadDir(actorDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -155,6 +172,9 @@ func RemoveActorDirs(actorUID string) error {
 	}
 	if err := os.Remove(ateletpath.ActorSnapshotStateFile(actorUID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("while deleting the actor's snapshot state: %w", err)
+	}
+	if err := os.Remove(ateletpath.ActorSnapshotPath(actorUID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("while deleting actor snapshot dir: %w", err)
 	}
 	if err := os.Remove(ateletpath.ActorPath(actorUID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("while deleting actor dir: %w", err)
