@@ -127,7 +127,7 @@ func virtiofsdArgs(o VirtiofsdOptions) []string {
 	return []string{
 		"--socket-path=" + o.SocketPath,
 		"--shared-dir=" + o.SharedDir,
-		"--cache=never",
+		"--cache=auto",
 		"--thread-pool-size=1",
 		"--announce-submounts",
 		"--migration-mode", "find-paths",
