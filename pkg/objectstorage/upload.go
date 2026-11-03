@@ -177,6 +177,14 @@ func (u *Uploader) SendFile(ctx context.Context, url string, file *os.File) erro
 	return u.sendZstd(ctx, url, file)
 }
 
+// SendStream compresses and uploads a streaming snapshot reader (such as an
+// on-the-fly tar stream from a .tar.tree directory).
+func (u *Uploader) SendStream(ctx context.Context, url string, content io.Reader) error {
+	ctx, span := tracer.Start(ctx, "sendStreamToGCSWithZstd")
+	defer span.End()
+	return u.sendZstd(ctx, url, content)
+}
+
 // Send uploads uncompressed content, using the same budget as SendFile. This is
 // used for snapshot manifests; the reader is streamed without retaining its body.
 func (u *Uploader) Send(ctx context.Context, url string, content io.Reader) error {

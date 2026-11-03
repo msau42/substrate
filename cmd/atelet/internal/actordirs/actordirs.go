@@ -112,6 +112,9 @@ func ResetActorDirsKeepingVolumesAndDurable(actorUID string) error {
 	if err := ResetDir("bundle dir", ateletpath.OCIBundleDir(actorUID), imagecache.RemoveAllWritable, 0o700); err != nil {
 		return err
 	}
+	if err := ensureSnapshotLoopMount(actorUID); err != nil {
+		return err
+	}
 	if err := ResetDir("checkpoint-state dir", ateletpath.CheckpointStateDir(actorUID), os.RemoveAll, 0o700); err != nil {
 		return err
 	}
@@ -149,8 +152,10 @@ func RemoveActorFilesExceptState(actorUID string) error {
 	if entries, err := os.ReadDir(snapshotDir); err == nil {
 		hasState := false
 		for _, entry := range entries {
-			if entry.Name() == stateFile {
-				hasState = true
+			if entry.Name() == stateFile || entry.Name() == "lost+found" {
+				if entry.Name() == stateFile {
+					hasState = true
+				}
 				continue
 			}
 			if err := os.RemoveAll(filepath.Join(snapshotDir, entry.Name())); err != nil {
@@ -158,6 +163,9 @@ func RemoveActorFilesExceptState(actorUID string) error {
 			}
 		}
 		if !hasState {
+			if err := teardownSnapshotLoopMount(actorUID); err != nil {
+				return fmt.Errorf("while tearing down actor snapshot loop mount: %w", err)
+			}
 			if err := os.Remove(snapshotDir); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("while deleting actor snapshot dir: %w", err)
 			}
@@ -200,6 +208,9 @@ func RemoveActorDirs(actorUID string) error {
 	}
 	if err := os.Remove(ateletpath.ActorSnapshotStateFile(actorUID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("while deleting the actor's snapshot state: %w", err)
+	}
+	if err := teardownSnapshotLoopMount(actorUID); err != nil {
+		return fmt.Errorf("while tearing down actor snapshot loop mount: %w", err)
 	}
 	if err := os.Remove(ateletpath.ActorSnapshotPath(actorUID)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("while deleting actor snapshot dir: %w", err)

@@ -18,6 +18,14 @@ package actordirs
 
 func PrewarmLoopPool() {}
 
+func EnsureSnapshotLoopMount(actorUID string) error {
+	return nil
+}
+
+func TeardownSnapshotLoopMount(actorUID string) error {
+	return nil
+}
+
 func ensureSnapshotLoopMount(actorUID string) error {
 	return nil
 }

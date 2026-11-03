@@ -22,6 +22,7 @@ import (
 	"os"
 	"syscall"
 
+	"go.ate.dev/substrate/cmd/atelet/internal/actordirs"
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
 	"go.ate.dev/substrate/cmd/atelet/internal/atomicfile"
 	"go.ate.dev/substrate/internal/nodepath"
@@ -60,6 +61,10 @@ func (t *Tracker) writeStateOptLocked(a *actorSnapshots, sync bool) error {
 	// The tally follows the entry, which atelet carries on from even if the
 	// write fails.
 	t.undurableActorsTally.observe(a)
+	if err := actordirs.EnsureSnapshotLoopMount(a.actorUID); err != nil {
+		a.unsaved = true
+		return err
+	}
 	if _, err := os.Stat(ateletpath.ActorSnapshotPath(a.actorUID)); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(ateletpath.ActorSnapshotPath(a.actorUID), 0o700); err != nil {
 			a.unsaved = true
@@ -111,6 +116,9 @@ func removeDetachedActorState(actorUID string) {
 	if err := removeSnapshotState(actorUID); err != nil {
 		slog.Warn("Failed to remove the detached actor's snapshot state", slog.String("actorUID", actorUID), slog.Any("err", err))
 		return
+	}
+	if err := actordirs.TeardownSnapshotLoopMount(actorUID); err != nil {
+		slog.Warn("Failed to tear down the detached actor's snapshot mount", slog.String("actorUID", actorUID), slog.Any("err", err))
 	}
 	if err := os.Remove(ateletpath.ActorSnapshotPath(actorUID)); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) {
 		slog.Warn("Failed to remove the detached actor's snapshot directory", slog.String("actorUID", actorUID), slog.Any("err", err))
