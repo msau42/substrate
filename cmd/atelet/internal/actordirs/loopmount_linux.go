@@ -27,11 +27,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
+	"go.ate.dev/substrate/internal/imagecache"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,6 +42,7 @@ import (
 var xfsTemplateGzip []byte
 
 const (
+	hyperdiskByIDGlob   = "/host/dev/disk/by-id/google-ate-actor-disk-*"
 	lvmVGDir            = "/host/dev/vg_snapshots"
 	lvmVolumeSize       = 2200 << 20 // 2200 MiB per LV on the dedicated snapshot disk
 	loopPoolDefaultSize = 160
@@ -90,12 +94,21 @@ var (
 
 	loopPoolMu       sync.Mutex
 	loopPoolFree     []string
-	loopPoolAssigned = make(map[string]string) // actorUID -> LVM device path
+	loopPoolAssigned = make(map[string]string) // actorUID -> block device path
+	usingHyperdisks  bool
 	initLoopPoolOnce sync.Once
 )
 
+func hasSnapshotPool() bool {
+	if matches, err := filepath.Glob(hyperdiskByIDGlob); err == nil && len(matches) > 0 {
+		return true
+	}
+	_, err := os.Stat(lvmVGDir)
+	return err == nil
+}
+
 func PrewarmLoopPool() {
-	if _, err := os.Stat(lvmVGDir); err == nil {
+	if hasSnapshotPool() {
 		initLoopPoolOnce.Do(initLoopPool)
 	}
 }
@@ -151,6 +164,27 @@ func initLoopPool() {
 				_ = os.RemoveAll(snapDir)
 			}
 		}
+	}
+
+	if matches, err := filepath.Glob(hyperdiskByIDGlob); err == nil && len(matches) > 0 {
+		usingHyperdisks = true
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+		for _, byID := range matches {
+			devPath, err := filepath.EvalSymlinks(byID)
+			if err != nil {
+				slog.Error("Failed to resolve Hyperdisk symlink", "path", byID, "err", err)
+				continue
+			}
+			if strings.HasPrefix(devPath, "/dev/") {
+				devPath = "/host" + devPath
+			}
+			loopPoolFree = append(loopPoolFree, devPath)
+		}
+		slog.Info("Finished pre-warming snapshot loop image pool",
+			"slots", len(loopPoolFree),
+			"duration", time.Since(start),
+		)
+		return
 	}
 
 	extents, err := loadXFSTemplate()
@@ -219,13 +253,16 @@ func releaseLVMVolume(actorUID string) {
 		return
 	}
 	delete(loopPoolAssigned, actorUID)
+	isHyperdisk := usingHyperdisks
 	loopPoolMu.Unlock()
 
-	extents, err := loadXFSTemplate()
-	if err == nil {
-		if f, err := os.OpenFile(lvPath, os.O_RDWR, 0o600); err == nil {
-			_ = resetAndWriteTemplate(f, extents)
-			_ = f.Close()
+	if !isHyperdisk {
+		extents, err := loadXFSTemplate()
+		if err == nil {
+			if f, err := os.OpenFile(lvPath, os.O_RDWR, 0o600); err == nil {
+				_ = resetAndWriteTemplate(f, extents)
+				_ = f.Close()
+			}
 		}
 	}
 
@@ -249,7 +286,7 @@ func isMountPoint(dir string) (bool, error) {
 }
 
 func ensureSnapshotLoopMount(actorUID string) error {
-	if _, err := os.Stat(lvmVGDir); err != nil {
+	if !hasSnapshotPool() {
 		return nil
 	}
 	snapDir := ateletpath.ActorSnapshotPath(actorUID)
@@ -281,7 +318,7 @@ func ensureSnapshotLoopMount(actorUID string) error {
 }
 
 func teardownSnapshotLoopMount(actorUID string) error {
-	if _, err := os.Stat(lvmVGDir); err != nil {
+	if !hasSnapshotPool() {
 		return nil
 	}
 	snapDir := ateletpath.ActorSnapshotPath(actorUID)
@@ -290,6 +327,15 @@ func teardownSnapshotLoopMount(actorUID string) error {
 		return fmt.Errorf("checking snapshot mountpoint %s: %w", snapDir, err)
 	}
 	if mounted {
+		if entries, err := os.ReadDir(snapDir); err == nil {
+			for _, entry := range entries {
+				if entry.Name() == "lost+found" {
+					continue
+				}
+				_ = imagecache.RemoveAllWritable(filepath.Join(snapDir, entry.Name()))
+			}
+		}
+		unix.Sync()
 		if err := unix.Unmount(snapDir, 0); err != nil {
 			if err := unix.Unmount(snapDir, unix.MNT_DETACH); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.ENOENT) {
 				return fmt.Errorf("unmounting snapshot LVM mount %s: %w", snapDir, err)

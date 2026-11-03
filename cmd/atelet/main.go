@@ -2676,5 +2676,5 @@ func ensureDedicatedSnapshotsMount(ctx context.Context) {
 		slog.String("dirty_ratio", strings.TrimSpace(string(dirtyRatio))),
 		slog.String("dirty_expire_centisecs", strings.TrimSpace(string(expireCs))))
 
-	go actordirs.PrewarmLoopPool()
+	actordirs.PrewarmLoopPool()
 }
