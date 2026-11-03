@@ -1278,12 +1278,14 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 			return fmt.Errorf("failed to move %s to %s: %w", src, dst, err)
 		}
 		if isDirectoryTarFile(fileName) {
+			hasTree := false
 			if st, terr := root.Lstat(src + ".tree"); terr == nil && st.IsDir() {
+				hasTree = true
 				if err := root.Rename(src+".tree", dst+".tree"); err != nil {
 					return fmt.Errorf("failed to move %s.tree to %s.tree: %w", src, dst, err)
 				}
 			}
-			if info.Size() > 0 {
+			if hasTree && info.Size() > 0 {
 				if err := root.WriteFile(dst, nil, 0o600); err != nil {
 					return fmt.Errorf("while truncating local checkpoint tar %s: %w", dst, err)
 				}
@@ -1382,9 +1384,11 @@ func truncateSnapshotTars(srcDir string, files []string) {
 		if isDirectoryTarFile(fileName) {
 			dst := filepath.Join(srcDir, fileName)
 			_ = os.Remove(dst + ".tmp")
-			tmp := dst + ".empty"
-			if err := os.WriteFile(tmp, nil, 0o600); err == nil {
-				_ = os.Rename(tmp, dst)
+			if st, err := os.Stat(dst + ".tree"); err == nil && st.IsDir() {
+				tmp := dst + ".empty"
+				if err := os.WriteFile(tmp, nil, 0o600); err == nil {
+					_ = os.Rename(tmp, dst)
+				}
 			}
 		}
 	}

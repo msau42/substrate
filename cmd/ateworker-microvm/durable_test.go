@@ -17,7 +17,9 @@
 package main
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -174,6 +176,69 @@ func TestDurableTarFileRejectsBadNames(t *testing.T) {
 	for _, v := range []string{"", ".", "..", "a/b", "/abs", "../x"} {
 		if _, err := durableTarFile(v); err == nil {
 			t.Errorf("durableTarFile(%q) = nil error, want one", v)
+		}
+	}
+}
+
+func TestDurableExt4VolumesRoundTrip(t *testing.T) {
+	containers := []*ateworkerpb.Container{{
+		Name: "app",
+		DurableDirVolumeMounts: []*ateworkerpb.VolumeMount{
+			{Name: "cache", MountPath: "/cache"},
+			{Name: "data", MountPath: "/data"},
+		},
+	}}
+	src := filepath.Join(t.TempDir(), "actor-1", "active", "durable-dir")
+	if err := ensureDurableMountDirs(src, containers); err != nil {
+		t.Fatalf("ensureDurableMountDirs: %v", err)
+	}
+
+	var uuids [][]byte
+	for _, vol := range []string{"cache", "data"} {
+		imgPath := filepath.Join(src, vol+".ext4")
+		if !isExt4Image(imgPath) {
+			t.Fatalf("%s is not a valid ext4 image", imgPath)
+		}
+		f, err := os.Open(imgPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var u [16]byte
+		if _, err := f.ReadAt(u[:], 1024+0x68); err != nil {
+			f.Close()
+			t.Fatal(err)
+		}
+		f.Close()
+		uuids = append(uuids, u[:])
+		if e2fsck, err := exec.LookPath("/sbin/e2fsck"); err == nil {
+			if out, err := exec.Command(e2fsck, "-fn", imgPath).CombinedOutput(); err != nil {
+				t.Fatalf("e2fsck -fn %s failed: %v\n%s", imgPath, err, out)
+			}
+		}
+	}
+	if bytes.Equal(uuids[0], uuids[1]) {
+		t.Errorf("expected distinct ext4 UUIDs across volumes, got identical %x", uuids[0])
+	}
+
+	checkpointDir := t.TempDir()
+	files, err := markDurableVolumes(checkpointDir, src, []string{"cache", "data"})
+	if err != nil {
+		t.Fatalf("markDurableVolumes: %v", err)
+	}
+	if want := []string{"durable-dir-cache.tar", "durable-dir-data.tar"}; !slices.Equal(files, want) {
+		t.Fatalf("markDurableVolumes files = %v, want %v", files, want)
+	}
+
+	dst := filepath.Join(t.TempDir(), "actor-2", "active", "durable-dir")
+	if err := untarDurableVolumes(dst, checkpointDir, []string{"cache", "data"}, false); err != nil {
+		t.Fatalf("untarDurableVolumes: %v", err)
+	}
+	for _, vol := range []string{"cache", "data"} {
+		if !isExt4Image(filepath.Join(dst, vol+".ext4")) {
+			t.Errorf("restored %s.ext4 is not a valid ext4 image", vol)
+		}
+		if st, err := os.Stat(filepath.Join(dst, vol)); err != nil || !st.IsDir() {
+			t.Errorf("restored mountpoint %s: %v, %v", vol, st, err)
 		}
 	}
 }

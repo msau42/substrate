@@ -412,14 +412,23 @@ func ReconstructSharedDirFromImage(ctx context.Context, bundleRootfs, restoreID,
 	return nil
 }
 
+type PmemMount struct {
+	Device     string
+	Fstype     string
+	Options    []string
+	MountPoint string
+}
+
 type CreateSandboxOpts struct {
 	SandboxID string
 	Hostname  string
+	Pmem      []PmemMount
 }
 
 // CreateSandboxForActor creates the guest sandbox with the kataShared virtio-fs mount
 // (the merged rootfs trees, durable volumes, CSI volumes, and system-info
-// volumes every container runs on). Mirrors kata startSandbox.
+// volumes every container runs on) plus any cold-plugged virtio-pmem mounts.
+// Mirrors kata startSandbox.
 func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSandboxOpts) error {
 	storages := []*agentpb.Storage{{
 		Driver:     virtioFSDriver,
@@ -427,6 +436,15 @@ func (a *AgentClient) CreateSandboxForActor(ctx context.Context, opts CreateSand
 		Fstype:     typeVirtioFS,
 		MountPoint: guestSharedDir,
 	}}
+	for _, m := range opts.Pmem {
+		storages = append(storages, &agentpb.Storage{
+			Driver:     virtioFSDriver,
+			Source:     m.Device,
+			Fstype:     m.Fstype,
+			Options:    m.Options,
+			MountPoint: m.MountPoint,
+		})
+	}
 	return a.CreateSandbox(ctx, &agentpb.CreateSandboxRequest{
 		Hostname:  opts.Hostname,
 		SandboxId: opts.SandboxID,

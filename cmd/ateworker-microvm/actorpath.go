@@ -20,17 +20,32 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"crypto/rand"
+	_ "embed"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"go.ate.dev/substrate/internal/proto/ateworkerpb"
 	"golang.org/x/sys/unix"
 )
 
 const guestMemoryZoneID = "mem0"
+
+//go:embed golden_durable_ext4.spz.gz
+var goldenDurableExt4SpzGz []byte
+
+var (
+	goldenDurableExt4Mu sync.Mutex
+	castagnoliTable     = crc32.MakeTable(crc32.Castagnoli)
+)
 
 // ociBundlePath is the container's OCI bundle.
 func ociBundlePath(actorDirs *ateworkerpb.ActorDirs, containerName string) string {
@@ -230,6 +245,118 @@ func durableMountsDir(actorDirs *ateworkerpb.ActorDirs) string {
 	return actorDirs.GetDurableDirVolumeMountsDir()
 }
 
+func durableVolumeImagePath(actorDirs *ateworkerpb.ActorDirs, vol string) string {
+	return filepath.Join(durableMountsDir(actorDirs), vol+".ext4")
+}
+
+func ensureGoldenDurableExt4Image(durableDir string) (string, error) {
+	goldenDir := durableDir
+	if filepath.Base(filepath.Dir(durableDir)) == "active" {
+		goldenDir = filepath.Dir(filepath.Dir(filepath.Dir(durableDir)))
+	}
+	goldenPath := filepath.Join(goldenDir, ".golden-durable-ext4-1g.img")
+
+	goldenDurableExt4Mu.Lock()
+	defer goldenDurableExt4Mu.Unlock()
+
+	if st, err := os.Stat(goldenPath); err == nil && st.Mode().IsRegular() && st.Size() == 1<<30 {
+		return goldenPath, nil
+	}
+	if err := os.MkdirAll(goldenDir, 0o755); err != nil {
+		return "", fmt.Errorf("while creating golden ext4 dir %s: %w", goldenDir, err)
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(goldenDurableExt4SpzGz))
+	if err != nil {
+		return "", fmt.Errorf("while opening embedded golden ext4 image: %w", err)
+	}
+	defer zr.Close()
+
+	var hdr [12]byte
+	if _, err := io.ReadFull(zr, hdr[:]); err != nil {
+		return "", fmt.Errorf("while reading golden ext4 header: %w", err)
+	}
+	totalSize := int64(binary.LittleEndian.Uint64(hdr[0:8]))
+	numExtents := binary.LittleEndian.Uint32(hdr[8:12])
+
+	tmp, err := os.CreateTemp(goldenDir, ".golden-durable-ext4-*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("while creating temp golden ext4 image: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := tmp.Truncate(totalSize); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("while sizing temp golden ext4 image: %w", err)
+	}
+	for range numExtents {
+		var extHdr [16]byte
+		if _, err := io.ReadFull(zr, extHdr[:]); err != nil {
+			_ = tmp.Close()
+			return "", fmt.Errorf("while reading golden ext4 extent header: %w", err)
+		}
+		off := int64(binary.LittleEndian.Uint64(extHdr[0:8]))
+		length := int64(binary.LittleEndian.Uint64(extHdr[8:16]))
+		if _, err := tmp.Seek(off, io.SeekStart); err != nil {
+			_ = tmp.Close()
+			return "", fmt.Errorf("while seeking temp golden ext4 image: %w", err)
+		}
+		if _, err := io.CopyN(tmp, zr, length); err != nil {
+			_ = tmp.Close()
+			return "", fmt.Errorf("while writing temp golden ext4 extent: %w", err)
+		}
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmpName, goldenPath); err != nil {
+		return "", fmt.Errorf("while renaming golden ext4 image to %s: %w", goldenPath, err)
+	}
+	return goldenPath, nil
+}
+
+func setExt4UUID(path string) error {
+	var u [16]byte
+	if _, err := rand.Read(u[:]); err != nil {
+		return fmt.Errorf("while generating ext4 UUID: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("while opening ext4 image %s for UUID update: %w", path, err)
+	}
+	defer f.Close()
+
+	var sb [1024]byte
+	if _, err := f.ReadAt(sb[:], 1024); err != nil {
+		return fmt.Errorf("while reading ext4 superblock from %s: %w", path, err)
+	}
+	copy(sb[0x68:0x78], u[:])
+	csum := ^crc32.Checksum(sb[:0x3fc], castagnoliTable)
+	binary.LittleEndian.PutUint32(sb[0x3fc:0x400], csum)
+	if _, err := f.WriteAt(sb[:], 1024); err != nil {
+		return fmt.Errorf("while writing ext4 superblock to %s: %w", path, err)
+	}
+	return nil
+}
+
+func isExt4Image(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var magic [2]byte
+	if _, err := f.ReadAt(magic[:], 1024+0x38); err != nil {
+		return false
+	}
+	return binary.LittleEndian.Uint16(magic[:]) == 0xef53
+}
+
 func ensureDurableMountDirs(durableDir string, containers []*ateworkerpb.Container) error {
 	names := durableVolumeNames(containers)
 	if len(names) == 0 {
@@ -238,33 +365,52 @@ func ensureDurableMountDirs(durableDir string, containers []*ateworkerpb.Contain
 	if err := os.MkdirAll(durableDir, 0o755); err != nil {
 		return fmt.Errorf("while creating durable-dir root %s: %w", durableDir, err)
 	}
+	var goldenPath string
 	for _, name := range names {
 		volDir := filepath.Join(durableDir, name)
-		if _, err := os.Stat(volDir); err == nil {
-			continue
-		} else if !os.IsNotExist(err) {
+		if _, err := os.Stat(volDir); os.IsNotExist(err) {
+			if err := os.MkdirAll(volDir, 0o777); err != nil {
+				return fmt.Errorf("while creating durable-dir volume %s: %w", volDir, err)
+			}
+			if err := os.Chmod(volDir, 0o777); err != nil {
+				return fmt.Errorf("while setting mode on durable-dir volume %s: %w", volDir, err)
+			}
+		} else if err != nil {
 			return fmt.Errorf("while checking durable-dir volume %s: %w", volDir, err)
 		}
-		if err := os.MkdirAll(volDir, 0o777); err != nil {
-			return fmt.Errorf("while creating durable-dir volume %s: %w", volDir, err)
+
+		imgPath := filepath.Join(durableDir, name+".ext4")
+		if _, err := os.Stat(imgPath); err == nil {
+			continue
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("while checking durable-dir image %s: %w", imgPath, err)
 		}
-		if err := os.Chmod(volDir, 0o777); err != nil {
-			return fmt.Errorf("while setting mode on durable-dir volume %s: %w", volDir, err)
+		if goldenPath == "" {
+			var err error
+			goldenPath, err = ensureGoldenDurableExt4Image(durableDir)
+			if err != nil {
+				return err
+			}
+		}
+		if err := cloneFileCoW(goldenPath, imgPath); err != nil {
+			return fmt.Errorf("while cloning golden ext4 image to %s: %w", imgPath, err)
+		}
+		if err := setExt4UUID(imgPath); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func prepareActiveForRun(actorDirs *ateworkerpb.ActorDirs, containers []*ateworkerpb.Container) error {
-	if !hasSnapshotRootDir(actorDirs) {
-		return nil
-	}
-	dir := activeDir(actorDirs)
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("while clearing active snapshot dir %s: %w", dir, err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("while creating active snapshot dir %s: %w", dir, err)
+	if hasSnapshotRootDir(actorDirs) {
+		dir := activeDir(actorDirs)
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("while clearing active snapshot dir %s: %w", dir, err)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("while creating active snapshot dir %s: %w", dir, err)
+		}
 	}
 	return ensureDurableMountDirs(durableMountsDir(actorDirs), containers)
 }
@@ -277,10 +423,7 @@ func prepareActiveForRestore(actorDirs *ateworkerpb.ActorDirs, restoreDir string
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("while creating active snapshot dir %s: %w", dir, err)
 	}
-	if err := stageGuestMemoryFileForRestore(restoreDir, dir, preserveRestoreDir); err != nil {
-		return err
-	}
-	return ensureDurableMountDirs(durableMountsDir(actorDirs), containers)
+	return stageGuestMemoryFileForRestore(restoreDir, dir, preserveRestoreDir)
 }
 
 func cleanupActiveOrRootfsUpper(actorDirs *ateworkerpb.ActorDirs) error {

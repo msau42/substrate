@@ -88,14 +88,15 @@ func durableVolumeNames(containers []*ateworkerpb.Container) []string {
 	return slices.Compact(names)
 }
 
-// stageDurableVolumes bind-mounts src, the actor's host durable-dir directory,
-// into the sandbox's shared virtio-fs tree at SharedDir(actorUID)/durable.
-func (s *AteWorkerService) stageDurableVolumes(ctx context.Context, actorUID, src string) error {
-	if _, err := os.Stat(src); err != nil {
-		return fmt.Errorf("while checking durable-dir volumes dir %q: %w", src, err)
-	}
-	if err := kata.BindIntoShare(ctx, src, actorUID, ocispec.ShareDurable); err != nil {
-		return fmt.Errorf("while binding durable-dir volumes into the shared tree: %w", err)
+// stageDurableVolumes creates the empty mountpoint directories under
+// SharedDir(actorUID)/durable where kata-agent mounts the per-volume
+// virtio-pmem DAX devices.
+func (s *AteWorkerService) stageDurableVolumes(ctx context.Context, actorUID string, volumes []string) error {
+	for _, vol := range volumes {
+		dst := filepath.Join(kata.SharedDir(actorUID), ocispec.ShareDurable, vol)
+		if err := os.MkdirAll(dst, 0o777); err != nil {
+			return fmt.Errorf("while creating durable-dir mountpoint %q: %w", dst, err)
+		}
 	}
 	return nil
 }
@@ -115,6 +116,14 @@ func tarDurableVolumes(ctx context.Context, dir, checkpointDir string, volumes [
 		if err != nil {
 			return nil, err
 		}
+		imgPath := filepath.Join(dir, vol+".ext4")
+		if st, err := os.Stat(imgPath); err == nil && st.Mode().IsRegular() {
+			if err := cloneFileCoW(imgPath, filepath.Join(checkpointDir, name)); err != nil {
+				return nil, fmt.Errorf("while cloning durable-dir volume image %q: %w", vol, err)
+			}
+			files = append(files, name)
+			continue
+		}
 		if err := tarutil.CreateWithRoot(ctx, filepath.Join(checkpointDir, name), filepath.Join(dir, vol)); err != nil {
 			return nil, fmt.Errorf("while archiving durable-dir volume %q: %w", vol, err)
 		}
@@ -129,6 +138,14 @@ func markDurableVolumes(checkpointDir, dir string, volumes []string) ([]string, 
 		name, err := durableTarFile(vol)
 		if err != nil {
 			return nil, err
+		}
+		imgPath := filepath.Join(dir, vol+".ext4")
+		if st, err := os.Stat(imgPath); err == nil && st.Mode().IsRegular() {
+			if err := cloneFileCoW(imgPath, filepath.Join(checkpointDir, name)); err != nil {
+				return nil, fmt.Errorf("while cloning durable-dir volume image %q: %w", vol, err)
+			}
+			files = append(files, name)
+			continue
 		}
 		volDir := filepath.Join(dir, vol)
 		if st, err := os.Stat(volDir); err != nil || !st.IsDir() {
@@ -165,6 +182,21 @@ func untarDurableVolumes(dir, snapshotDir string, volumes []string, preserveRest
 			return fmt.Errorf("while inspecting durable-dir archive %q: %w", tarPath, err)
 		}
 		volDir := filepath.Join(dir, vol)
+		if isExt4Image(tarPath) {
+			if err := os.MkdirAll(volDir, 0o777); err != nil {
+				return fmt.Errorf("while creating durable-dir volume dir %q: %w", volDir, err)
+			}
+			imgPath := filepath.Join(dir, vol+".ext4")
+			if preserveRestoreDir {
+				if st, serr := os.Stat(imgPath); serr == nil && st.Mode().IsRegular() {
+					continue
+				}
+			}
+			if err := cloneFileCoW(tarPath, imgPath); err != nil {
+				return fmt.Errorf("while restoring durable-dir volume image %q: %w", vol, err)
+			}
+			continue
+		}
 		if preserveRestoreDir || tarInfo.Size() == 0 {
 			if st, serr := os.Stat(volDir); serr == nil && st.IsDir() {
 				continue
