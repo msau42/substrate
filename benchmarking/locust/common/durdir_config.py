@@ -34,6 +34,12 @@ def add_durdir_arguments(parser: LocustArgumentParser) -> None:
         help="Bytes overwritten each cycle after bootstrap (default: 0 = rewrite full file)",
     )
     group.add_argument(
+        "--durdir-num-files",
+        type=int,
+        default=1,
+        help="Number of files written and read via /runscript (default: 1)",
+    )
+    group.add_argument(
         "--durdir-read-mode",
         type=str,
         default="data",

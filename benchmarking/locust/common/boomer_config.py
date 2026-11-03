@@ -62,6 +62,7 @@ _FLAGS = {
     "--max-live-time": float,
     "--durdir-file-size-bytes": int,
     "--durdir-churn-bytes": int,
+    "--durdir-num-files": int,
     "--resume-mode": str,
     "--lifecycle-mode": str,
     "--durdir-read-mode": str,

@@ -101,6 +101,9 @@ type durDirKnobs struct {
 	// ChurnSize is the bytes overwritten each cycle after bootstrap; 0
 	// rewrites the whole FileSize with TRUNCATE.
 	ChurnSize int64 `json:"durdir_churn_bytes"`
+	// NumFiles is the number of files written and read via /runscript; 0 or 1
+	// uses the single-file path.
+	NumFiles int `json:"durdir_num_files"`
 	// ReadMode is readModeData or readModeDigest; empty reads as data.
 	ReadMode string `json:"durdir_read_mode"`
 	// Template is the ActorTemplate name; empty falls back to
