@@ -1398,6 +1398,9 @@ func ensureSnapshotTarsForUpload(ctx context.Context, actorUID, srcDir string, f
 			continue
 		}
 		treeDir := tarPath + ".tree"
+		if st, serr := os.Stat(treeDir); serr == nil && st.IsDir() {
+			continue
+		}
 		if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
 			vol = strings.TrimSuffix(vol, ".tar")
 			volDir := treeDir

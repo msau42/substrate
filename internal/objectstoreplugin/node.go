@@ -31,6 +31,7 @@ import (
 	"slices"
 
 	"go.ate.dev/substrate/internal/resources"
+	"go.ate.dev/substrate/internal/tarutil"
 	"go.ate.dev/substrate/pkg/objectstorage"
 	objectstorev1 "go.ate.dev/substrate/pkg/proto/objectstorepb/v1"
 	"golang.org/x/sync/errgroup"
@@ -168,6 +169,22 @@ func (p *NodePlugin) UploadSnapshot(ctx context.Context, req *objectstorev1.Uplo
 		objectURI, err := uri.ObjectURI(fileName + ".zstd")
 		if err != nil {
 			return fmt.Errorf("while addressing %s in GCS: %w", fileName, err)
+		}
+		if info.Size() == 0 {
+			if st, err := root.Stat(fileName + ".tree"); err == nil && st.IsDir() {
+				treePath := filepath.Join(p.root, srcDir, fileName+".tree")
+				err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
+					pr, pw := io.Pipe()
+					go func() {
+						_ = pw.CloseWithError(tarutil.WriteWithRoot(ctx, pw, treePath))
+					}()
+					return uploader.SendStream(ctx, objectURI, pr)
+				})
+				if err != nil {
+					return fmt.Errorf("while streaming %s.tree to GCS: %w", fileName, err)
+				}
+				return nil
+			}
 		}
 		err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
 			if err := rewind(local); err != nil {

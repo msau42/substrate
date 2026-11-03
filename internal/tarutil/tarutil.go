@@ -121,6 +121,29 @@ func CreateFilteredWithRoot(ctx context.Context, tarPath, srcDir string, skip Sk
 	return create(ctx, tarPath, srcDir, skip, true)
 }
 
+// WriteWithRoot writes a tar archive of srcDir's contents plus a "./" entry
+// carrying srcDir's own mode, ownership, modification time, and xattrs directly
+// to dst without creating a file on disk.
+func WriteWithRoot(ctx context.Context, dst io.Writer, srcDir string) error {
+	bw := tarWriterPool.Get().(*bufio.Writer)
+	bw.Reset(dst)
+	defer func() {
+		bw.Reset(nil)
+		tarWriterPool.Put(bw)
+	}()
+	tw := tar.NewWriter(bw)
+	if err := writeTree(ctx, tw, srcDir, nil, true); err != nil {
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("closing tar stream for %q: %w", srcDir, err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flushing tar stream for %q: %w", srcDir, err)
+	}
+	return nil
+}
+
 func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeRoot bool) error {
 	f, err := os.Create(tarPath)
 	if err != nil {
