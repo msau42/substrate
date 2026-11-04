@@ -57,13 +57,10 @@ func activeSubvolDir(actorDirs *ateworkerpb.ActorDirs) string {
 	return filepath.Join(snapshotRootDir(actorDirs), "active")
 }
 
-// guestMemoryFile returns the file-backed shared memory zone path inside the
-// active btrfs subvolume when the actor's snapshot directory is a btrfs
-// filesystem, or "" when guest RAM is memfd-backed.
-func guestMemoryFile(actorDirs *ateworkerpb.ActorDirs) string {
-	if isBtrfsSnapshotDir(actorDirs) {
-		return filepath.Join(activeSubvolDir(actorDirs), memoryRangesFile)
-	}
+// guestMemoryFile returns "" so guest RAM is backed by anonymous memfd rather
+// than a MAP_SHARED file on Btrfs; memory-ranges is written sequentially on
+// snapshot and read sequentially on restore.
+func guestMemoryFile(_ *ateworkerpb.ActorDirs) string {
 	return ""
 }
 
@@ -197,12 +194,10 @@ func prepareActiveSubvolForRestore(actorDirs *ateworkerpb.ActorDirs, restoreDir 
 		}
 		_ = os.Remove(filepath.Join(activeDir, btrfsCheckpointTokenFile))
 		_ = os.Remove(filepath.Join(activeDir, "manifest.json"))
+		_ = os.Remove(filepath.Join(activeDir, memoryRangesFile))
 	} else {
 		if err := btrfssubvol.Create(activeDir); err != nil {
 			return fmt.Errorf("while creating active btrfs subvolume: %w", err)
-		}
-		if err := stageGuestMemoryFileForRestore(restoreDir, activeDir); err != nil {
-			return err
 		}
 	}
 	return ensureDurableMountDirs(durableMountsDir(actorDirs), containers)

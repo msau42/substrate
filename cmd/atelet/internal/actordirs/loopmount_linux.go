@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unsafe"
 
 	"go.ate.dev/substrate/cmd/atelet/internal/ateletpath"
 	"golang.org/x/sys/unix"
@@ -39,9 +40,15 @@ var btrfsTemplateGzip []byte
 
 const (
 	lvmVGDir            = "/host/dev/vg_snapshots"
-	lvmVolumeSize       = 2200 << 20 // 2200 MiB per LV on the dedicated snapshot disk
-	loopPoolDefaultSize = 160
+	lvmVolumeSize       = 16 << 30 // 16 GiB per VDUSE ZBD volume (64 x 256 MiB zones)
+	loopPoolDefaultSize = 36
+	blkResetZoneIoctl   = 0x40101283 // _IOW(0x12, 131, struct blk_zone_range)
 )
+
+type blkZoneRange struct {
+	sector    uint64
+	nrSectors uint64
+}
 
 type sparseExtent struct {
 	offset int64
@@ -102,23 +109,38 @@ func PrewarmLoopPool() {
 	}
 }
 
-// resetAndWriteTemplate stamps the slot's clean btrfs superblocks and initial
-// B-tree roots onto the LVM block device.
+func alignedBuffer(size int) []byte {
+	raw := make([]byte, size+4096)
+	off := int((4096 - (uintptr(unsafe.Pointer(&raw[0])) & 4095)) & 4095)
+	return raw[off : off+size]
+}
+
+// resetAndWriteTemplate resets all zones on the ZBD device and stamps the
+// slot's clean zoned btrfs superblock and initial B-tree roots via O_DIRECT.
 func resetAndWriteTemplate(f *os.File, extents []sparseExtent) error {
+	zr := blkZoneRange{sector: 0, nrSectors: uint64(lvmVolumeSize >> 9)}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), blkResetZoneIoctl, uintptr(unsafe.Pointer(&zr))); errno != 0 && errno != unix.ENOTTY && errno != unix.EINVAL {
+		return fmt.Errorf("resetting zones on %s: %w", f.Name(), errno)
+	}
+	buf := alignedBuffer(65536)
 	for _, ext := range extents {
-		if _, err := f.WriteAt(ext.data, ext.offset); err != nil {
+		if len(ext.data) > len(buf) {
+			buf = alignedBuffer(len(ext.data))
+		}
+		copy(buf[:len(ext.data)], ext.data)
+		if _, err := f.WriteAt(buf[:len(ext.data)], ext.offset); err != nil {
 			return fmt.Errorf("writing btrfs template extent at %d: %w", ext.offset, err)
 		}
 	}
 	if err := unix.Fdatasync(int(f.Fd())); err != nil {
-		return fmt.Errorf("fdatasync lvm volume: %w", err)
+		return fmt.Errorf("fdatasync zbd volume: %w", err)
 	}
 	_ = unix.Fadvise(int(f.Fd()), 0, lvmVolumeSize, unix.FADV_DONTNEED)
 	return nil
 }
 
 func prewarmLVMVolume(lvPath string, extents []sparseExtent) error {
-	f, err := os.OpenFile(lvPath, os.O_RDWR, 0o600)
+	f, err := os.OpenFile(lvPath, os.O_RDWR|unix.O_DIRECT, 0o600)
 	if err != nil {
 		return err
 	}
@@ -170,12 +192,15 @@ func initLoopPool() {
 	close(ch)
 
 	var wg sync.WaitGroup
-	for w := 0; w < 16; w++ {
+	for w := 0; w < 8; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range ch {
 				slotPath := filepath.Join(lvmVGDir, fmt.Sprintf("slot-%02d", i))
+				if _, err := os.Stat(slotPath); errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 				if err := prewarmLVMVolume(slotPath, slotTemplates[i]); err != nil {
 					slog.Error("Failed to initialize LVM btrfs pool slot", "slot", slotPath, "err", err)
 					continue
@@ -220,16 +245,18 @@ func releaseLVMVolume(actorUID string) {
 	delete(loopPoolAssigned, actorUID)
 	loopPoolMu.Unlock()
 
-	if slotTemplates, err := loadBtrfsTemplates(); err == nil && slot.index < len(slotTemplates) {
-		if f, err := os.OpenFile(slot.path, os.O_RDWR, 0o600); err == nil {
-			_ = resetAndWriteTemplate(f, slotTemplates[slot.index])
-			_ = f.Close()
+	go func(slot lvmSlot) {
+		if slotTemplates, err := loadBtrfsTemplates(); err == nil && slot.index < len(slotTemplates) {
+			if f, err := os.OpenFile(slot.path, os.O_RDWR|unix.O_DIRECT, 0o600); err == nil {
+				_ = resetAndWriteTemplate(f, slotTemplates[slot.index])
+				_ = f.Close()
+			}
 		}
-	}
 
-	loopPoolMu.Lock()
-	loopPoolFree = append(loopPoolFree, slot)
-	loopPoolMu.Unlock()
+		loopPoolMu.Lock()
+		loopPoolFree = append(loopPoolFree, slot)
+		loopPoolMu.Unlock()
+	}(slot)
 }
 
 func isMountPoint(dir string) (bool, error) {
@@ -267,11 +294,11 @@ func ensureSnapshotLoopMount(actorUID string) error {
 		return err
 	}
 
-	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nodiscard,nodatasum,flushoncommit,commit=5"); err != nil {
+	if err := unix.Mount(slot.path, snapDir, "btrfs", unix.MS_NOATIME|unix.MS_NODIRATIME, "nospace_cache,nodiscard,nodatasum"); err != nil {
 		releaseLVMVolume(actorUID)
 		return fmt.Errorf("mounting btrfs %s on %s: %w", slot.path, snapDir, err)
 	}
-	slog.Info("Mounted per-actor snapshot LVM btrfs logical volume",
+	slog.Info("Mounted per-actor snapshot VDUSE ZBD btrfs volume",
 		"actor_uid", actorUID,
 		"device", slot.path,
 	)

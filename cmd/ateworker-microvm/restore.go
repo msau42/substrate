@@ -429,7 +429,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// failure after this point costs a re-download of the snapshot on retry.
 	if memFile == "" {
 		maybeDropStagedMemoryImage(ctx, restoreDir, memMode, preserveRestoreDir)
-		dropActorSnapshotCacheAsync(restoreDir, memMode == ch.MemRestoreEager)
+		dropActorSnapshotCacheAsync(restoreDir, !isBtrfsSnapshotDir(p.actorDirs) && memMode == ch.MemRestoreEager)
 	} else {
 		dropActorSnapshotCacheAsync(restoreDir, false)
 	}

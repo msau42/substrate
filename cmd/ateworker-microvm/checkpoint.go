@@ -205,75 +205,100 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 	//     volumes — the memory snapshot does not carry rootfs writes. Under
 	//     VOLUMES the workload cold-starts on restore, discarding rootfs state.
 	shipsRootfs := includesRootfs(scope)
-	isIncrementalBtrfs := useBtrfs && ra != nil && ra.restoreSourceDir != ""
 	var durableFiles []string
-	g, gctx := errgroup.WithContext(ctx)
-	if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
-		g.Go(func() error {
+	if useBtrfs {
+		for _, f := range []string{baseIDFile, "config.json", "state.json", memoryRangesFile} {
+			_ = os.Remove(filepath.Join(activeDir, f))
+		}
+		if durable {
 			t := time.Now()
-			var (
-				d   time.Duration
-				err error
-			)
-			if useBtrfs {
-				d, err = s.snapshotVMStateBtrfs(gctx, client, ra, actorUID, activeDir)
-			} else {
-				d, err = s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+			var err error
+			durableFiles, err = markBtrfsDurableVolumes(activeDir, durableMountsDir(actorDirs), durableVolumeNames(req.GetSpec().GetContainers()))
+			dDurable = time.Since(t)
+			if err != nil {
+				return nil, err
 			}
+		}
+		if shipsRootfs {
+			t := time.Now()
+			err := markBtrfsRootfsUpper(activeDir, rootfsUpperDir(actorDirs), containerNames(req.GetSpec().GetContainers()))
+			dUpper = time.Since(t)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			for _, cid := range containerNames(req.GetSpec().GetContainers()) {
+				if name, err := rootfsUpperTarFile(cid); err == nil {
+					_ = os.Remove(filepath.Join(activeDir, name))
+				}
+			}
+		}
+		if err := writeBtrfsCheckpointToken(activeDir); err != nil {
+			return nil, fmt.Errorf("while writing btrfs checkpoint token: %w", err)
+		}
+		tSnapSubvol := time.Now()
+		if err := btrfssubvol.Snapshot(activeDir, checkpointDir); err != nil {
+			return nil, fmt.Errorf("while snapshotting active btrfs subvolume: %w", err)
+		}
+		if durable {
+			dDurable += time.Since(tSnapSubvol)
+		} else {
+			dUpper += time.Since(tSnapSubvol)
+		}
+		if shipsRootfs {
+			for _, cid := range containerNames(req.GetSpec().GetContainers()) {
+				_ = os.RemoveAll(filepath.Join(checkpointDir, "rootfs-upper", cid, "work"))
+			}
+		} else {
+			_ = os.RemoveAll(filepath.Join(checkpointDir, "rootfs-upper"))
+		}
+		if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			t := time.Now()
+			d, err := s.snapshotVMStateBtrfs(ctx, client, ra, actorUID, checkpointDir)
 			if err != nil {
 				d = time.Since(t)
 			}
 			dSnapshot = d
-			return err
-		})
-	} else if useBtrfs {
-		for _, f := range []string{baseIDFile, "config.json", "state.json", "memory-ranges"} {
-			_ = os.Remove(filepath.Join(activeDir, f))
+			if err != nil {
+				return nil, err
+			}
 		}
-	}
-	if durable {
-		g.Go(func() error {
-			t := time.Now()
-			var err error
-			if isIncrementalBtrfs {
-				durableFiles, err = markBtrfsDurableVolumes(activeDir, durableMountsDir(actorDirs), durableVolumeNames(req.GetSpec().GetContainers()))
-			} else if useBtrfs {
-				durableFiles, err = tarDurableVolumes(gctx, durableMountsDir(actorDirs), activeDir, durableVolumeNames(req.GetSpec().GetContainers()))
-			} else {
+	} else {
+		g, gctx := errgroup.WithContext(ctx)
+		if scope == ateworkerpb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY {
+			g.Go(func() error {
+				t := time.Now()
+				d, err := s.snapshotVMState(gctx, client, ra, actorUID, checkpointDir)
+				if err != nil {
+					d = time.Since(t)
+				}
+				dSnapshot = d
+				return err
+			})
+		}
+		if durable {
+			g.Go(func() error {
+				t := time.Now()
+				var err error
 				durableFiles, err = tarDurableVolumes(gctx, durableMountsDir(actorDirs), checkpointDir, durableVolumeNames(req.GetSpec().GetContainers()))
-			}
-			dDurable = time.Since(t)
-			return err
-		})
-	}
-	if shipsRootfs {
-		g.Go(func() error {
-			t := time.Now()
-			var err error
-			if isIncrementalBtrfs {
-				err = markBtrfsRootfsUpper(activeDir, rootfsUpperDir(actorDirs), containerNames(req.GetSpec().GetContainers()))
-			} else if useBtrfs {
-				err = tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), activeDir, containerNames(req.GetSpec().GetContainers()))
-			} else {
-				err = tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
-			}
-			dUpper = time.Since(t)
-			return err
-		})
-	} else if useBtrfs {
-		for _, cid := range containerNames(req.GetSpec().GetContainers()) {
-			if name, err := rootfsUpperTarFile(cid); err == nil {
-				_ = os.Remove(filepath.Join(activeDir, name))
-			}
+				dDurable = time.Since(t)
+				return err
+			})
 		}
-	}
-	if err := g.Wait(); err != nil {
-		return nil, err
+		if shipsRootfs {
+			g.Go(func() error {
+				t := time.Now()
+				err := tarRootfsUpper(gctx, rootfsUpperDir(actorDirs), checkpointDir, containerNames(req.GetSpec().GetContainers()))
+				dUpper = time.Since(t)
+				return err
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
 	}
 
-	// Tear down the VMM and overlay mounts before taking the btrfs snapshot so
-	// activeDir is completely quiescent and can be kept in place for the next
-	// RestoreWorkload without destroying and re-snapshotting it.
+	// Tear down the VMM and overlay mounts after capturing the snapshot.
 	tTeardown := time.Now()
 	if err := s.terminateWorkloadAfterCheckpoint(ctx, attribution, actorDirs, !useBtrfs); err != nil {
 		slog.WarnContext(ctx, "failed to terminate workload after checkpoint",
@@ -281,8 +306,6 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 			slog.String("actorUID", actorUID),
 			slog.Any("err", err))
 	}
-	dTeardown = time.Since(tTeardown)
-
 	if useBtrfs {
 		if shipsRootfs {
 			for _, cid := range containerNames(req.GetSpec().GetContainers()) {
@@ -291,13 +314,8 @@ func (s *AteWorkerService) CheckpointWorkload(ctx context.Context, req *ateworke
 		} else {
 			_ = os.RemoveAll(filepath.Join(activeDir, "rootfs-upper"))
 		}
-		if err := writeBtrfsCheckpointToken(activeDir); err != nil {
-			return nil, fmt.Errorf("while writing btrfs checkpoint token: %w", err)
-		}
-		if err := btrfssubvol.Snapshot(activeDir, checkpointDir); err != nil {
-			return nil, fmt.Errorf("while snapshotting active btrfs subvolume: %w", err)
-		}
 	}
+	dTeardown = time.Since(tTeardown)
 
 	// Report exactly the files we wrote so atelet ships precisely this snapshot:
 	// for MEMORY, the CH snapshot (config.json + state.json + memory-ranges +
@@ -382,10 +400,9 @@ func (s *AteWorkerService) snapshotVMStateBtrfs(ctx context.Context, client *ch.
 		return 0, fmt.Errorf("while writing %s: %w", baseIDFile, err)
 	}
 
-	// Keep active/memory-ranges in place: it is the VM's live MAP_SHARED
-	// backing file, so cloud-hypervisor skips writing memory-ranges during
-	// vm.snapshot and only writes config.json and state.json.
-	for _, f := range []string{"config.json", "state.json"} {
+	// Remove any previous memory-ranges so cloud-hypervisor writes a fresh
+	// sequential memory-ranges dump into the active btrfs subvolume.
+	for _, f := range []string{"config.json", "state.json", memoryRangesFile} {
 		_ = os.Remove(filepath.Join(activeDir, f))
 	}
 	slog.InfoContext(ctx, "Snapshotting guest into active btrfs subvolume", slog.String("id", actorUID), slog.String("dir", activeDir))

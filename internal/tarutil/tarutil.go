@@ -121,6 +121,29 @@ func CreateFilteredWithRoot(ctx context.Context, tarPath, srcDir string, skip Sk
 	return create(ctx, tarPath, srcDir, skip, true)
 }
 
+// WriteWithRoot writes a tar archive of srcDir's contents plus a "./" entry
+// carrying srcDir's own mode, ownership, modification time, and xattrs directly
+// to dst without creating a file on disk.
+func WriteWithRoot(ctx context.Context, dst io.Writer, srcDir string) error {
+	bw := tarWriterPool.Get().(*bufio.Writer)
+	bw.Reset(dst)
+	defer func() {
+		bw.Reset(nil)
+		tarWriterPool.Put(bw)
+	}()
+	tw := tar.NewWriter(bw)
+	if err := writeTree(ctx, tw, srcDir, nil, true); err != nil {
+		return err
+	}
+	if err := tw.Close(); err != nil {
+		return fmt.Errorf("closing tar stream for %q: %w", srcDir, err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flushing tar stream for %q: %w", srcDir, err)
+	}
+	return nil
+}
+
 func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeRoot bool) error {
 	f, err := os.Create(tarPath)
 	if err != nil {
@@ -163,12 +186,100 @@ func create(ctx context.Context, tarPath, srcDir string, skip SkipFunc, includeR
 //
 // Every read goes through an os.Root rooted at srcDir, so an entry swapped for
 // a symlink mid-walk cannot make the archive capture a file outside srcDir.
+func startSmallFilePrefetch(ctx context.Context, root *os.Root) (advance func(), stop func()) {
+	const (
+		prefetchWindow  = 32
+		prefetchWorkers = 16
+		maxPrefetchSize = 4 << 20
+	)
+	credits := make(chan struct{}, prefetchWindow)
+	for range prefetchWindow {
+		credits <- struct{}{}
+	}
+	stopCh := make(chan struct{})
+	pathsCh := make(chan string, prefetchWindow)
+	var wg sync.WaitGroup
+
+	for range prefetchWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for rel := range pathsCh {
+				select {
+				case <-stopCh:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+				f, err := root.OpenFile(rel, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+				if err != nil {
+					continue
+				}
+				if fi, err := f.Stat(); err == nil && fi.Mode().IsRegular() && fi.Size() > 0 && fi.Size() <= maxPrefetchSize {
+					_, _ = copyPooled(io.Discard, f)
+				}
+				_ = f.Close()
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(pathsCh)
+		_ = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if !d.Type().IsRegular() {
+				return nil
+			}
+			select {
+			case <-stopCh:
+				return fs.SkipAll
+			case <-ctx.Done():
+				return fs.SkipAll
+			case <-credits:
+			}
+			select {
+			case <-stopCh:
+				return fs.SkipAll
+			case <-ctx.Done():
+				return fs.SkipAll
+			case pathsCh <- rel:
+			}
+			return nil
+		})
+	}()
+
+	var stopOnce sync.Once
+	return func() {
+			select {
+			case credits <- struct{}{}:
+			default:
+			}
+		}, func() {
+			stopOnce.Do(func() {
+				close(stopCh)
+				wg.Wait()
+			})
+		}
+}
+
 func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc, includeRoot bool) error {
 	root, err := os.OpenRoot(srcDir)
 	if err != nil {
 		return fmt.Errorf("opening %q: %w", srcDir, err)
 	}
 	defer root.Close()
+
+	advancePrefetch := func() {}
+	if skip == nil {
+		var stopPrefetch func()
+		advancePrefetch, stopPrefetch = startSmallFilePrefetch(ctx, root)
+		defer stopPrefetch()
+	}
 
 	// Maps an already-archived multi-link inode to the name it was archived
 	// under, so later links become tar hardlink entries instead of copies.
@@ -247,6 +358,7 @@ func writeTree(ctx context.Context, tw *tar.Writer, srcDir string, skip SkipFunc
 
 		switch {
 		case info.Mode().IsRegular():
+			advancePrefetch()
 			// A second link to an already-archived inode: record the link and
 			// skip the contents.
 			if key, ok := inodeOf(info); ok && info.Sys() != nil && nlinkOf(info) > 1 {
@@ -619,7 +731,7 @@ func readOverlayXattrs(root *os.Root, name string) (map[string]string, error) {
 
 	sz, err := unix.Llistxattr(path, nil)
 	if err != nil {
-		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) {
+		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
 			return nil, nil
 		}
 		return nil, err
@@ -629,6 +741,9 @@ func readOverlayXattrs(root *os.Root, name string) (map[string]string, error) {
 	}
 	buf := make([]byte, sz)
 	if sz, err = unix.Llistxattr(path, buf); err != nil {
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -639,11 +754,17 @@ func readOverlayXattrs(root *os.Root, name string) (map[string]string, error) {
 		}
 		vsz, err := unix.Lgetxattr(path, attr, nil)
 		if err != nil {
+			if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENODATA) {
+				continue
+			}
 			return nil, err
 		}
 		val := make([]byte, vsz)
 		if vsz > 0 {
 			if vsz, err = unix.Lgetxattr(path, attr, val); err != nil {
+				if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.ENODATA) {
+					continue
+				}
 				return nil, err
 			}
 			val = val[:vsz]

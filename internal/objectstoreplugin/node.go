@@ -29,8 +29,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"go.ate.dev/substrate/internal/resources"
+	"go.ate.dev/substrate/internal/tarutil"
 	"go.ate.dev/substrate/pkg/objectstorage"
 	objectstorev1 "go.ate.dev/substrate/pkg/proto/objectstorepb/v1"
 	"golang.org/x/sync/errgroup"
@@ -169,6 +171,22 @@ func (p *NodePlugin) UploadSnapshot(ctx context.Context, req *objectstorev1.Uplo
 		if err != nil {
 			return fmt.Errorf("while addressing %s in GCS: %w", fileName, err)
 		}
+		if info.Size() == 0 {
+			if relDir, ok := resolveSnapshotTreeDir(root, fileName); ok {
+				treePath := filepath.Join(p.root, srcDir, relDir)
+				err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
+					pr, pw := io.Pipe()
+					go func() {
+						_ = pw.CloseWithError(tarutil.WriteWithRoot(ctx, pw, treePath))
+					}()
+					return uploader.SendStream(ctx, objectURI, pr)
+				})
+				if err != nil {
+					return fmt.Errorf("while streaming %s (%s) to GCS: %w", fileName, relDir, err)
+				}
+				return nil
+			}
+		}
 		err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
 			if err := rewind(local); err != nil {
 				return err
@@ -286,4 +304,29 @@ func (p *NodePlugin) openDir(rel string) (*os.Root, error) {
 	}
 	defer base.Close()
 	return base.OpenRoot(rel)
+}
+
+func resolveSnapshotTreeDir(root *os.Root, fileName string) (string, bool) {
+	if st, err := root.Stat(fileName + ".tree"); err == nil && st.IsDir() {
+		return fileName + ".tree", true
+	}
+	if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
+		vol = strings.TrimSuffix(vol, ".tar")
+		if vol != "" && filepath.IsLocal(vol) {
+			rel := filepath.Join("durable-dir", vol)
+			if st, err := root.Stat(rel); err == nil && st.IsDir() {
+				return rel, true
+			}
+		}
+	}
+	if cid, ok := strings.CutPrefix(fileName, "rootfs-upper-"); ok && strings.HasSuffix(cid, ".tar") {
+		cid = strings.TrimSuffix(cid, ".tar")
+		if cid != "" && filepath.IsLocal(cid) {
+			rel := filepath.Join("rootfs-upper", cid, "fs")
+			if st, err := root.Stat(rel); err == nil && st.IsDir() {
+				return rel, true
+			}
+		}
+	}
+	return "", false
 }
