@@ -1257,7 +1257,18 @@ func (s *Atelet) moveLocalCheckpoint(ctx context.Context, req *ateletpb.Checkpoi
 			if !info.Mode().IsRegular() {
 				return fmt.Errorf("checkpoint file %s is not a regular file", fileName)
 			}
-			recordSnapshotSize(ctx, fileName, sparsefile.AllocatedBytes(info), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
+			sizeInfo := info
+			if info.Size() == 0 {
+				if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
+					vol = strings.TrimSuffix(vol, ".tar")
+					if vol != "" && filepath.IsLocal(vol) {
+						if ext4Info, eerr := root.Lstat(filepath.Join(checkpointDir, "durable-dir", vol+".ext4")); eerr == nil && ext4Info.Mode().IsRegular() {
+							sizeInfo = ext4Info
+						}
+					}
+				}
+			}
+			recordSnapshotSize(ctx, fileName, sparsefile.AllocatedBytes(sizeInfo), req.GetActorTemplateAtespace(), req.GetActorTemplateName())
 		}
 		if err := root.WriteFile(filepath.Join(checkpointDir, sandboxManifestName), manifest, 0o600); err != nil {
 			return fmt.Errorf("while writing snapshot manifest: %w", err)

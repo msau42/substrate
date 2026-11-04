@@ -191,7 +191,10 @@ func (s *AteWorkerService) RestoreWorkload(ctx context.Context, req *ateworkerpb
 	// that means before the share's virtiofsd starts, for the lower fidelities
 	// before the workload cold-starts.
 	if hasDurableVolumes(p.containers) {
-		if err := untarDurableVolumes(durableDir, restoreDir, durableVolumeNames(p.containers)); err != nil {
+		if err := untarDurableVolumes(durableDir, restoreDir, durableVolumeNames(p.containers), req.GetPreserveRestoreDir()); err != nil {
+			return nil, err
+		}
+		if err := ensureDurableMountDirs(durableDir, p.containers); err != nil {
 			return nil, err
 		}
 	}
@@ -286,7 +289,7 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 	// sockets and files, and the kernel and guest image atelet staged under
 	// this actor's own directory.
 	memFile := guestMemoryFile(p.actorDirs)
-	if err := rewriteSnapshotPathsWithMemFile(restoreDir, actorUID, kernel, image, memFile); err != nil {
+	if err := rewriteSnapshotPathsWithMemAndDurable(restoreDir, actorUID, kernel, image, memFile, durableMountsDir(p.actorDirs)); err != nil {
 		return fmt.Errorf("while rewriting snapshot paths: %w", err)
 	}
 	srcID := actorUID
@@ -418,6 +421,12 @@ func (s *AteWorkerService) restoreMemoryFidelity(ctx context.Context, p actorBoo
 		slog.String("mode", memMode), slog.String("vmm_version", client.Info().Version))
 	if err := client.RestoreWithNetFDs(ctx, restoreDir, restoredNets, memMode); err != nil {
 		return fmt.Errorf("while restoring VM with net FDs: %w", err)
+	}
+	if hasDurableVolumes(p.containers) {
+		if err := enablePmemHugepages(chProc.PID(), durableMountsDir(p.actorDirs)); err != nil {
+			slog.WarnContext(ctx, "failed to enable hugepages on restored durable pmem mapping",
+				slog.String("actorUID", actorUID), slog.Any("err", err))
+		}
 	}
 	tVMRestore := time.Now()
 	// An eager restore has read the whole snapshot into guest memory, and nothing
@@ -631,10 +640,14 @@ func restoreGuestReadyError(ctx context.Context, step string, err error) error {
 // identifies the runtime (asset URLs today, a SandboxConfig hash later)
 // changes none of this. The overlay has no per-actor disk to repoint.
 func rewriteSnapshotPaths(snapshotDir, id, kernel, image string) error {
-	return rewriteSnapshotPathsWithMemFile(snapshotDir, id, kernel, image, "")
+	return rewriteSnapshotPathsWithMemAndDurable(snapshotDir, id, kernel, image, "", "")
 }
 
 func rewriteSnapshotPathsWithMemFile(snapshotDir, id, kernel, image, memFile string) error {
+	return rewriteSnapshotPathsWithMemAndDurable(snapshotDir, id, kernel, image, memFile, "")
+}
+
+func rewriteSnapshotPathsWithMemAndDurable(snapshotDir, id, kernel, image, memFile, durableDir string) error {
 	cfgPath := filepath.Join(snapshotDir, "config.json")
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -711,12 +724,24 @@ func rewriteSnapshotPathsWithMemFile(snapshotDir, id, kernel, image, memFile str
 		if !ok {
 			return fmt.Errorf("snapshot config %q has a malformed pmem device", cfgPath)
 		}
-		switch pmID, _ := pmm["id"].(string); pmID {
-		case guestImagePmemID:
+		switch pmID, _ := pmm["id"].(string); {
+		case pmID == guestImagePmemID:
 			guestImage = true
 			if got, _ := pmm["file"].(string); got != image {
 				pmm["file"] = image
 				changed = true
+			}
+		case strings.HasPrefix(pmID, durablePmemIDPrefix):
+			vol := strings.TrimPrefix(pmID, durablePmemIDPrefix)
+			if vol == "" || vol == "." || strings.Contains(vol, "/") || !filepath.IsLocal(vol) {
+				return fmt.Errorf("snapshot config %q has pmem device with invalid durable volume id %q", cfgPath, pmID)
+			}
+			if durableDir != "" {
+				want := filepath.Join(durableDir, vol+".ext4")
+				if got, _ := pmm["file"].(string); got != want {
+					pmm["file"] = want
+					changed = true
+				}
 			}
 		default:
 			return fmt.Errorf("snapshot config %q has pmem device with unknown id %q", cfgPath, pmID)

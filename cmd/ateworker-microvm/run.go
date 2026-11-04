@@ -128,6 +128,10 @@ const (
 	// guestImagePmemID names the virtio-pmem device that carries the guest
 	// image, in the VM config and so in every snapshot's config.json.
 	guestImagePmemID = "guest-image"
+
+	// durablePmemIDPrefix prefixes the ID of each durable-dir volume's
+	// virtio-pmem device in the VM config and snapshot's config.json.
+	durablePmemIDPrefix = "durable-"
 )
 
 // kataAgentPath is where the kata guest image keeps the agent binary. buildVMConfig
@@ -532,6 +536,14 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 	consoleLog := kata.ConsoleLogPath(actorUID)
 	vmCfg := buildVMConfig(actorUID, kernel, image, kparams, consoleLog, memMiB, vcpus,
 		agentInit(ctx, client.Info()), s.guestDebug)
+	durableVols := durableVolumeNames(containers)
+	for _, vol := range durableVols {
+		vmCfg.Pmem = append(vmCfg.Pmem, ch.PmemConfig{
+			ID:            durablePmemIDPrefix + vol,
+			File:          durableVolumeImagePath(p.actorDirs, vol),
+			DiscardWrites: false,
+		})
+	}
 	if memFile := guestMemoryFile(p.actorDirs); memFile != "" {
 		memBytes := int64(memMiB) * 1024 * 1024
 		if err := prepareGuestMemoryFile(memFile, memBytes); err != nil {
@@ -549,6 +561,12 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 	}
 	if err := client.CreateVM(ctx, vmCfg); err != nil {
 		return fmt.Errorf("while creating VM: %w", err)
+	}
+	if len(durableVols) > 0 {
+		if err := enablePmemHugepages(chProc.PID(), durableMountsDir(p.actorDirs)); err != nil {
+			slog.WarnContext(ctx, "failed to enable hugepages on durable pmem mapping",
+				slog.String("actorUID", actorUID), slog.Any("err", err))
+		}
 	}
 
 	// Network device: build the actor's tap and add a virtio-net to the created
@@ -603,7 +621,7 @@ func (s *AteWorkerService) coldBootActor(ctx context.Context, p actorBootParams)
 	}()
 
 	// Post-boot kata-agent setup: sandbox, guest networking, start each container.
-	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs); err != nil {
+	if err := s.startActorContainers(ctx, ac, actorUID, vsockPath, ctrs, durableVols); err != nil {
 		return err
 	}
 	tContainers := time.Now()
@@ -717,7 +735,7 @@ func (s *AteWorkerService) stageMergedRootfs(ctx context.Context, rr resolvedRun
 		}
 	}
 	if hasDurableVolumes(containers) {
-		if err := s.stageDurableVolumes(ctx, id, durableMountsDir(actorDirs)); err != nil {
+		if err := s.stageDurableVolumes(ctx, id, durableVolumeNames(containers)); err != nil {
 			return nil, fmt.Errorf("while staging durable-dir volumes: %w", err)
 		}
 	}
@@ -869,15 +887,25 @@ func buildFsConfigs(id string) []ch.FsConfig {
 // does at boot: establish the sandbox once (mounting the kataShared virtio-fs base),
 // configure guest networking (eth0 IP/MAC/MTU + routes) once, then start each
 // container on its own overlay rootfs. On failure it dumps guest diagnostics.
-func (s *AteWorkerService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer) error {
+func (s *AteWorkerService) startActorContainers(ctx context.Context, ac *kata.AgentClient, id, vsockPath string, ctrs []actorContainer, durableVols []string) error {
 	// Establish the agent sandbox + the kataShared virtio-fs mount (every
 	// container's merged rootfs, durable volumes, CSI volumes, and system-info
 	// volumes). All containers share it, so use the first container's hostname.
 	tStart := time.Now()
+	pmemMounts := make([]kata.PmemMount, len(durableVols))
+	for i, vol := range durableVols {
+		pmemMounts[i] = kata.PmemMount{
+			Device:     fmt.Sprintf("/dev/pmem%d", 1+i),
+			Fstype:     "ext4",
+			Options:    []string{"rw", "dax", "noatime"},
+			MountPoint: filepath.Join(ocispec.GuestSharedDir, ocispec.ShareDurable, vol),
+		}
+	}
 	sbCtx, sbCancel := context.WithTimeout(ctx, 20*time.Second)
 	err := ac.CreateSandboxForActor(sbCtx, kata.CreateSandboxOpts{
 		SandboxID: id,
 		Hostname:  ctrs[0].spec.Hostname,
+		Pmem:      pmemMounts,
 	})
 	sbCancel()
 	if err != nil {

@@ -172,6 +172,23 @@ func (p *NodePlugin) UploadSnapshot(ctx context.Context, req *objectstorev1.Uplo
 			return fmt.Errorf("while addressing %s in GCS: %w", fileName, err)
 		}
 		if info.Size() == 0 {
+			if relExt4, ok := resolveSnapshotExt4File(root, fileName); ok {
+				ext4File, err := root.Open(relExt4)
+				if err != nil {
+					return fmt.Errorf("while opening %s (%s) in snapshot directory: %w", fileName, relExt4, err)
+				}
+				defer ext4File.Close()
+				err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
+					if err := rewind(ext4File); err != nil {
+						return err
+					}
+					return uploader.SendFile(ctx, objectURI, ext4File)
+				})
+				if err != nil {
+					return fmt.Errorf("while uploading %s (%s) to GCS: %w", fileName, relExt4, err)
+				}
+				return nil
+			}
 			if relDir, ok := resolveSnapshotTreeDir(root, fileName); ok {
 				treePath := filepath.Join(p.root, srcDir, relDir)
 				err = tr.do(ctx, func(_ objectstorage.ObjectStorage, uploader *objectstorage.Uploader) error {
@@ -304,6 +321,19 @@ func (p *NodePlugin) openDir(rel string) (*os.Root, error) {
 	}
 	defer base.Close()
 	return base.OpenRoot(rel)
+}
+
+func resolveSnapshotExt4File(root *os.Root, fileName string) (string, bool) {
+	if vol, ok := strings.CutPrefix(fileName, "durable-dir-"); ok && strings.HasSuffix(vol, ".tar") {
+		vol = strings.TrimSuffix(vol, ".tar")
+		if vol != "" && filepath.IsLocal(vol) {
+			rel := filepath.Join("durable-dir", vol+".ext4")
+			if st, err := root.Stat(rel); err == nil && st.Mode().IsRegular() {
+				return rel, true
+			}
+		}
+	}
+	return "", false
 }
 
 func resolveSnapshotTreeDir(root *os.Root, fileName string) (string, bool) {

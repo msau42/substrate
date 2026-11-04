@@ -167,6 +167,38 @@ func TestRewriteSnapshotPaths(t *testing.T) {
 		})
 	}
 
+	t.Run("durable pmem device is repointed", func(t *testing.T) {
+		dir := writeSnapshotConfig(t, []map[string]any{
+			{"tag": kata.FsTag, "socket": "/run/vc/vm/golden/virtiofsd.sock"},
+		})
+		mutateSnapshotConfig(t, dir, func(cfg map[string]any) {
+			cfg["pmem"] = []map[string]any{
+				{"id": guestImagePmemID, "file": "/var/lib/ate/actors/golden/sandbox-assets/kata-image", "discard_writes": true},
+				{"id": durablePmemIDPrefix + "work", "file": "/var/lib/ate/snapshots/golden/active/durable-dir/work.ext4", "discard_writes": false},
+			}
+		})
+		durableDir := "/var/lib/ate/snapshots/actor-uid/active/durable-dir"
+		if err := rewriteSnapshotPathsWithMemAndDurable(dir, id, kernel, image, "", durableDir); err != nil {
+			t.Fatalf("rewriteSnapshotPathsWithMemAndDurable: %v", err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "config.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			Pmem []struct {
+				ID   string `json:"id"`
+				File string `json:"file"`
+			} `json:"pmem"`
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if len(cfg.Pmem) != 2 || cfg.Pmem[1].File != filepath.Join(durableDir, "work.ext4") {
+			t.Errorf("pmem = %+v, want durable-work repointed to %s/work.ext4", cfg.Pmem, durableDir)
+		}
+	})
+
 	t.Run("unknown pmem device is an error", func(t *testing.T) {
 		dir := writeSnapshotConfig(t, []map[string]any{
 			{"tag": kata.FsTag, "socket": "/run/vc/vm/golden/virtiofsd.sock"},

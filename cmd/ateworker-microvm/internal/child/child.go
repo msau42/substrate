@@ -62,6 +62,14 @@ func (p *Process) Done() <-chan struct{} {
 	return p.done
 }
 
+// PID returns the OS process ID of the child process.
+func (p *Process) PID() int {
+	if p == nil || p.cmd == nil || p.cmd.Process == nil {
+		return 0
+	}
+	return p.cmd.Process.Pid
+}
+
 // Stop kills the process and waits until it is reaped. After Stop, Stopped
 // reports true, so a watcher on Done can tell this exit from a crash.
 func (p *Process) Stop() {
